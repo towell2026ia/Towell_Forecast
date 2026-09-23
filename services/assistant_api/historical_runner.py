@@ -20,6 +20,8 @@ from services.ensemble_engine.engine import EnsembleConfig
 
 from .data_provider import DataProvider
 from .availability import GATE_VERSION, TemporalAvailabilityAuditor, _identity
+from .evidence_registry import EvidenceRegistry, VintageRegistry
+from .persistence import LocalPersistenceProvider, PersistenceProvider
 from .runner import EnginePipeline, ExistingEnginePipeline, LocalResearchProvider, ResearchProvider, _atomic_json, _next_period, _utc, LOGGER
 
 
@@ -111,19 +113,111 @@ class HistoricalForecastRunner:
     }
 
     def __init__(self, provider: DataProvider, research: ResearchProvider | None = None,
-                 pipeline: EnginePipeline | None = None, state_dir: Path | None = None):
+                 pipeline: EnginePipeline | None = None, state_dir: Path | None = None,
+                 persistence: PersistenceProvider | None = None):
         self.provider = provider
         self.research = research or LocalResearchProvider()
         self.pipeline = pipeline or ExistingEnginePipeline()
         self.state_dir = Path(state_dir) if state_dir else Path(__file__).resolve().parent / "state" / "historical"
         self.availability = TemporalAvailabilityAuditor(provider, self.state_dir)
+        self.persistence = persistence or LocalPersistenceProvider(self.state_dir / "historical.sqlite3")
+        self.evidence = EvidenceRegistry(self.persistence, self.availability)
+        self.vintage_registry = VintageRegistry(self.persistence, self.state_dir)
         self._cancel = threading.Event()
+
+    def harden_evidence(self, source_dir: Path) -> dict[str, Any]:
+        """Verify source bytes/cells and register a frozen vintage without changing its JSON."""
+        manifests = [self.evidence.register_local_source(source_dir, rule_id)
+                     for rule_id, rule in self.availability.registry.rules.items()
+                     if rule.get("enabled") and rule.get("source_file")]
+        imported = []
+        for run_path in sorted((self.state_dir / "runs").glob("*.json")):
+            run = json.loads(run_path.read_text(encoding="utf-8"))
+            if run.get("status") != "COMPLETED" or not run.get("vintage_id"):
+                continue
+            snapshot_path = self.state_dir / "data" / f"{run['data_snapshot_id']}.json"
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            source_hashes = {row.get("source_sha256", "").lower() for row in snapshot["rows"]}
+            matching = [item for item in manifests if item["sha256"] in source_hashes]
+            if len(matching) != 1:
+                continue
+            imported.append(self.vintage_registry.import_frozen(run["vintage_id"],
+                          matching[0]["evidence_manifest_id"]))
+            self.persistence.put("research_snapshots", run["research_snapshot_id"],
+                                 json.loads((self.state_dir / "research" / f"{run['research_snapshot_id']}.json").read_text(encoding="utf-8")))
+            self.persistence.put("data_snapshots", run["data_snapshot_id"], snapshot)
+            self.persistence.put("model_versions", run["run_id"], run.get("versions", {}))
+            self.persistence.put("champion_history", run["run_id"],
+                                 {"run_id": run["run_id"], "champion": run.get("champion"),
+                                  "cutoff_date": run.get("cutoff_date")})
+            evaluation_path = self.state_dir / "evaluations" / f"{run['vintage_id']}.json"
+            if evaluation_path.exists():
+                self.persistence.put("actual_evaluations", run["vintage_id"],
+                                     json.loads(evaluation_path.read_text(encoding="utf-8")))
+        report_path = self.state_dir / "first_vintage.json"
+        if report_path.exists():
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            entry = next((entry for entry in imported if entry["vintage_id"] == report.get("vintage_id")), None)
+            if entry:
+                report.update(status=entry["validation_status"], registry_status=entry["status"],
+                              evidence_level=entry["evidence_level"],
+                              evidence_manifest_id=entry["evidence_manifest_id"])
+                _atomic_json(report_path, report)
+        return {"evidence_manifests": manifests, "registered_vintages": imported}
+
+    def expand_vintages(self, source_dir: Path, start: str = "2023-01", end: str = "2026-08",
+                        *, max_new: int = 3) -> dict[str, Any]:
+        """Only run evidenced, temporally ready cutoffs; never manufacture dates."""
+        if not 1 <= max_new <= 12:
+            raise ValueError("invalid_expansion_limit")
+        evidence = self.persistence.list("source_evidence")
+        existing = {item.get("cutoff_date", "")[:7] for item in self.vintage_registry.all()}
+        accepted, blocked = [], []
+        for period in _period_range(start, end):
+            if period in existing:
+                continue
+            dates = sorted({item["evidence_date"] for item in evidence
+                            if item.get("evidence_level") in {"E1", "E2", "E3"} and
+                            item.get("evidence_date", "")[:7] == period})
+            if not dates:
+                blocked.append({"period": period, "reason": "no_registered_temporal_evidence"})
+                continue
+            candidates = [self.availability.validate_temporal_readiness(period, cutoff=day) for day in dates]
+            candidate = next((item for item in candidates if item["ready"]), None)
+            if candidate is None:
+                blocked.append({"period": period, "reason": candidates[-1]["status"]})
+                continue
+            if len(accepted) >= max_new:
+                break
+            run = self.run_month(period, cutoff_date=candidate["cutoff"])
+            if run.get("status") == "COMPLETED":
+                registered = self.harden_evidence(source_dir)["registered_vintages"]
+                if any(item["vintage_id"] == run["vintage_id"] for item in registered):
+                    accepted.append(run["vintage_id"])
+                else:
+                    blocked.append({"period": period, "reason": "completed_but_unregistered"})
+            else:
+                blocked.append({"period": period, "reason": run.get("status")})
+        return {"new_vintage_ids": accepted, "blocked": blocked,
+                "registered_vintages": len(self.vintage_registry.all())}
 
     def _log(self, run_id: str, period: str | None, step: str, status: str,
              duration: float | None = None, **extra: Any) -> None:
         LOGGER.info(json.dumps({"timestamp": _utc(), "run_id": run_id, "period": period,
                                 "step": step, "status": status, "duration": duration, **extra},
                                ensure_ascii=False))
+
+    def _persist_monthly_run(self, run: dict[str, Any]) -> None:
+        self.persistence.put("monthly_runs", run["run_id"], run)
+        for number, event in enumerate(run.get("events", []), 1):
+            self.persistence.put("run_logs", f"{run['run_id']}-{number:03d}",
+                                 {"run_id": run["run_id"], **event})
+        evaluation = run.get("evaluation")
+        if evaluation and run.get("vintage_id"):
+            self.persistence.put("actual_evaluations", run["vintage_id"], evaluation)
+            self.persistence.put("performance_metrics", run["vintage_id"],
+                                 {"vintage_id": run["vintage_id"],
+                                  "metrics": evaluation.get("metrics", {})})
 
     def _scope_rows(self, config: HistoricalRunConfig) -> list[dict[str, str]]:
         return [row for row in self.provider.records()
@@ -195,10 +289,12 @@ class HistoricalForecastRunner:
                               if key not in {"created_at", "generated_at", "content_hash", "snapshot_id", "hash"}}
             if stored.get("hash") != _digest(stored_content) or stored.get("hash") != filtered["hash"] or not stored.get("frozen"):
                 raise ValueError("research_snapshot_integrity_failed")
+            self.persistence.put("research_snapshots", stored["snapshot_id"], stored)
             return stored
         filtered["created_at"] = _utc()
         filtered.pop("generated_at", None)
         _immutable_json(path, filtered)
+        self.persistence.put("research_snapshots", filtered["snapshot_id"], filtered)
         return filtered
 
     def _data_snapshot(self, period: str, cutoff: str, config: HistoricalRunConfig) -> dict[str, Any]:
@@ -228,6 +324,8 @@ class HistoricalForecastRunner:
         snapshot = {**content, "snapshot_id": f"DS-FENDI-{period}-{digest[:12]}",
                     "hash": digest, "frozen": True}
         _immutable_json(self.state_dir / "data" / f"{snapshot['snapshot_id']}.json", snapshot)
+        self.persistence.put("availability_audits", manifest["manifest_id"], manifest)
+        self.persistence.put("data_snapshots", snapshot["snapshot_id"], snapshot)
         return snapshot
 
     def _history(self, snapshot: dict[str, Any], period: str) -> dict[str, Any]:
@@ -429,6 +527,7 @@ class HistoricalForecastRunner:
             run["finished_at"] = _utc()
             run["durations"]["total"] = round(time.monotonic() - started + research_duration + data_duration, 4)
             _atomic_json(path, run)
+            self._persist_monthly_run(run)
             self._log(run_id, period, "finished", run["status"], run["durations"]["total"])
             return run
         try:
@@ -526,6 +625,18 @@ class HistoricalForecastRunner:
         run["finished_at"] = _utc()
         run["durations"]["total"] = round(time.monotonic() - started + research_duration + data_duration, 4)
         _atomic_json(path, run)
+        self._persist_monthly_run(run)
+        if run.get("status") == "COMPLETED":
+            self.persistence.put("forecast_vintages", vintage["vintage_id"], vintage)
+            self.persistence.put("model_versions", run_id, run.get("versions", {}))
+            self.persistence.put("champion_history", run_id,
+                                 {"run_id": run_id, "champion": run.get("champion"), "cutoff_date": cutoff})
+            for horizon, row in enumerate(vintage["forecasts"], 1):
+                self.persistence.put("forecast_horizons", f"{vintage['vintage_id']}-{horizon:02d}",
+                                     {"vintage_id": vintage["vintage_id"], "horizon": horizon, "forecast": row})
+                self.persistence.put("forecast_bands", f"{vintage['vintage_id']}-{horizon:02d}",
+                                     {"vintage_id": vintage["vintage_id"], "horizon": horizon,
+                                      "bands": row.get("probability", {})})
         self._log(run_id, period, "finished", run["status"], run["durations"]["total"],
                   warnings=run["warnings"], error=run["errors"][-1] if run["errors"] else None)
         return run
@@ -538,6 +649,7 @@ class HistoricalForecastRunner:
                "errors": [{"step": "RESEARCH", "code": type(exc).__name__}],
                "started_at": _utc(), "finished_at": _utc()}
         _atomic_json(self.state_dir / "runs" / f"{run_id}.json", run)
+        self._persist_monthly_run(run)
         self._log(run_id, period, "RESEARCH", status, error=type(exc).__name__)
         return run
 
@@ -551,6 +663,7 @@ class HistoricalForecastRunner:
         evaluation = self._evaluate({"forecast_towell": vintage["forecasts"]},
                                     HistoricalRunConfig(run["period"], run["period"]))
         _atomic_json(self.state_dir / "evaluations" / f"{run['vintage_id']}.json", evaluation)
+        self.persistence.put("actual_evaluations", run["vintage_id"], evaluation)
         return evaluation
 
     def first_vintage(self, *, start: str = "2023-01", end: str = "2026-08",
@@ -668,6 +781,7 @@ class HistoricalForecastRunner:
         job["status"] = "RUNNING"
         job["started_at"] = job.get("started_at") or _utc()
         _atomic_json(path, job)
+        self.persistence.put("historical_runs", parent_id, job)
         self._log(parent_id, None, "job", "RUNNING")
         for period in periods:
             if resume_from and period < resume_from:
@@ -701,6 +815,7 @@ class HistoricalForecastRunner:
             job["progress"] = {"periods_completed": len([value for value in job["children"].values()
                                                             if value]), "periods_total": len(periods)}
             _atomic_json(path, job)
+            self.persistence.put("historical_runs", parent_id, job)
             if child["status"] == "CANCELLED":
                 job["status"] = "CANCELLED"
                 break
@@ -715,6 +830,7 @@ class HistoricalForecastRunner:
             job["status"] = "COMPLETED_WITH_WARNINGS"
         job["finished_at"] = _utc()
         _atomic_json(path, job)
+        self.persistence.put("historical_runs", parent_id, job)
         self._log(parent_id, None, "job", job["status"], summary=job["summary"])
         return job
 

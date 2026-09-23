@@ -28,6 +28,7 @@ SOURCES = {"system_timestamp", "source_file_timestamp", "monthly_closure",
            "business_rule", "manual_verified", "unknown"}
 CONFIDENCE = {"verified", "documented", "inferred", "unknown"}
 OFFICIAL_CONFIDENCE = {"verified", "documented"}
+EVIDENCE_LEVELS = {"E1", "E2", "E3", "E4", "E5", "E6"}
 OBJECTIVES = {"venta": "sales", "pedido": "orders", "entrega": "deliveries",
               "fcst cliente": "customer_forecast", "forecast cliente": "customer_forecast",
               "fcst towell": "prior_towell_forecast", "forecast towell": "prior_towell_forecast",
@@ -482,10 +483,24 @@ class TemporalAvailabilityAuditor:
             if eligible:
                 by_field[field][1] += 1
                 by_period[row.get("period", "")][1] += 1
+            source = row.get("availability_source")
+            rule = self.registry.rules.get(row.get("availability_rule_id", ""), {})
+            if row.get("availability_confidence") == "inferred":
+                evidence_level = "E5"
+            elif row.get("availability_confidence") == "unknown":
+                evidence_level = "E6"
+            elif source == "source_file_timestamp" and rule.get("source_file") and rule.get("sha256"):
+                evidence_level = "E3"
+            elif source in {"business_rule", "monthly_closure", "manual_verified"}:
+                evidence_level = "E4"
+            else:
+                # A naked timestamp is not an immutable corporate system log.
+                evidence_level = "E6"
             matrix.append({"record_id": _identity(raw), "period": row.get("period"), "field": field,
                            "value": row.get("value"), "available_at": row.get("available_at") or None,
                            "source": row.get("availability_source"),
                            "confidence": row.get("availability_confidence"),
+                           "evidence_level": evidence_level,
                            "rule_id": row.get("availability_rule_id") or None, "eligible": eligible})
         def coverage(values: list[int]) -> float | None:
             return round(values[1] / values[0] * 100, 2) if values[0] else None
@@ -500,6 +515,7 @@ class TemporalAvailabilityAuditor:
                 "statuses": dict(counts), "periods": readiness, "first_valid_period": first,
                 "records_audited": len(matrix), "temporal_coverage": coverage([len(matrix), len(eligible_ids)]),
                 "confidence_counts": confidence_counts,
+                "evidence_level_counts": dict(Counter(row["evidence_level"] for row in matrix)),
                 "coverage_by_field": {key: coverage(value) for key, value in by_field.items()},
                 "coverage_by_period": {key: coverage(value) for key, value in by_period.items()},
                 "exclusion_reasons": last_gate["exclusion_reasons"], "matrix": matrix}

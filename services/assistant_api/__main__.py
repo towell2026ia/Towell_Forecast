@@ -34,6 +34,14 @@ def main() -> None:
     first_vintage.add_argument("--start", default="2023-01")
     first_vintage.add_argument("--end", default="2026-08")
     first_vintage.add_argument("--force-rerun", action="store_true")
+    harden = commands.add_parser("evidence-harden")
+    harden.add_argument("--source-dir", type=Path, required=True)
+    expansion = commands.add_parser("vintage-expand")
+    expansion.add_argument("--source-dir", type=Path, required=True)
+    expansion.add_argument("--start", default="2023-01")
+    expansion.add_argument("--end", default="2026-08")
+    expansion.add_argument("--max-new", type=int, default=3)
+    commands.add_parser("vintage-registry")
     historical = commands.add_parser("historical")
     historical.add_argument("--start", required=True)
     historical.add_argument("--end", required=True)
@@ -63,6 +71,13 @@ def main() -> None:
     elif args.command == "availability-first-vintage":
         result = runner.first_vintage(start=args.start, end=args.end,
                                       force_rerun=args.force_rerun)
+    elif args.command == "evidence-harden":
+        result = runner.harden_evidence(args.source_dir)
+    elif args.command == "vintage-expand":
+        result = runner.expand_vintages(args.source_dir, args.start, args.end,
+                                        max_new=args.max_new)
+    elif args.command == "vintage-registry":
+        result = runner.vintage_registry.all()
     elif args.command == "historical":
         result = runner.run_range(args.start, args.end, stop_on_error=not args.continue_on_error,
                                   force_rerun=args.force_rerun)
