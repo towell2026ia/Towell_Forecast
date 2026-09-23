@@ -12,6 +12,8 @@
 
 # testing
 /coverage
+.coverage*
+*.tsbuildinfo
 
 # next.js
 /.next/
@@ -30,6 +32,14 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
+*.db
+*.sqlite
+*.sqlite3
+*.xlsx
+*.xls
+*.log
+*.bak
 
 # vercel
 .vercel
@@ -48,4 +58,5 @@ next-env.d.ts
 __pycache__/
 *.py[cod]
 /.venv/
+/venv/
 /services/assistant_api/state/

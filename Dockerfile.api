@@ -1,0 +1,16 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 APP_ENV=development \
+    API_HOST=0.0.0.0 API_PORT=8000 STATE_DIR=/var/lib/forecast-towell
+WORKDIR /opt/forecast-towell
+COPY services/assistant_api/requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt && \
+    groupadd --system forecast && useradd --system --gid forecast forecast && \
+    mkdir -p /var/lib/forecast-towell && chown forecast:forecast /var/lib/forecast-towell
+COPY --chown=forecast:forecast services ./services
+COPY --chown=forecast:forecast app/data ./app/data
+USER forecast
+EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/live', timeout=3)" || exit 1
+CMD ["python", "-m", "services.assistant_api.serve"]

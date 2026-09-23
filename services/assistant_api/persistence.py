@@ -6,7 +6,7 @@ import hashlib
 import json
 import sqlite3
 from abc import ABC, abstractmethod
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -15,9 +15,9 @@ ENTITIES = (
     "research_snapshots", "data_snapshots", "historical_runs", "monthly_runs",
     "model_versions", "champion_history", "forecast_vintages",
     "forecast_horizons", "forecast_bands", "actual_evaluations",
-    "performance_metrics", "run_logs", "vintage_registry",
+    "performance_metrics", "run_logs", "vintage_registry", "forecast_jobs",
 )
-IMMUTABLE = set(ENTITIES) - {"historical_runs", "monthly_runs", "actual_evaluations", "performance_metrics", "run_logs", "vintage_registry"}
+IMMUTABLE = set(ENTITIES) - {"historical_runs", "monthly_runs", "actual_evaluations", "performance_metrics", "run_logs", "vintage_registry", "forecast_jobs"}
 
 
 def content_hash(payload: dict[str, Any]) -> str:
@@ -27,6 +27,9 @@ def content_hash(payload: dict[str, Any]) -> str:
 
 
 class PersistenceProvider(ABC):
+    def health(self) -> dict[str, str]:
+        return {"status": "healthy", "provider": type(self).__name__}
+
     @abstractmethod
     def put(self, entity: str, key: str, payload: dict[str, Any]) -> None: ...
 
@@ -35,6 +38,9 @@ class PersistenceProvider(ABC):
 
     @abstractmethod
     def list(self, entity: str) -> list[dict[str, Any]]: ...
+
+    @abstractmethod
+    def items(self, entity: str) -> list[dict[str, Any]]: ...
 
 
 class LocalPersistenceProvider(PersistenceProvider):
@@ -92,6 +98,59 @@ class LocalPersistenceProvider(PersistenceProvider):
             keys = [row["id"] for row in connection.execute(f"SELECT id FROM {entity} ORDER BY id")]
         return [value for key in keys if (value := self.get(entity, key)) is not None]
 
+    def items(self, entity: str) -> list[dict[str, Any]]:
+        self._check(entity, "list")
+        with self._connect() as connection:
+            keys = [row["id"] for row in connection.execute(f"SELECT id FROM {entity} ORDER BY id")]
+        return [{"key": key, "payload": self.get(entity, key)} for key in keys]
+
+    def health(self) -> dict[str, str]:
+        try:
+            with self._connect() as connection:
+                result = connection.execute("PRAGMA quick_check").fetchone()[0]
+            return {"status": "healthy" if result == "ok" else "not_ready", "provider": "sqlite"}
+        except (sqlite3.Error, OSError):
+            return {"status": "not_ready", "provider": "sqlite", "error_code": "PERSISTENCE_001"}
+
+    def backup(self, destination: Path) -> dict[str, Any]:
+        target = Path(destination).resolve()
+        if target == self.path.resolve() or target.exists():
+            raise ValueError("backup_target_must_be_new")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with self._connect() as source:
+            with closing(sqlite3.connect(target)) as copy:
+                with copy:
+                    source.backup(copy)
+                    if copy.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                        raise ValueError("backup_integrity_failed")
+        return {"path": str(target), "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
+                "size": target.stat().st_size}
+
+    def restore(self, source: Path, *, confirm: bool = False) -> dict[str, Any]:
+        """Explicit restore with preflight and a recoverable safety backup."""
+        if not confirm:
+            raise ValueError("restore_requires_confirmation")
+        candidate = Path(source).resolve()
+        if not candidate.is_file() or candidate == self.path.resolve():
+            raise ValueError("invalid_restore_source")
+        with closing(sqlite3.connect(f"file:{candidate.as_posix()}?mode=ro", uri=True)) as connection:
+            if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise ValueError("restore_source_corrupt")
+            tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if not set(ENTITIES).issubset(tables):
+                raise ValueError("restore_schema_mismatch")
+        safety = self.path.with_suffix(self.path.suffix + ".pre-restore.bak")
+        if safety.exists():
+            raise ValueError("safety_backup_already_exists")
+        self.backup(safety)
+        with closing(sqlite3.connect(f"file:{candidate.as_posix()}?mode=ro", uri=True)) as origin:
+            with self._connect() as destination:
+                origin.backup(destination)
+        if self.health()["status"] != "healthy":
+            raise ValueError("restored_database_not_ready")
+        return {"restored_from_sha256": hashlib.sha256(candidate.read_bytes()).hexdigest(),
+                "safety_backup": str(safety)}
+
 
 class SupabasePersistenceProvider(PersistenceProvider):
     """Deliberately unconnected adapter boundary; no credentials or silent fallback."""
@@ -104,3 +163,9 @@ class SupabasePersistenceProvider(PersistenceProvider):
 
     def list(self, entity: str) -> list[dict[str, Any]]:
         raise NotImplementedError("supabase_persistence_not_connected")
+
+    def items(self, entity: str) -> list[dict[str, Any]]:
+        raise NotImplementedError("supabase_persistence_not_connected")
+
+    def health(self) -> dict[str, str]:
+        return {"status": "disabled", "provider": "supabase"}

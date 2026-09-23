@@ -13,6 +13,9 @@ DATA = ROOT / "app" / "data"
 
 
 class DataProvider(ABC):
+    def health(self) -> dict[str, str]:
+        return {"status": "healthy", "provider": self.name}
+
     @abstractmethod
     def load(self, name: str) -> dict[str, Any]: ...
 
@@ -53,6 +56,13 @@ class NormalizedDataProvider(DataProvider):
     def name(self) -> str:
         return "normalized"
 
+    def health(self) -> dict[str, str]:
+        required = [self.data_dir / "fendi-engine-series.csv",
+                    *(self.data_dir / name for name in self.FILES.values())]
+        if not all(path.is_file() and path.stat().st_size > 0 for path in required):
+            return {"status": "not_ready", "provider": self.name, "error_code": "DATA_001"}
+        return {"status": "healthy", "provider": self.name}
+
     def load(self, name: str) -> dict[str, Any]:
         if name not in self.FILES:
             raise ValueError("unknown_platform_dataset")
@@ -84,6 +94,9 @@ class SupabaseDataProvider(DataProvider):
     @property
     def name(self) -> str:
         return "supabase"
+
+    def health(self) -> dict[str, str]:
+        return {"status": "disabled", "provider": self.name}
 
     def load(self, name: str) -> dict[str, Any]:
         raise NotImplementedError("supabase_disabled")

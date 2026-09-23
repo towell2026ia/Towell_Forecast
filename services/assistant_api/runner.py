@@ -7,7 +7,6 @@ import csv
 import hashlib
 import json
 import logging
-import os
 import tempfile
 import time
 from abc import ABC, abstractmethod
@@ -16,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .data_provider import DataProvider
+from .persistence import PersistenceProvider
 
 LOGGER = logging.getLogger("forecast_towell.runner")
 if not LOGGER.handlers:
@@ -44,6 +44,9 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 class ResearchProvider(ABC):
+    def health(self) -> dict[str, str]:
+        return {"status": "healthy", "provider": type(self).__name__}
+
     @abstractmethod
     def run(self, cutoff_date: str, chain: str, category: str | None = None, product: str | None = None,
             historical_context: dict[str, Any] | None = None) -> dict[str, Any]: ...
@@ -52,6 +55,11 @@ class ResearchProvider(ABC):
 class LocalResearchProvider(ResearchProvider):
     def __init__(self, source_dir: Path | None = None):
         self.source_dir = Path(source_dir) if source_dir else None
+
+    def health(self) -> dict[str, str]:
+        if self.source_dir and not self.source_dir.is_dir():
+            return {"status": "degraded", "provider": "local", "error_code": "RESEARCH_001"}
+        return {"status": "healthy", "provider": "local"}
 
     def run(self, cutoff_date: str, chain: str, category: str | None = None, product: str | None = None,
             historical_context: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -144,11 +152,13 @@ class MonthlyForecastRunner:
 
     def __init__(self, provider: DataProvider, research: ResearchProvider | None = None,
                  pipeline: EnginePipeline | None = None, state_dir: Path | None = None,
-                 research_failure_policy: str = "fail_closed"):
+                 research_failure_policy: str = "fail_closed",
+                 persistence: PersistenceProvider | None = None):
         self.provider = provider
         self.research = research or LocalResearchProvider()
         self.pipeline = pipeline or ExistingEnginePipeline()
         self.state_dir = Path(state_dir) if state_dir else Path(__file__).resolve().parent / "state"
+        self.persistence = persistence
         if research_failure_policy not in {"fail_closed", "continue_without_signals"}:
             raise ValueError("invalid_research_failure_policy")
         self.research_failure_policy = research_failure_policy
@@ -166,6 +176,7 @@ class MonthlyForecastRunner:
         run_id = f"RUN-FENDI-{period}-{index:03d}"
         path = self.state_dir / "runs" / f"{run_id}.json"
         started = time.monotonic()
+        self._log(run_id, "runner", "run_started", "Queued")
         run: dict[str, Any] = {
             "run_id": run_id, "period": period, "cutoff_date": cutoff, "actor": actor,
             "data_provider": self.provider.name, "research_provider": type(self.research).__name__,
@@ -181,7 +192,8 @@ class MonthlyForecastRunner:
 
         advance("Queued")
         try:
-            if os.getenv("MONTHLY_RUNNER_ENABLED", "true").casefold() != "true":
+            from .settings import Settings
+            if not Settings.from_env().monthly_runner_enabled:
                 raise RuntimeError("monthly_runner_disabled")
             advance("Preparing")
             rows = [row for row in self.provider.records() if row["period"] <= period]
@@ -213,6 +225,8 @@ class MonthlyForecastRunner:
             _atomic_json(snapshot_path, research)
             run["research_snapshot_id"] = research["snapshot_id"]
             run["research_snapshot_path"] = str(snapshot_path)
+            if self.persistence:
+                self.persistence.put("research_snapshots", research["snapshot_id"], research)
             with tempfile.TemporaryDirectory(prefix="fendi-cutoff-") as directory:
                 normalized_csv = Path(directory) / "normalized.csv"
                 with normalized_csv.open("w", encoding="utf-8", newline="") as handle:
@@ -220,11 +234,15 @@ class MonthlyForecastRunner:
                     writer.writeheader()
                     writer.writerows(rows)
                 advance("Running Statistical")
+                self._log(run_id, "statistical", "model_started", "Running")
                 statistical = self.pipeline.statistical(normalized_csv)
+                self._log(run_id, "statistical", "model_completed", "Completed")
                 run["versions"]["statistical"] = statistical["run"]["version"]
                 advance("Running ML")
+                self._log(run_id, "ml", "model_started", "Running")
                 try:
                     ml = self.pipeline.ml(normalized_csv)
+                    self._log(run_id, "ml", "model_completed", "Completed")
                     run["versions"]["ml"] = ml["champion"]["version"]
                 except Exception as exc:
                     ml = None
@@ -232,8 +250,10 @@ class MonthlyForecastRunner:
                                           "fallback": "statistical"})
                     self._log(run_id, "ml", "fallback", "statistical")
                 advance("Running Ensemble")
+                self._log(run_id, "ensemble", "model_started", "Running")
                 try:
                     final = self.pipeline.ensemble(normalized_csv, statistical, ml)
+                    self._log(run_id, "ensemble", "model_completed", "Completed")
                 except Exception as exc:
                     run["errors"].append({"stage": "Running Ensemble", "error": type(exc).__name__,
                                           "fallback": "retained_published_champion"})
@@ -242,6 +262,8 @@ class MonthlyForecastRunner:
                         raise ValueError("no_valid_champion_for_cutoff") from exc
                     final = current
                 run["versions"]["ensemble"] = final["version"]
+                self._log(run_id, "ensemble", "champion_selected", "Completed",
+                          strategy=(final.get("selection", {}).get("official") or {}).get("strategy"))
                 advance("Saving")
                 vintage = {"vintage_id": f"V-{run_id}", "issue_period": period,
                            "forecast_version": final["version"], "research_snapshot_id": research["snapshot_id"],
@@ -260,6 +282,17 @@ class MonthlyForecastRunner:
                     for row in final["forecast_towell"]
                 ]
                 _atomic_json(vintage_path, existing + entries)
+                if self.persistence:
+                    self.persistence.put("forecast_vintages", vintage["vintage_id"], vintage)
+                    self.persistence.put("champion_history", run_id,
+                                         {"run_id": run_id, "selection": final.get("selection", {})})
+                    for row in entries:
+                        self.persistence.put("forecast_horizons", row["vintage_id"], row)
+                    for row in final["forecast_towell"]:
+                        self.persistence.put("forecast_bands", f"{vintage['vintage_id']}-H{row['horizon']:02d}",
+                                             {"vintage_id": vintage["vintage_id"], "horizon": row["horizon"],
+                                              "bands": row.get("probability", {})})
+                self._log(run_id, "forecast", "forecast_saved", "Completed")
             advance("Completed")
         except Exception as exc:
             safe_code = str(exc) if isinstance(exc, ValueError) and str(exc) in {
@@ -272,8 +305,15 @@ class MonthlyForecastRunner:
         run["duration_seconds"] = round(time.monotonic() - started, 3)
         run["finished_at"] = _utc()
         _atomic_json(path, run)
+        if self.persistence:
+            self.persistence.put("monthly_runs", run_id, run)
+            self.persistence.put("model_versions", run_id, run.get("versions", {}))
+            for number, event in enumerate(run["events"], 1):
+                self.persistence.put("run_logs", f"{run_id}-{number:03d}",
+                                     {"run_id": run_id, **event})
         self._log(run_id, "runner", "finished", run["state"], duration=run["duration_seconds"],
                   error=run["errors"][-1]["error"] if run["errors"] else None)
+        self._log(run_id, "runner", "run_completed", run["state"], duration=run["duration_seconds"])
         return run
 
     async def run_month_async(self, period: str, actor: str = "local-process") -> dict[str, Any]:

@@ -114,6 +114,9 @@ class LocalIntentRouter:
 
 
 class AssistantProvider(ABC):
+    def health(self) -> dict[str, str]:
+        return {"status": "healthy", "provider": type(self).__name__}
+
     @abstractmethod
     def render(self, intent: str | None, data: dict[str, Any]) -> str: ...
 
@@ -199,7 +202,12 @@ class ForecastOrchestrator:
     def __init__(self, provider: DataProvider, assistant_provider: AssistantProvider | None = None):
         self.provider = provider
         aliases = {}
-        for row in provider.load("statistical")["series"]:
+        try:
+            statistical_series = provider.load("statistical")["series"]
+        except (OSError, ValueError, KeyError):
+            # Keep liveness available; /api/ready reports missing required data.
+            statistical_series = []
+        for row in statistical_series:
             if row.get("target") == "Venta" and row["series_id"] != "total-fendi-bd":
                 aliases[row["label"]] = row["label"]
                 aliases[row["series_id"]] = row["label"]

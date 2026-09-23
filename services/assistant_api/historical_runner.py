@@ -707,6 +707,11 @@ class HistoricalForecastRunner:
                   "data_snapshot_id": run["data_snapshot_id"],
                   "data_leakage": data_leakage, "research_leakage": research_leakage,
                   "forecast_horizons": len(forecasts), "probability_bands_ready": bands_ready}
+        registered = self.vintage_registry.get(run["vintage_id"])
+        if valid and registered and registered.get("status") == "FROZEN":
+            report.update(status=registered["validation_status"], registry_status="FROZEN",
+                          evidence_level=registered["evidence_level"],
+                          evidence_manifest_id=registered["evidence_manifest_id"])
         _atomic_json(self.state_dir / "first_vintage.json", report)
         self._log("FIRST-VINTAGE", candidate["period"], "first_vintage_completed", report["status"])
         return report

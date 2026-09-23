@@ -1,0 +1,52 @@
+name: CI
+on:
+  push:
+  pull_request:
+
+jobs:
+  public-repo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python scripts/check-public-repo.py
+
+  backend:
+    runs-on: ubuntu-latest
+    needs: public-repo
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: services/assistant_api/requirements.txt
+      - run: python -m pip install -r services/assistant_api/requirements.txt coverage==7.10.7 ruff==0.13.0 pip-audit==2.9.0
+      - run: pip-audit -r services/assistant_api/requirements.txt --progress-spinner off
+      - run: ruff check services/assistant_api --select E9,F63,F7,F82
+      - run: python -m compileall -q services
+      - run: python -c "import services.assistant_api.api, services.assistant_api.settings, services.assistant_api.persistence"
+      - run: coverage run --source=services.assistant_api --omit='*/test_*.py,*/__main__.py,*/serve.py,*/persistence_admin.py' -m unittest discover -s services/assistant_api -p 'test_*.py' -q
+      - run: coverage report -m --fail-under=81
+      - run: python -m unittest discover -s services/statistical_engine -p 'test_*.py' -q
+      - run: python -m unittest discover -s services/ml_engine -p 'test_*.py' -q
+      - run: python -m unittest discover -s services/ensemble_engine -p 'test_*.py' -q
+      - run: python -m unittest discover -s services/decision_engine -p 'test_*.py' -q
+      - run: python -m unittest discover -s services/closure_engine -p 'test_*.py' -q
+      - run: docker build -f Dockerfile.api -t forecast-towell-api:ci .
+
+  frontend:
+    runs-on: ubuntu-latest
+    needs: public-repo
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npx tsc --noEmit
+      - run: npm run build

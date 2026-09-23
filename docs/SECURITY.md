@@ -1,0 +1,10 @@
+# Seguridad operativa
+
+- El repositorio público no contiene XLSX privados, SQLite, `.env` ni claves. `.gitignore`, `.dockerignore`, `scripts/check-public-repo.py` y CI son controles preventivos; revisar también cada PR y el historial si se sospecha una filtración.
+- `ASSISTANT_API_TOKEN` es un secreto HMAC compartido sólo entre servidor frontend y FastAPI. Staging/production verifican firma, caducidad de hasta cinco minutos, audiencia, sesión e ID de usuario permitido. `role` y `x-actor-id` recibidos del navegador no conceden autoridad. Desarrollo permite `local-manager` exclusivamente desde loopback; nunca usarlo como autenticación pública.
+- READ consulta métricas; EXECUTE inicia forecast; ADMIN inicia el replay histórico. No existe endpoint de `force_rerun`, cambio de configuración o cancelación pública. Toda mutación HTTP usa POST.
+- CORS permite únicamente `FRONTEND_URL`; producción exige HTTPS y no acepta `*`. Security headers JSON: `nosniff`, `DENY`, `no-referrer`, `no-store`. La documentación interactiva se oculta en producción.
+- El adaptador web obtiene identidad del lado servidor. No habilitarlo en internet hasta verificar que el proxy elimina encabezados de identidad falsificados y que el allowlist corresponde a usuarios reales. La firma HMAC protege el salto web→FastAPI, no autentica por sí sola el origen del encabezado de hosting.
+- Errores públicos usan códigos estables (`AUTH_001`, `AUTH_002`, `DATA_001`, `MODEL_001`, `RUNNER_001`, `PERSISTENCE_001`, `ASSISTANT_001`, `RATE_001`). No se devuelven stack traces ni secretos.
+- Los controles de rate/concurrencia son por proceso. Con SQLite local usar un worker; un despliegue multinodo necesitará coordinación compartida antes de habilitar comandos.
+- OpenAI, Deep Research, Supabase y voz están desactivados y el arranque rechaza sus flags en `true`. El placeholder nunca intenta conexión. Si se activan después, guardar credenciales en gestor de secretos del servidor, nunca en cliente, código ni logs. Esto sigue las [prácticas oficiales de producción de OpenAI](https://developers.openai.com/api/docs/guides/production-best-practices).

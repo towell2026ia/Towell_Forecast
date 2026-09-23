@@ -15,6 +15,7 @@ type Target = "Venta" | "Pedido";
 type Point = { period: string; actual: number | null; forecast: number | null };
 type Comparison = { model: string; wape: number; bias: number; stability: number; score: number };
 type Alert = { type: string; severity: string; message: string };
+type DataQualityAlert = { code: string; severity: string; message: string };
 type Series = {
   series_id: string; label: string; target: Target; status: string; reason?: string;
   classification?: string; winner?: string; wape?: number; bias?: number; stability?: number;
@@ -22,7 +23,7 @@ type Series = {
   alerts?: Alert[]; explanation?: string;
 };
 
-const data = payload as { run: { version: string; engine_version: string; status: string; generated_at: string; frozen: boolean; cutoff: string }; chain: string; data_quality: Alert[]; series: Series[] };
+const data = payload as { run: { version: string; engine_version: string; status: string; generated_at: string; frozen: boolean; cutoff: string }; chain: string; data_quality: DataQualityAlert[]; series: Series[] };
 const fmt = new Intl.NumberFormat("es-MX", { maximumFractionDigits: 0 });
 
 function Metric({ label, value, detail, tone = "blue" }: { label: string; value: string; detail: string; tone?: "blue" | "green" | "amber" | "violet" }) {
