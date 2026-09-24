@@ -85,10 +85,10 @@ def holt(values: list[float], horizon: int, alpha: float = 0.35, beta: float = 0
     return [level + trend * step for step in range(1, horizon + 1)]
 
 
-def holt_winters(values: list[float], horizon: int, season: int = 12) -> list[float]:
+def holt_winters(values: list[float], horizon: int, season: int = 12,
+                 alpha: float = 0.30, beta: float = 0.10, gamma: float = 0.20) -> list[float]:
     if len(values) < season * 2:
         raise ValueError("requiere 24 periodos")
-    alpha, beta, gamma = 0.30, 0.10, 0.20
     first, second = values[:season], values[season:season * 2]
     level = statistics.fmean(first)
     trend = (statistics.fmean(second) - level) / season
@@ -134,8 +134,8 @@ def regression(values: list[float], horizon: int, degree: int = 1) -> list[float
     return [a + b * (n + step) + c * (n + step) ** 2 for step in range(horizon)]
 
 
-def intermittent(values: list[float], horizon: int, variant: str) -> list[float]:
-    alpha, beta = 0.1, 0.1
+def intermittent(values: list[float], horizon: int, variant: str,
+                 alpha: float = 0.1, beta: float = 0.1) -> list[float]:
     first = next((index for index, value in enumerate(values) if value > 0), None)
     if first is None:
         return [0.0] * horizon

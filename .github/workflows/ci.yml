@@ -35,6 +35,8 @@ jobs:
       - run: python -m unittest discover -s services/ensemble_engine -p 'test_*.py' -q
       - run: python -m unittest discover -s services/decision_engine -p 'test_*.py' -q
       - run: python -m unittest discover -s services/closure_engine -p 'test_*.py' -q
+      - run: python -m unittest services.forecast_engine.test_engine -q
+      - run: python scripts/audit_forecast_engine.py
       - run: docker build -f Dockerfile.api -t forecast-towell-api:ci .
       - name: Container and volume restart smoke
         run: |

@@ -100,8 +100,12 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
     orchestrator = ForecastOrchestrator(data, assistant_provider=assistant_provider)
     historical = HistoricalForecastRunner(data, research=LocalResearchProvider(),
                                           state_dir=state_dir, persistence=storage)
-    forecast_runner = MonthlyForecastRunner(data, research=LocalResearchProvider(), pipeline=forecast_pipeline,
+    from .runner import GeneralizedMonthlyForecastRunner
+    forecast_runner = (MonthlyForecastRunner(data, research=LocalResearchProvider(), pipeline=forecast_pipeline,
                                             state_dir=config.state_dir, persistence=storage)
+                       if forecast_pipeline is not None else
+                       GeneralizedMonthlyForecastRunner(data, research=LocalResearchProvider(),
+                                                        state_dir=config.state_dir, persistence=storage))
     app.state.settings = config
     app.state.orchestrator = orchestrator
     app.state.historical = historical

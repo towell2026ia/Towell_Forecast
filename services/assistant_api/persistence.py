@@ -15,9 +15,9 @@ ENTITIES = (
     "research_snapshots", "data_snapshots", "historical_runs", "monthly_runs",
     "model_versions", "champion_history", "forecast_vintages",
     "forecast_horizons", "forecast_bands", "actual_evaluations",
-    "performance_metrics", "run_logs", "vintage_registry", "forecast_jobs",
+    "performance_metrics", "run_logs", "vintage_registry", "forecast_jobs", "champion_registry",
 )
-IMMUTABLE = set(ENTITIES) - {"historical_runs", "monthly_runs", "actual_evaluations", "performance_metrics", "run_logs", "vintage_registry", "forecast_jobs"}
+IMMUTABLE = set(ENTITIES) - {"historical_runs", "monthly_runs", "actual_evaluations", "performance_metrics", "run_logs", "vintage_registry", "forecast_jobs", "champion_registry"}
 
 
 def content_hash(payload: dict[str, Any]) -> str:

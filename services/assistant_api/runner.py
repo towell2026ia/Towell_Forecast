@@ -63,6 +63,7 @@ class LocalResearchProvider(ResearchProvider):
 
     def run(self, cutoff_date: str, chain: str, category: str | None = None, product: str | None = None,
             historical_context: dict[str, Any] | None = None) -> dict[str, Any]:
+        from services.forecast_engine.identifiers import research_id
         period = cutoff_date[:7]
         candidate = self.source_dir / f"{period}.json" if self.source_dir else None
         source = json.loads(candidate.read_text(encoding="utf-8")) if candidate and candidate.exists() else {}
@@ -84,7 +85,7 @@ class LocalResearchProvider(ResearchProvider):
                     continue
                 selected[key].append(item)
         payload = {
-            "snapshot_id": f"RS-FENDI-{cutoff_date[:7]}",
+            "snapshot_id": research_id(chain, cutoff_date[:7]),
             "cutoff_date": cutoff_date, "chain": chain, "category": category, "product": product,
             "signals": selected["signals"], "sources": selected["sources"], "provider": "local",
             "status": "completed", "created_at": _utc(), "frozen": True,
@@ -328,3 +329,112 @@ class MonthlyForecastRunner:
             runs.append(self.run_month(current, actor))
             current = _next_period(current)
         return runs
+
+
+class GeneralizedMonthlyForecastRunner:
+    """Official generic runner. Legacy pilot replays remain in HistoricalForecastRunner.
+
+    Every new run requires explicit point-in-time availability. The committed pilot
+    CSV has no such field, so it cannot silently become certified evidence.
+    """
+
+    def __init__(self, provider: DataProvider, research: ResearchProvider | None = None,
+                 state_dir: Path | None = None, persistence: PersistenceProvider | None = None,
+                 policy: Any | None = None):
+        self.provider = provider
+        self.research = research or LocalResearchProvider()
+        self.state_dir = Path(state_dir) if state_dir else Path(__file__).resolve().parent / "state"
+        self.persistence = persistence
+        self.policy = policy
+
+    def run_month(self, period: str, chain_id: str | None = None,
+                  product_id: str | None = None, actor: str | None = None,
+                  objective: str = "Venta") -> dict[str, Any]:
+        from services.forecast_engine import ChampionRegistry, forecast_dataset
+        from services.forecast_engine.engine import month_end
+        from services.forecast_engine.identifiers import research_id, run_id as make_run_id, vintage_id
+        from .settings import Settings
+
+        cutoff = month_end(period)
+        sequence = 1
+        while (self.state_dir / "runs" / f"{make_run_id(chain_id, period, sequence)}.json").exists():
+            sequence += 1
+        identifier = make_run_id(chain_id, period, sequence)
+        path = self.state_dir / "runs" / f"{identifier}.json"
+        started = time.monotonic()
+        run: dict[str, Any] = {"run_id": identifier, "period": period,
+                               "chain_id": chain_id, "product_id": product_id,
+                               "objective": objective, "cutoff_date": cutoff,
+                               "actor": actor or "local-process", "state": "Queued",
+                               "errors": [], "results": {}, "started_at": _utc()}
+        _atomic_json(path, run)
+        try:
+            if not Settings.from_env().monthly_runner_enabled:
+                raise RuntimeError("monthly_runner_disabled")
+            rows = [row for row in self.provider.records()
+                    if str(row.get("objective", "")).casefold() == objective.casefold()
+                    and (chain_id is None or str(row.get("chain_id") or row.get("chain_code") or row.get("chain")) == chain_id)
+                    and (product_id is None or str(row.get("product_id") or row.get("canonical_product_id")) == product_id)]
+            if not rows:
+                raise ValueError("no_eligible_products")
+            chains = sorted({str(row.get("chain_id") or row.get("chain_code") or row.get("chain") or "") for row in rows})
+            if "" in chains:
+                raise ValueError("identity_missing")
+            registry = ChampionRegistry(self.persistence) if self.persistence else None
+            results = []
+            for chain in chains:
+                research = self.research.run(cutoff, chain)
+                if research.get("cutoff_date") != cutoff:
+                    raise ValueError("research_leakage_detected")
+                research["snapshot_id"] = f"{research_id(chain, period, research.get('content_hash', ''))}-{sequence:03d}"
+                current = registry.current(chain, objective, "chain") if registry else None
+                try:
+                    result = forecast_dataset(rows, period, chain_id=chain,
+                                              product_id=product_id, objective=objective,
+                                              policy=self.policy, incumbent=current, research=research,
+                                              version_sequence=sequence)["chains"][0]
+                except (RuntimeError, ArithmeticError) as exc:
+                    previous = [] if not (self.persistence and current) else self.persistence.list("forecast_vintages")
+                    retained = next(((vintage["vintage_id"], entry) for vintage in reversed(previous)
+                                     for entry in vintage.get("chains", [])
+                                     if entry.get("chain_id") == chain and
+                                     entry.get("version") == current.get("version")), None)
+                    if retained is None:
+                        raise ValueError("no_valid_published_forecast_fallback") from exc
+                    result = {**retained[1], "fallback": "retained_published_champion",
+                              "source_vintage_id": retained[0],
+                              "fallback_reason": type(exc).__name__}
+                results.append(result)
+                if self.persistence:
+                    self.persistence.put("research_snapshots", research["snapshot_id"], research)
+            vintage = {"vintage_id": vintage_id(identifier), "issue_period": period,
+                       "objective": objective, "chains": results, "published_champion_changed": False}
+            fallback_used = any("fallback" in chain for chain in results)
+            if self.persistence:
+                if not fallback_used:
+                    self.persistence.put("forecast_vintages", vintage["vintage_id"], vintage)
+                for chain in results:
+                    if "fallback" not in chain and not fallback_used:
+                        self.persistence.put("model_versions", f"{identifier}|{chain['chain_id']}", chain["model_audit"])
+                        for row in chain["forecast_towell"]:
+                            key = f"{vintage['vintage_id']}|{row['chain_id']}|{row['product_id']}|{row['horizon']:02d}"
+                            self.persistence.put("forecast_horizons", key, row)
+                            self.persistence.put("forecast_bands", key, {"probability": row["probability"]})
+            if fallback_used:
+                vintage = {"vintage_id": None, "retained_vintages":
+                           [chain["source_vintage_id"] for chain in results if "fallback" in chain]}
+            run["results"] = {"chains": results, "vintage": vintage}
+            run["state"] = "Completed"
+        except Exception as exc:
+            run["state"] = "Failed"
+            run["errors"].append({"stage": "forecast", "error": str(exc) if isinstance(exc, ValueError) else type(exc).__name__})
+        run["duration_seconds"] = round(time.monotonic() - started, 3)
+        run["finished_at"] = _utc()
+        _atomic_json(path, run)
+        if self.persistence:
+            self.persistence.put("monthly_runs", identifier, run)
+        return run
+
+    async def run_month_async(self, period: str, chain_id: str | None = None,
+                              product_id: str | None = None, actor: str | None = None) -> dict[str, Any]:
+        return await asyncio.to_thread(self.run_month, period, chain_id, product_id, actor)
