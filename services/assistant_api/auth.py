@@ -74,6 +74,8 @@ class LocalAuthProvider(AuthProvider):
 
     def authenticate(self, *, token: str | None, actor_id: str | None,
                      client_host: str | None) -> Principal:
+        if self.settings.railway_runtime:
+            raise AuthFailure("AUTH_001", 401)
         if client_host not in {"127.0.0.1", "::1", "testclient"}:
             raise AuthFailure("AUTH_001", 401)
         if self.settings.assistant_token and (not token or

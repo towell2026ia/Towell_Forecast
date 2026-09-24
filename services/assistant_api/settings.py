@@ -65,6 +65,7 @@ class Settings:
     git_sha: str = "unknown"
     build_time: str = "unknown"
     app_version: str = "0.11.0-prd09"
+    railway_runtime: bool = False
 
     @property
     def database_path(self) -> Path:
@@ -81,6 +82,8 @@ class Settings:
     def validate(self) -> "Settings":
         if self.app_env not in ENVIRONMENTS:
             raise ValueError("invalid_app_env")
+        if not 1 <= self.api_port <= 65535:
+            raise ValueError("invalid_integer:API_PORT")
         if self.assistant_provider != "local" or self.data_provider != "normalized" or \
                 self.persistence_provider != "sqlite" or self.research_provider != "local":
             raise ValueError("provider_disabled")
@@ -98,6 +101,8 @@ class Settings:
                 raise ValueError("strict_auth_configuration_missing")
             if len(self.assistant_token) < 32:
                 raise ValueError("weak_auth_secret")
+            if self.api_host != "0.0.0.0":
+                raise ValueError("host_must_bind_all_interfaces")
             if self.persistence_mode != "hosted-volume" or not self.database_path.is_relative_to(self.state_dir):
                 raise ValueError("persistent_volume_configuration_missing")
         for path in (self.data_dir, self.state_dir, self.database_path):
@@ -112,8 +117,13 @@ class Settings:
         env = os.environ
         def flag(name: str, default: bool) -> bool:
             return _boolean(env.get(name, str(default).lower()), name)
-        def number(name: str, default: int, maximum: int = 65535) -> int:
-            return _integer(env.get(name, str(default)), name, maximum=maximum)
+        def number(name: str, default: int, maximum: int = 65535,
+                   fallback_name: str | None = None) -> int:
+            if name in env:
+                return _integer(env[name], name, maximum=maximum)
+            if fallback_name and fallback_name in env:
+                return _integer(env[fallback_name], fallback_name, maximum=maximum)
+            return _integer(str(default), name, maximum=maximum)
         def path(name: str, default: Path) -> Path:
             value = env.get(name)
             return Path(value).expanduser().resolve() if value else default
@@ -123,7 +133,7 @@ class Settings:
         settings = cls(
             app_env=environment,
             api_host=env.get("API_HOST", "127.0.0.1" if environment in {"development", "test"} else "0.0.0.0"),
-            api_port=number("API_PORT", 8000),
+            api_port=number("API_PORT", 8000, fallback_name="PORT"),
             frontend_url=env.get("FRONTEND_URL", "http://localhost:3000"),
             data_dir=path("DATA_DIR", ROOT / "app" / "data"),
             state_dir=path("STATE_DIR", ROOT / "services" / "assistant_api" / "state"),
@@ -155,8 +165,9 @@ class Settings:
             historical_rate_per_minute=number("HISTORICAL_RATE_PER_MINUTE", 4, 100000),
             external_timeout_seconds=number("EXTERNAL_TIMEOUT_SECONDS", 10, 300),
             retry_max_attempts=number("RETRY_MAX_ATTEMPTS", 3, 10),
-            git_sha=env.get("GIT_SHA", "unknown"),
+            git_sha=env.get("GIT_SHA") or env.get("RAILWAY_GIT_COMMIT_SHA") or "unknown",
             build_time=env.get("BUILD_TIME", "unknown"),
             app_version=env.get("APP_VERSION", "0.11.0-prd09"),
+            railway_runtime=bool(env.get("RAILWAY_ENVIRONMENT_ID") or env.get("RAILWAY_SERVICE_ID")),
         )
         return settings.validate()

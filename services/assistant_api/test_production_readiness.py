@@ -4,11 +4,13 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import tempfile
 import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -62,9 +64,12 @@ class ProductionReadinessTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid_frontend_url"):
             replace(Settings(), frontend_url="*").validate()
         production = replace(Settings(), app_env="production", frontend_url="https://forecast.example",
-                             assistant_token="s" * 48, manager_ids=frozenset({"manager-1"}),
+                             api_host="0.0.0.0", assistant_token="s" * 48,
+                             manager_ids=frozenset({"manager-1"}),
                              persistence_mode="hosted-volume").validate()
         self.assertTrue(production.strict_auth)
+        with self.assertRaisesRegex(ValueError, "host_must_bind_all_interfaces"):
+            replace(production, api_host="127.0.0.1").validate()
         with self.assertRaisesRegex(ValueError, "persistent_volume_configuration_missing"):
             replace(production, persistence_mode="local").validate()
         with self.assertRaisesRegex(ValueError, "local_auth_forbidden"):
@@ -72,7 +77,8 @@ class ProductionReadinessTests(unittest.TestCase):
 
     def test_signed_identity_roles_and_safe_responses(self):
         secret = "s" * 48
-        config = replace(Settings(), app_env="staging", frontend_url="https://forecast.example",
+        config = replace(Settings(), app_env="staging", api_host="0.0.0.0",
+                         frontend_url="https://forecast.example",
                          assistant_token=secret, manager_ids=frozenset({"manager-1"}),
                          reader_ids=frozenset({"reader-1"}), persistence_mode="hosted-volume").validate()
         with tempfile.TemporaryDirectory() as directory:
@@ -125,6 +131,38 @@ class ProductionReadinessTests(unittest.TestCase):
             blocked = client.options("/api/forecast/12m", headers={"origin": "https://evil.example",
                                       "access-control-request-method": "GET"})
             self.assertNotEqual(blocked.headers.get("access-control-allow-origin"), "https://evil.example")
+
+    def test_railway_port_priority_bootstrap_and_version(self):
+        with patch.dict(os.environ, {"API_PORT": "8765", "PORT": "9123"}, clear=True):
+            self.assertEqual(Settings.from_env().api_port, 8765)
+        with patch.dict(os.environ, {"PORT": "9123"}, clear=True):
+            self.assertEqual(Settings.from_env().api_port, 9123)
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(Settings.from_env().api_port, 8000)
+        with patch.dict(os.environ, {"PORT": "invalid"}, clear=True):
+            with self.assertRaisesRegex(ValueError, "invalid_integer:PORT"):
+                Settings.from_env()
+        bootstrap = {"APP_ENV": "development", "API_HOST": "0.0.0.0", "PORT": "9123",
+                     "RAILWAY_ENVIRONMENT_ID": "test-railway", "APP_VERSION": "0.11.1-test",
+                     "RAILWAY_GIT_COMMIT_SHA": "a" * 40, "AI_ASSISTANT_API_ENABLED": "false",
+                     "OPENAI_ENABLED": "false", "SUPABASE_ENABLED": "false", "VOICE_ENABLED": "false",
+                     "DEEP_RESEARCH_ENABLED": "false"}
+        with patch.dict(os.environ, bootstrap, clear=True):
+            config = Settings.from_env()
+        self.assertEqual(config.api_port, 9123)
+        self.assertEqual(config.git_sha, "a" * 40)
+        self.assertFalse(config.ai_assistant_api_enabled)
+        self.assertFalse(any((config.openai_enabled, config.supabase_enabled,
+                              config.voice_enabled, config.deep_research_enabled)))
+        with tempfile.TemporaryDirectory() as directory:
+            client = TestClient(create_app(settings=replace(config, state_dir=Path(directory)),
+                                           historical_state_dir=Path(directory) / "historical"))
+            for route in ("/api/live", "/api/health", "/api/ready", "/api/version"):
+                self.assertEqual(client.get(route).status_code, 200, route)
+            self.assertEqual(client.get("/api/version").json()["version"], "0.11.1-test")
+            self.assertEqual(client.get("/api/version").json()["commit"], "a" * 40)
+            self.assertEqual(client.get("/api/performance/wape", headers={"x-actor-id": "local-manager"}).status_code,
+                             401)
 
     def test_assistant_degraded_does_not_break_forecast(self):
         with tempfile.TemporaryDirectory() as directory:
