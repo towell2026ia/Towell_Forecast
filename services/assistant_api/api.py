@@ -159,10 +159,24 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
                        x_actor_id: str | None = Header(default=None)) -> Principal:
             token = authorization.removeprefix("Bearer ") if authorization and authorization.startswith("Bearer ") \
                 else x_assistant_token
-            principal = identity.authenticate(token=token, actor_id=x_actor_id,
-                                              client_host=request.client.host if request.client else None)
-            authorize(principal, permission)
+            try:
+                principal = identity.authenticate(token=token, actor_id=x_actor_id,
+                                                  client_host=request.client.host if request.client else None)
+            except AuthFailure as exc:
+                metrics.emit(environment=config.app_env, component="auth", event=exc.reason,
+                             status="error", request_id=request.state.request_id, error_code=exc.code)
+                raise
             request.state.user_id = principal.user_id
+            try:
+                authorize(principal, permission)
+            except AuthFailure as exc:
+                metrics.emit(environment=config.app_env, component="auth", event="authorization_denied",
+                             status="error", request_id=request.state.request_id, user_id=principal.user_id,
+                             error_code=exc.code, session_id=principal.session_id)
+                raise
+            metrics.emit(environment=config.app_env, component="auth", event="auth_success",
+                         status="ok", request_id=request.state.request_id, user_id=principal.user_id,
+                         session_id=principal.session_id)
             if request.url.path.endswith("/assistant/message"):
                 limit = config.assistant_rate_per_minute
             elif "/historical/" in request.url.path:
@@ -263,6 +277,10 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
             if old:
                 if old.get("period") != body.period:
                     raise HTTPException(status_code=409, detail="REQUEST_001")
+                storage.put("run_logs", f"duplicate-{uuid.uuid4().hex}",
+                            {"job_id": old["job_id"], "period": body.period, "user_id": principal.user_id,
+                             "session_id": principal.session_id, "request_id": request.state.request_id,
+                             "event": "duplicate_prevented", "result": "EXISTING", "timestamp": time.time()})
                 return storage.get("forecast_jobs", old["job_id"])
             if not forecast_slots.acquire(blocking=False):
                 raise HTTPException(status_code=429, detail="RATE_001")
@@ -274,6 +292,7 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
                 storage.put("forecast_jobs", job_id, job)
                 storage.put("run_logs", f"idempotency-{digest}",
                             {"job_id": job_id, "period": body.period, "user_id": principal.user_id,
+                             "session_id": principal.session_id, "request_id": request.state.request_id,
                              "event": "command_accepted", "result": "QUEUED", "timestamp": time.time()})
                 forecast_executor.submit(execute_forecast, job_id, body.period, principal.user_id)
             except Exception:
@@ -351,6 +370,10 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
         with command_lock:
             old = storage.get("run_logs", f"idempotency-{digest}")
             if old:
+                storage.put("run_logs", f"duplicate-{uuid.uuid4().hex}",
+                            {"job_id": old["job_id"], "user_id": principal.user_id,
+                             "session_id": principal.session_id, "request_id": request.state.request_id,
+                             "event": "duplicate_prevented", "result": "EXISTING", "timestamp": time.time()})
                 return storage.get("historical_runs", old["job_id"])
             if not historical_slots.acquire(blocking=False):
                 raise HTTPException(status_code=429, detail="RATE_001")
@@ -362,6 +385,7 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
                 storage.put("historical_runs", job_id, job)
                 storage.put("run_logs", f"idempotency-{digest}",
                             {"job_id": job_id, "user_id": principal.user_id,
+                             "session_id": principal.session_id, "request_id": request.state.request_id,
                              "event": "command_accepted", "result": "QUEUED", "timestamp": time.time()})
                 executor.submit(execute_first_vintage, job_id, principal.user_id)
             except Exception:

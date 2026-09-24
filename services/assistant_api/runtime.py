@@ -45,7 +45,7 @@ class LocalTelemetryProvider(TelemetryProvider):
         safe = {key: value for key, value in fields.items()
                 if key in {"method", "route", "intent", "tool", "model_version", "provider",
                            "prompt_version", "tool_calls", "token_usage", "cost",
-                           "storage_provider", "transaction_id"}}
+                           "storage_provider", "transaction_id", "session_id"}}
         payload = {"timestamp": datetime.now(timezone.utc).isoformat(), "level": "INFO" if status == "ok" else "ERROR",
                    "environment": environment, "request_id": request_id, "user_id": user_id,
                    "run_id": run_id, "component": component, "event": event,

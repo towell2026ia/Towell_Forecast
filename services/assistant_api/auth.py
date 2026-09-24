@@ -25,9 +25,10 @@ ROLE_PERMISSIONS = {
 
 
 class AuthFailure(Exception):
-    def __init__(self, code: str, status_code: int):
+    def __init__(self, code: str, status_code: int, reason: str = "invalid_identity"):
         self.code = code
         self.status_code = status_code
+        self.reason = reason
         super().__init__(code)
 
 
@@ -50,7 +51,7 @@ class AuthProvider(ABC):
 
 def authorize(principal: Principal, permission: str) -> None:
     if permission not in principal.permissions:
-        raise AuthFailure("AUTH_002", 403)
+        raise AuthFailure("AUTH_002", 403, "authorization_denied")
 
 
 def _role_for(user_id: str, settings: Settings) -> str | None:
@@ -112,20 +113,26 @@ class SignedAuthProvider(AuthProvider):
             if not hmac.compare_digest(_decode(signature), expected):
                 raise AuthFailure("AUTH_001", 401)
             claims: dict[str, Any] = json.loads(_decode(encoded))
-            user_id = claims.get("user_id")
+            user_id = claims.get("sub")
             session_id = claims.get("session_id")
             expires = claims.get("exp")
             issued = claims.get("iat")
-            if not isinstance(user_id, str) or not user_id or not isinstance(session_id, str) or \
+            if not isinstance(user_id, str) or not user_id or claims.get("user_id") != user_id or \
+                    not isinstance(session_id, str) or \
                     not session_id or not isinstance(expires, int) or not isinstance(issued, int) or \
-                    expires < time.time() or issued > time.time() + 30 or expires - issued > 300 or \
-                    claims.get("aud") != "forecast-towell-fastapi":
+                    issued > time.time() + 30 or expires - issued > 300 or \
+                    claims.get("aud") != "forecast-towell-fastapi" or \
+                    claims.get("iss") != self.settings.auth_issuer:
                 raise AuthFailure("AUTH_001", 401)
+            if expires <= time.time():
+                raise AuthFailure("AUTH_001", 401, "token_expired")
         except (ValueError, TypeError, UnicodeDecodeError, binascii.Error, json.JSONDecodeError) as exc:
             raise AuthFailure("AUTH_001", 401) from exc
         role = _role_for(user_id, self.settings)
         if not role:
-            raise AuthFailure("AUTH_002", 403)
+            raise AuthFailure("AUTH_002", 403, "authorization_denied")
+        if claims.get("role") != role or claims.get("permissions") != sorted(ROLE_PERMISSIONS[role]):
+            raise AuthFailure("AUTH_002", 403, "authorization_denied")
         return Principal(user_id, role, ROLE_PERMISSIONS[role], session_id)
 
 

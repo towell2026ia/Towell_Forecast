@@ -39,6 +39,7 @@ class Settings:
     assistant_provider: str = "local"
     data_provider: str = "normalized"
     persistence_provider: str = "sqlite"
+    persistence_mode: str = "local"
     research_provider: str = "local"
     ai_assistant_ui_enabled: bool = True
     ai_assistant_api_enabled: bool = True
@@ -73,12 +74,18 @@ class Settings:
     def strict_auth(self) -> bool:
         return self.app_env in {"staging", "production"}
 
+    @property
+    def auth_issuer(self) -> str:
+        return f"forecast-towell-frontend:{self.app_env}"
+
     def validate(self) -> "Settings":
         if self.app_env not in ENVIRONMENTS:
             raise ValueError("invalid_app_env")
         if self.assistant_provider != "local" or self.data_provider != "normalized" or \
                 self.persistence_provider != "sqlite" or self.research_provider != "local":
             raise ValueError("provider_disabled")
+        if self.persistence_mode not in {"local", "hosted-volume"}:
+            raise ValueError("invalid_persistence_mode")
         if any((self.openai_enabled, self.supabase_enabled, self.voice_enabled, self.deep_research_enabled)):
             raise ValueError("future_provider_disabled")
         if not self.local_research_enabled or not self.local_intent_router_enabled:
@@ -91,6 +98,8 @@ class Settings:
                 raise ValueError("strict_auth_configuration_missing")
             if len(self.assistant_token) < 32:
                 raise ValueError("weak_auth_secret")
+            if self.persistence_mode != "hosted-volume" or not self.database_path.is_relative_to(self.state_dir):
+                raise ValueError("persistent_volume_configuration_missing")
         for path in (self.data_dir, self.state_dir, self.database_path):
             if not path.is_absolute():
                 raise ValueError("runtime_path_must_be_absolute")
@@ -123,6 +132,7 @@ class Settings:
             assistant_provider=env.get("ASSISTANT_PROVIDER", "local"),
             data_provider=env.get("DATA_PROVIDER", "normalized"),
             persistence_provider=env.get("PERSISTENCE_PROVIDER", "sqlite"),
+            persistence_mode=env.get("PERSISTENCE_MODE", "local"),
             research_provider=env.get("RESEARCH_PROVIDER", "local"),
             ai_assistant_ui_enabled=flag("AI_ASSISTANT_UI_ENABLED", True),
             ai_assistant_api_enabled=flag("AI_ASSISTANT_API_ENABLED", True),

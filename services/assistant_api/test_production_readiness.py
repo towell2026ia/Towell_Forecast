@@ -13,7 +13,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from services.assistant_api.api import create_app
-from services.assistant_api.auth import SignedAuthProvider
+from services.assistant_api.auth import LocalAuthProvider, SignedAuthProvider
 from services.assistant_api.data_provider import NormalizedDataProvider
 from services.assistant_api.orchestrator import LocalAssistantProvider
 from services.assistant_api.persistence import LocalPersistenceProvider
@@ -39,10 +39,15 @@ class FastForecastPipeline(FakePipeline):
         return result
 
 
-def signed_token(secret: str, user_id: str, *, ttl: int = 60) -> str:
+def signed_token(secret: str, user_id: str, *, ttl: int = 60, environment: str = "staging",
+                 role: str = "manager", audience: str = "forecast-towell-fastapi") -> str:
     now = int(time.time())
-    claims = {"user_id": user_id, "session_id": "test-session", "iat": now,
-              "exp": now + ttl, "aud": "forecast-towell-fastapi", "role": "manager"}
+    role_permissions = {"manager": ["ADMIN", "EXECUTE", "READ"],
+                        "editor": ["EXECUTE", "READ"], "reader": ["READ"]}
+    claims = {"sub": user_id, "user_id": user_id, "session_id": "test-session", "iat": now,
+              "exp": now + ttl, "aud": audience,
+              "iss": f"forecast-towell-frontend:{environment}", "role": role,
+              "permissions": role_permissions[role]}
     encoded = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
     signature = base64.urlsafe_b64encode(hmac.new(secret.encode(), encoded.encode(), hashlib.sha256).digest()).decode().rstrip("=")
     return f"{encoded}.{signature}"
@@ -57,14 +62,19 @@ class ProductionReadinessTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid_frontend_url"):
             replace(Settings(), frontend_url="*").validate()
         production = replace(Settings(), app_env="production", frontend_url="https://forecast.example",
-                             assistant_token="s" * 48, manager_ids=frozenset({"manager-1"})).validate()
+                             assistant_token="s" * 48, manager_ids=frozenset({"manager-1"}),
+                             persistence_mode="hosted-volume").validate()
         self.assertTrue(production.strict_auth)
+        with self.assertRaisesRegex(ValueError, "persistent_volume_configuration_missing"):
+            replace(production, persistence_mode="local").validate()
+        with self.assertRaisesRegex(ValueError, "local_auth_forbidden"):
+            LocalAuthProvider(production)
 
     def test_signed_identity_roles_and_safe_responses(self):
         secret = "s" * 48
         config = replace(Settings(), app_env="staging", frontend_url="https://forecast.example",
                          assistant_token=secret, manager_ids=frozenset({"manager-1"}),
-                         reader_ids=frozenset({"reader-1"})).validate()
+                         reader_ids=frozenset({"reader-1"}), persistence_mode="hosted-volume").validate()
         with tempfile.TemporaryDirectory() as directory:
             app = create_app(settings=replace(config, state_dir=Path(directory)),
                              historical_state_dir=Path(directory) / "historical")
@@ -72,19 +82,42 @@ class ProductionReadinessTests(unittest.TestCase):
             self.assertEqual(client.get("/api/live").status_code, 200)
             self.assertEqual(client.get("/api/ready").json()["status"], "ok")
             self.assertEqual(client.get("/api/performance/wape", headers={"x-actor-id": "manager-1"}).status_code, 401)
-            reader = {"authorization": f"Bearer {signed_token(secret, 'reader-1')}"}
+            reader = {"authorization": f"Bearer {signed_token(secret, 'reader-1', role='reader')}"}
             response = client.get("/api/v1/performance/wape", headers=reader)
             self.assertEqual(response.status_code, 200, response.text)
             self.assertIsNotNone(response.headers.get("x-request-id"))
             self.assertEqual(response.headers["x-content-type-options"], "nosniff")
             self.assertEqual(client.post("/api/historical/first-vintage", headers={**reader,
                              "idempotency-key": "reader-run-01"}).status_code, 403)
+            self.assertEqual(client.post("/api/historical/first-vintage", headers={
+                "idempotency-key": "anonymous-run-01", "x-actor-id": "manager-1",
+                "x-user-role": "admin"}).status_code, 401)
+            self.assertEqual(client.post("/api/historical/first-vintage", headers={**reader,
+                "idempotency-key": "spoofed-run-01", "x-user-role": "admin", "x-actor-id": "manager-1"},
+                json={"role": "admin", "permissions": ["ADMIN"]}).status_code, 403)
             self.assertEqual(client.get("/api/performance/wape", headers={"authorization":
                              f"Bearer {signed_token(secret, 'outsider')}"}).status_code, 403)
+            forged_role = {"authorization": f"Bearer {signed_token(secret, 'reader-1')}"}
+            self.assertEqual(client.get("/api/performance/wape", headers=forged_role).status_code, 403)
+            wrong_environment = {"authorization": f"Bearer {signed_token(secret, 'manager-1', environment='production')}"}
+            self.assertEqual(client.get("/api/performance/wape", headers=wrong_environment).status_code, 401)
+            wrong_audience = {"authorization": f"Bearer {signed_token(secret, 'manager-1', audience='other-api')}"}
+            self.assertEqual(client.get("/api/performance/wape", headers=wrong_audience).status_code, 401)
+            changed = signed_token(secret, "manager-1")
+            payload, signature = changed.split(".", 1)
+            altered = {"authorization": f"Bearer {payload}.{'A' if signature[0] != 'A' else 'B'}{signature[1:]}"}
+            self.assertEqual(client.get("/api/performance/wape", headers=altered).status_code, 401)
+            principal = app.state.auth.authenticate(token=signed_token(secret, "reader-1", role="reader"),
+                                                     actor_id="manager-1", client_host="testclient")
+            self.assertEqual(principal.user_id, "reader-1")
             expired = {"authorization": f"Bearer {signed_token(secret, 'manager-1', ttl=-1)}"}
             self.assertEqual(client.get("/api/performance/wape", headers=expired).status_code, 401)
             malformed = {"authorization": "Bearer !!!.%%%"}
             self.assertEqual(client.get("/api/performance/wape", headers=malformed).status_code, 401)
+            events = app.state.telemetry.snapshot()["counts"]
+            self.assertGreater(events.get("auth_success", 0), 0)
+            self.assertGreater(events.get("token_expired", 0), 0)
+            self.assertGreater(events.get("authorization_denied", 0), 0)
             self.assertEqual(client.get("/api/health").json()["environment"], "staging")
             cors = client.options("/api/forecast/12m", headers={"origin": "https://forecast.example",
                                    "access-control-request-method": "GET"})
@@ -152,6 +185,11 @@ class ProductionReadinessTests(unittest.TestCase):
             job_id = response.json()["run_id"]
             self.assertEqual(client.post("/api/forecast/run", headers=headers,
                                          json={"period": "2026-07"}).json()["run_id"], job_id)
+            audit = app.state.persistence.list("run_logs")
+            self.assertTrue(any(row.get("event") == "duplicate_prevented" and row.get("job_id") == job_id
+                                for row in audit))
+            self.assertTrue(any(row.get("event") == "command_accepted" and row.get("request_id")
+                                for row in audit))
             for _ in range(50):
                 job = client.get(f"/api/forecast/jobs/{job_id}", headers=headers).json()
                 if job["status"] in {"COMPLETED", "FAILED"}:
@@ -161,8 +199,29 @@ class ProductionReadinessTests(unittest.TestCase):
             run = app.state.persistence.get("monthly_runs", job["model_run_id"])
             self.assertEqual(run["state"], "Completed")
             self.assertEqual(len(run["results"]["ensemble"]["forecast_towell"]), 12)
-            self.assertIsNotNone(app.state.persistence.get("forecast_vintages", run["results"]["vintage"]["vintage_id"]))
+            vintage_id = run["results"]["vintage"]["vintage_id"]
+            self.assertIsNotNone(app.state.persistence.get("forecast_vintages", vintage_id))
             self.assertEqual(pipeline.events, ["statistical", "ml", "ensemble"])
+            app.state.persistence.put("source_evidence", "TEST-PERSISTENCE-001", {"level": "technical-test"})
+            app.state.persistence.put("performance_metrics", "TEST-PERSISTENCE-001", {"wape": 1.0})
+            self.assertTrue(app.state.persistence.list("research_snapshots"))
+            self.assertTrue(app.state.persistence.list("forecast_bands"))
+            self.assertTrue(app.state.persistence.list("run_logs"))
+
+            # A fresh application instance must reopen the same persistent volume.
+            restarted = create_app(settings=replace(Settings(), state_dir=state),
+                                   historical_state_dir=state / "historical", forecast_pipeline=FastForecastPipeline())
+            after_restart = TestClient(restarted).get(f"/api/forecast/jobs/{job_id}", headers=headers)
+            self.assertEqual(after_restart.status_code, 200, after_restart.text)
+            self.assertEqual(after_restart.json()["status"], "COMPLETED")
+            self.assertIsNotNone(restarted.state.persistence.get("monthly_runs", job["model_run_id"]))
+            self.assertIsNotNone(restarted.state.persistence.get("forecast_vintages", vintage_id))
+            self.assertEqual(restarted.state.persistence.get("source_evidence", "TEST-PERSISTENCE-001"),
+                             {"level": "technical-test"})
+            self.assertEqual(restarted.state.persistence.get("performance_metrics", "TEST-PERSISTENCE-001"),
+                             {"wape": 1.0})
+            for entity in ("research_snapshots", "forecast_bands", "run_logs"):
+                self.assertTrue(restarted.state.persistence.list(entity), entity)
 
     def test_rate_retry_and_future_providers_fail_closed(self):
         limiter = SlidingWindowRateLimiter()

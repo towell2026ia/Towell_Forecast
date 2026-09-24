@@ -36,6 +36,26 @@ jobs:
       - run: python -m unittest discover -s services/decision_engine -p 'test_*.py' -q
       - run: python -m unittest discover -s services/closure_engine -p 'test_*.py' -q
       - run: docker build -f Dockerfile.api -t forecast-towell-api:ci .
+      - name: Container and volume restart smoke
+        run: |
+          set -euo pipefail
+          trap 'docker stop forecast-towell-ci-1 forecast-towell-ci-2 >/dev/null 2>&1 || true' EXIT
+          docker volume create forecast-towell-ci-state
+          docker run --rm -d --name forecast-towell-ci-1 -p 127.0.0.1:18080:8000 \
+            -v forecast-towell-ci-state:/var/lib/forecast-towell -e APP_ENV=test \
+            forecast-towell-api:ci
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:18080/api/ready >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:18080/api/ready >/dev/null
+          docker exec forecast-towell-ci-1 python -c "from pathlib import Path; from services.assistant_api.persistence import LocalPersistenceProvider; p=LocalPersistenceProvider(Path('/var/lib/forecast-towell/historical/historical.sqlite3')); p.put('source_evidence','TEST-CI-VOLUME',{'status':'persisted'})"
+          docker stop forecast-towell-ci-1 >/dev/null
+          docker run --rm -d --name forecast-towell-ci-2 -p 127.0.0.1:18080:8000 \
+            -v forecast-towell-ci-state:/var/lib/forecast-towell -e APP_ENV=test \
+            forecast-towell-api:ci
+          docker exec forecast-towell-ci-2 python -c "from pathlib import Path; from services.assistant_api.persistence import LocalPersistenceProvider; p=LocalPersistenceProvider(Path('/var/lib/forecast-towell/historical/historical.sqlite3')); assert p.get('source_evidence','TEST-CI-VOLUME') == {'status':'persisted'}"
+          curl -fsS http://127.0.0.1:18080/api/ready >/dev/null
 
   frontend:
     runs-on: ubuntu-latest

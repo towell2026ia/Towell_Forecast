@@ -20,7 +20,7 @@ docker run --rm -p 8000:8000 -v forecast-state:/var/lib/forecast-towell \
   -e APP_ENV=development -e API_HOST=0.0.0.0 forecast-towell-api:<commit>
 ```
 
-El contenedor ejecuta un usuario sin privilegios y no contiene XLSX privados, `.env` ni SQLite local. Staging/production requieren variables del gestor de secretos, `FRONTEND_URL` HTTPS, allowlist gerencial y volumen persistente. Limitar a **un proceso/worker** mientras jobs, rate limits e idempotencia dependan de coordinación local. La imagen es preparación de hosting: no se desplegó ni se conectó OpenAI/Supabase durante PRD 09.
+El contenedor ejecuta un usuario sin privilegios y no contiene XLSX privados, `.env` ni SQLite local. Staging/production requieren variables del gestor de secretos, `FRONTEND_URL` HTTPS, allowlist gerencial, `PERSISTENCE_MODE=hosted-volume`, `STATE_DIR` sobre el volumen y `SQLITE_PATH` dentro de ese mismo directorio. Limitar a **un proceso/worker** mientras jobs, rate limits e idempotencia dependan de coordinación local. La imagen es preparación de hosting: no se desplegó ni se conectó OpenAI/Supabase durante PRD 09. El protocolo de validación real está en `docs/PRD09_1_DEPLOYMENT_VALIDATION.md`.
 
 ## Verificación previa
 
