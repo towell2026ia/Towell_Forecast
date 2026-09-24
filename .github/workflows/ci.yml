@@ -45,7 +45,7 @@ jobs:
             -v forecast-towell-ci-state:/var/lib/forecast-towell -e APP_ENV=test \
             forecast-towell-api:ci
           for i in {1..30}; do
-            if curl -fsS http://127.0.0.1:18080/api/ready >/dev/null; then break; fi
+            if curl -fs http://127.0.0.1:18080/api/ready >/dev/null; then break; fi
             sleep 1
           done
           curl -fsS http://127.0.0.1:18080/api/ready >/dev/null
@@ -55,6 +55,10 @@ jobs:
             -v forecast-towell-ci-state:/var/lib/forecast-towell -e APP_ENV=test \
             forecast-towell-api:ci
           docker exec forecast-towell-ci-2 python -c "from pathlib import Path; from services.assistant_api.persistence import LocalPersistenceProvider; p=LocalPersistenceProvider(Path('/var/lib/forecast-towell/historical/historical.sqlite3')); assert p.get('source_evidence','TEST-CI-VOLUME') == {'status':'persisted'}"
+          for i in {1..30}; do
+            if curl -fs http://127.0.0.1:18080/api/ready >/dev/null; then break; fi
+            sleep 1
+          done
           curl -fsS http://127.0.0.1:18080/api/ready >/dev/null
 
   frontend:
