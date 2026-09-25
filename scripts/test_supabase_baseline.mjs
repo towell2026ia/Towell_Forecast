@@ -4,7 +4,8 @@ import { join } from 'node:path'
 
 const db = new PGlite()
 const migrationsDir = join(process.cwd(), 'supabase', 'migrations')
-const files = readdirSync(migrationsDir).filter((name) => name.endsWith('.sql')).sort()
+// Preserve the 09.2B baseline test independently of later auth/storage migrations.
+const files = readdirSync(migrationsDir).filter((name) => /^20260925000[1-4]_.*\.sql$/.test(name)).sort()
 const expectReject = async (sql, label) => {
   try {
     await db.exec(sql)

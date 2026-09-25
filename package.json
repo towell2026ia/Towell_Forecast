@@ -13,6 +13,7 @@
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "verify:prd08a": "node scripts/verify-prd08a.mjs",
     "test:supabase-baseline": "node scripts/test_supabase_baseline.mjs",
+    "test:supabase-security": "node scripts/test_supabase_security.mjs",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
