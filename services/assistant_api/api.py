@@ -18,11 +18,11 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .auth import ADMIN, EXECUTE, READ, AuthFailure, AuthProvider, LocalAuthProvider, Principal, SignedAuthProvider, authorize
-from .data_provider import DataProvider, NormalizedDataProvider
-from .historical_runner import HistoricalForecastRunner
+from .data_provider import DataProvider, NormalizedDataProvider, PersistedObservationProvider
+from .generalized_historical import GeneralizedHistoricalForecastRunner
 from .orchestrator import AssistantProvider, ForecastOrchestrator
 from .persistence import LocalPersistenceProvider, PersistenceProvider
-from .runner import EnginePipeline, LocalResearchProvider, MonthlyForecastRunner
+from .runner import EnginePipeline, GeneralizedMonthlyForecastRunner, LocalResearchProvider
 from .runtime import LocalTelemetryProvider, SlidingWindowRateLimiter, TelemetryProvider
 from .settings import Settings
 
@@ -48,6 +48,15 @@ class AssistantMessage(BaseModel):
 
 class ForecastRunRequest(BaseModel):
     period: str = Field(pattern=r"^20\d{2}-(0[1-9]|1[0-2])$")
+    chain_id: str | None = None
+    objective: str = "Venta"
+
+
+class HistoricalRunRequest(BaseModel):
+    chain_id: str | None = None
+    start_period: str = Field(pattern=r"^20\d{2}-(0[1-9]|1[0-2])$")
+    end_period: str = Field(pattern=r"^20\d{2}-(0[1-9]|1[0-2])$")
+    objective: str = "Venta"
 
 
 class ErrorResponse(BaseModel):
@@ -98,17 +107,24 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
                                                                        "Idempotency-Key", "X-Assistant-Token",
                                                                        "X-Actor-Id", "X-Request-ID"])
     orchestrator = ForecastOrchestrator(data, assistant_provider=assistant_provider)
-    historical = HistoricalForecastRunner(data, research=LocalResearchProvider(),
-                                          state_dir=state_dir, persistence=storage)
-    from .runner import GeneralizedMonthlyForecastRunner
-    forecast_runner = (MonthlyForecastRunner(data, research=LocalResearchProvider(), pipeline=forecast_pipeline,
-                                            state_dir=config.state_dir, persistence=storage)
-                       if forecast_pipeline is not None else
-                       GeneralizedMonthlyForecastRunner(data, research=LocalResearchProvider(),
-                                                        state_dir=config.state_dir, persistence=storage))
+    model_data = data if provider is not None else PersistedObservationProvider(data, storage)
+    historical = GeneralizedHistoricalForecastRunner(model_data, storage,
+        research=LocalResearchProvider(), state_dir=state_dir / "generic")
+    legacy_historical = None
+    if config.legacy_pilot_enabled:
+        from .historical_runner import LegacyHistoricalForecastRunner
+        legacy_historical = LegacyHistoricalForecastRunner(data, research=LocalResearchProvider(),
+            state_dir=state_dir, persistence=storage)
+    forecast_runner = GeneralizedMonthlyForecastRunner(model_data, research=LocalResearchProvider(),
+        state_dir=config.state_dir, persistence=storage)
+    if config.legacy_pilot_enabled and forecast_pipeline is not None:
+        from .runner import MonthlyForecastRunner
+        forecast_runner = MonthlyForecastRunner(data, research=LocalResearchProvider(),
+            pipeline=forecast_pipeline, state_dir=config.state_dir, persistence=storage)
     app.state.settings = config
     app.state.orchestrator = orchestrator
     app.state.historical = historical
+    app.state.legacy_historical = legacy_historical
     app.state.forecast_runner = forecast_runner
     app.state.persistence = storage
     app.state.telemetry = metrics
@@ -242,14 +258,19 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
         except Exception:
             raise HTTPException(status_code=503, detail="DATA_001") from None
 
-    def execute_forecast(job_id: str, period: str, actor: str) -> None:
+    def execute_forecast(job_id: str, period: str, chain_id: str | None,
+                         objective: str, actor: str) -> None:
         try:
             job = storage.get("forecast_jobs", job_id) or {"run_id": job_id}
             job.update(status="RUNNING", started_at=time.time())
             storage.put("forecast_jobs", job_id, job)
             metrics.emit(environment=config.app_env, component="forecast", event="run_started",
                          status="ok", run_id=job_id, user_id=actor)
-            result = forecast_runner.run_month(period, actor=actor)
+            if config.legacy_pilot_enabled and forecast_pipeline is not None:
+                result = forecast_runner.run_month(period, actor=actor)
+            else:
+                result = forecast_runner.run_month(period, chain_id=chain_id,
+                                                   actor=actor, objective=objective)
             job.update(status="COMPLETED" if result.get("state") == "Completed" else "FAILED",
                        model_run_id=result.get("run_id"), finished_at=time.time(),
                        error_code=None if result.get("state") == "Completed" else "MODEL_001")
@@ -271,15 +292,17 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
     def forecast_run(body: ForecastRunRequest, request: Request,
                      principal: Principal = Depends(execute_access),
                      idempotency_key: str | None = Header(default=None)):
-        if not config.monthly_runner_enabled:
+        if not config.monthly_runner_enabled or not config.ai_assistant_api_enabled:
             raise HTTPException(status_code=503, detail="RUNNER_001")
+        if body.objective not in {"Venta", "Pedido", "Entrega"}:
+            raise HTTPException(status_code=400, detail="REQUEST_001")
         if not idempotency_key or not 8 <= len(idempotency_key) <= 128:
             raise HTTPException(status_code=400, detail="REQUEST_001")
         digest = hashlib.sha256(f"forecast:{principal.user_id}:{idempotency_key}".encode()).hexdigest()
         with command_lock:
             old = storage.get("run_logs", f"idempotency-{digest}")
             if old:
-                if old.get("period") != body.period:
+                if (old.get("period"), old.get("chain_id"), old.get("objective")) != (body.period, body.chain_id, body.objective):
                     raise HTTPException(status_code=409, detail="REQUEST_001")
                 storage.put("run_logs", f"duplicate-{uuid.uuid4().hex}",
                             {"job_id": old["job_id"], "period": body.period, "user_id": principal.user_id,
@@ -289,16 +312,19 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
             if not forecast_slots.acquire(blocking=False):
                 raise HTTPException(status_code=429, detail="RATE_001")
             job_id = f"API-FRUN-{uuid.uuid4().hex[:16]}"
-            job = {"run_id": job_id, "period": body.period, "status": "QUEUED",
+            job = {"run_id": job_id, "period": body.period, "chain_id": body.chain_id,
+                   "objective": body.objective, "status": "QUEUED",
                    "actor": principal.user_id, "session_id": principal.session_id,
                    "request_id": request.state.request_id, "created_at": time.time()}
             try:
                 storage.put("forecast_jobs", job_id, job)
                 storage.put("run_logs", f"idempotency-{digest}",
-                            {"job_id": job_id, "period": body.period, "user_id": principal.user_id,
+                            {"job_id": job_id, "period": body.period, "chain_id": body.chain_id,
+                             "objective": body.objective, "user_id": principal.user_id,
                              "session_id": principal.session_id, "request_id": request.state.request_id,
                              "event": "command_accepted", "result": "QUEUED", "timestamp": time.time()})
-                forecast_executor.submit(execute_forecast, job_id, body.period, principal.user_id)
+                forecast_executor.submit(execute_forecast, job_id, body.period,
+                                         body.chain_id, body.objective, principal.user_id)
             except Exception:
                 forecast_slots.release()
                 raise HTTPException(status_code=503, detail="PERSISTENCE_001") from None
@@ -314,7 +340,7 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
 
     @app.get("/api/historical/availability/audit")
     @app.get("/api/v1/historical/availability/audit")
-    def historical_availability_audit(chain: str = "Walmart", start_period: str = "2023-01",
+    def historical_availability_audit(chain: str | None = None, start_period: str = "2023-01",
                                       end_period: str = "2026-08", principal: Principal = Depends(read_access)):
         try:
             return historical.availability.audit_availability(start_period, end_period, chain=chain)
@@ -323,7 +349,7 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
 
     @app.get("/api/historical/readiness/{period}")
     @app.get("/api/v1/historical/readiness/{period}")
-    def historical_readiness(period: str, chain: str = "Walmart", cutoff: str | None = None,
+    def historical_readiness(period: str, chain: str | None = None, cutoff: str | None = None,
                              principal: Principal = Depends(read_access)):
         try:
             return historical.availability.validate_temporal_readiness(period, chain=chain, cutoff=cutoff)
@@ -332,13 +358,66 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
 
     @app.get("/api/historical/first-valid-period")
     @app.get("/api/v1/historical/first-valid-period")
-    def historical_first_valid(chain: str = "Walmart", start_period: str = "2023-01",
+    def historical_first_valid(chain: str | None = None, start_period: str = "2023-01",
                                end_period: str = "2026-08", principal: Principal = Depends(read_access)):
         try:
             return {"first_valid_period": historical.availability.find_first_temporally_valid_period(
                 start_period, end_period, chain=chain)}
         except ValueError:
             raise HTTPException(status_code=400, detail="REQUEST_001") from None
+
+    def execute_historical_run(job_id: str, body: HistoricalRunRequest, actor: str) -> None:
+        try:
+            job = storage.get("historical_runs", job_id) or {"run_id": job_id}
+            job.update(status="RUNNING", started_at=time.time())
+            storage.put("historical_runs", job_id, job)
+            result = historical.run(body.chain_id, body.start_period, body.end_period,
+                                    body.objective, actor)
+            job.update(status=result["status"], result_run_id=result["run_id"],
+                       result=result, finished_at=time.time())
+            storage.put("historical_runs", job_id, job)
+        except Exception:
+            storage.put("historical_runs", job_id, {"run_id": job_id, "actor": actor,
+                "status": "FAILED", "error_code": "RUNNER_001", "finished_at": time.time()})
+        finally:
+            historical_slots.release()
+
+    @app.post("/api/historical/run", status_code=202)
+    @app.post("/api/v1/historical/run", status_code=202)
+    def historical_run(body: HistoricalRunRequest, request: Request,
+                       principal: Principal = Depends(admin_access),
+                       idempotency_key: str | None = Header(default=None)):
+        if not config.historical_runner_enabled or not config.ai_assistant_api_enabled:
+            raise HTTPException(status_code=503, detail="RUNNER_001")
+        if body.start_period > body.end_period or body.objective not in {"Venta", "Pedido", "Entrega"}:
+            raise HTTPException(status_code=400, detail="REQUEST_001")
+        if not idempotency_key or not 8 <= len(idempotency_key) <= 128:
+            raise HTTPException(status_code=400, detail="REQUEST_001")
+        digest = hashlib.sha256(f"historical:{principal.user_id}:{idempotency_key}".encode()).hexdigest()
+        key = f"idempotency-{digest}"
+        with command_lock:
+            old = storage.get("run_logs", key)
+            if old:
+                if old.get("request") != body.model_dump():
+                    raise HTTPException(status_code=409, detail="REQUEST_001")
+                return storage.get("historical_runs", old["job_id"])
+            if not historical_slots.acquire(blocking=False):
+                raise HTTPException(status_code=429, detail="RATE_001")
+            job_id = f"API-GHRUN-{uuid.uuid4().hex[:16]}"
+            job = {"run_id": job_id, "status": "QUEUED", "actor": principal.user_id,
+                   "request": body.model_dump(), "request_id": request.state.request_id,
+                   "created_at": time.time()}
+            try:
+                storage.put("historical_runs", job_id, job)
+                storage.put("run_logs", key, {"job_id": job_id, "request": body.model_dump(),
+                    "actor": principal.user_id, "session_id": principal.session_id,
+                    "request_id": request.state.request_id, "event": "command_accepted",
+                    "timestamp": time.time()})
+                executor.submit(execute_historical_run, job_id, body, principal.user_id)
+            except Exception:
+                historical_slots.release()
+                raise HTTPException(status_code=503, detail="PERSISTENCE_001") from None
+        return job
 
     def execute_first_vintage(job_id: str, actor: str) -> None:
         try:
@@ -347,7 +426,9 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
             storage.put("historical_runs", job_id, job)
             metrics.emit(environment=config.app_env, component="historical", event="run_started",
                          status="ok", run_id=job_id, user_id=actor)
-            result = historical.first_vintage(actor=actor)
+            if legacy_historical is None:
+                raise ValueError("legacy_pilot_disabled")
+            result = legacy_historical.first_vintage(actor=actor)
             job.update(status="COMPLETED" if result.get("first_real_vintage_validated") else "FAILED",
                        result=result, finished_at=time.time())
             storage.put("historical_runs", job_id, job)
@@ -366,7 +447,8 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
     @app.post("/api/v1/historical/first-vintage", status_code=202)
     def historical_first_vintage(request: Request, principal: Principal = Depends(admin_access),
                                  idempotency_key: str | None = Header(default=None)):
-        if not config.historical_runner_enabled:
+        if (not config.historical_runner_enabled or not config.ai_assistant_api_enabled
+                or not config.legacy_pilot_enabled or legacy_historical is None):
             raise HTTPException(status_code=503, detail="RUNNER_001")
         if not idempotency_key or not 8 <= len(idempotency_key) <= 128:
             raise HTTPException(status_code=400, detail="REQUEST_001")

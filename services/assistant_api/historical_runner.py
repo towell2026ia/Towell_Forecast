@@ -1,4 +1,4 @@
-"""Temporal, offline forecast replay. Never publishes or replaces the live Champion."""
+"""Legacy pilot replay retained only for frozen evidence compatibility."""
 
 from __future__ import annotations
 
@@ -888,3 +888,6 @@ class HistoricalForecastRunner:
         marker = self.state_dir / "control" / f"{parent_run_id}.pause"
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.touch(exist_ok=True)
+
+
+LegacyHistoricalForecastRunner = HistoricalForecastRunner

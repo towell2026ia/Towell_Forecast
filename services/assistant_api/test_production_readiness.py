@@ -214,7 +214,7 @@ class ProductionReadinessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory) / "state"
             pipeline = FastForecastPipeline()
-            app = create_app(settings=replace(Settings(), state_dir=state),
+            app = create_app(settings=replace(Settings(), state_dir=state, legacy_pilot_enabled=True),
                              historical_state_dir=state / "historical", forecast_pipeline=pipeline)
             client = TestClient(app)
             headers = {"x-actor-id": "local-manager", "idempotency-key": "forecast-july-2026"}
@@ -247,7 +247,7 @@ class ProductionReadinessTests(unittest.TestCase):
             self.assertTrue(app.state.persistence.list("run_logs"))
 
             # A fresh application instance must reopen the same persistent volume.
-            restarted = create_app(settings=replace(Settings(), state_dir=state),
+            restarted = create_app(settings=replace(Settings(), state_dir=state, legacy_pilot_enabled=True),
                                    historical_state_dir=state / "historical", forecast_pipeline=FastForecastPipeline())
             after_restart = TestClient(restarted).get(f"/api/forecast/jobs/{job_id}", headers=headers)
             self.assertEqual(after_restart.status_code, 200, after_restart.text)

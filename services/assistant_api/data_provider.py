@@ -8,6 +8,8 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
+from .persistence import PersistenceProvider
+
 ROOT = Path(__file__).resolve().parents[2]
 DATA = ROOT / "app" / "data"
 
@@ -86,6 +88,33 @@ class NormalizedDataProvider(DataProvider):
 
     def vintages(self) -> list[dict[str, Any]]:
         return self._operational_list("vintages.json")
+
+
+class PersistedObservationProvider(DataProvider):
+    """Keep legacy dashboard reads separate from the active forecast input."""
+
+    def __init__(self, display_provider: DataProvider, persistence: PersistenceProvider):
+        self.display_provider = display_provider
+        self.persistence = persistence
+
+    @property
+    def name(self) -> str:
+        return "normalized_observations"
+
+    def health(self) -> dict[str, str]:
+        return self.persistence.health()
+
+    def load(self, name: str) -> dict[str, Any]:
+        return self.display_provider.load(name)
+
+    def records(self) -> list[dict[str, Any]]:
+        return self.persistence.list("normalized_observations")
+
+    def decisions(self) -> list[dict[str, Any]]:
+        return self.display_provider.decisions()
+
+    def vintages(self) -> list[dict[str, Any]]:
+        return self.display_provider.vintages()
 
 
 class SupabaseDataProvider(DataProvider):

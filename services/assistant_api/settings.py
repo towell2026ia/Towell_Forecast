@@ -44,6 +44,7 @@ class Settings:
     ai_assistant_ui_enabled: bool = True
     ai_assistant_api_enabled: bool = True
     historical_runner_enabled: bool = True
+    legacy_pilot_enabled: bool = False
     monthly_runner_enabled: bool = True
     local_research_enabled: bool = True
     local_intent_router_enabled: bool = True
@@ -147,6 +148,7 @@ class Settings:
             ai_assistant_ui_enabled=flag("AI_ASSISTANT_UI_ENABLED", True),
             ai_assistant_api_enabled=flag("AI_ASSISTANT_API_ENABLED", True),
             historical_runner_enabled=flag("HISTORICAL_RUNNER_ENABLED", True),
+            legacy_pilot_enabled=flag("LEGACY_PILOT_ENABLED", False),
             monthly_runner_enabled=flag("MONTHLY_RUNNER_ENABLED", True),
             local_research_enabled=flag("LOCAL_RESEARCH_ENABLED", True),
             local_intent_router_enabled=flag("LOCAL_INTENT_ROUTER_ENABLED", True),
