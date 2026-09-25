@@ -60,3 +60,4 @@ __pycache__/
 /.venv/
 /venv/
 /services/assistant_api/state/
+/supabase/.temp/

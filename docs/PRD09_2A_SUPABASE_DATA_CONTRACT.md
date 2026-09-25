@@ -1,6 +1,6 @@
 # PRD 09.2A — Contrato de datos Supabase v1
 
-Estado: **contrato propuesto para aprobación**. Este documento fija el modelo lógico y los invariantes que deberán traducirse a SQL en 09.2B. No es una migración ejecutable ni autoriza un cutover. El proyecto es único y multichain; Railway conserva el cálculo Python. `PersistenceProvider` y `DataProvider` siguen siendo las fronteras del motor.
+Estado: **aprobado por el usuario para 09.2B**. Este documento fija el modelo lógico y los invariantes que se traducen a SQL en 09.2B. No es una migración ejecutable ni autoriza un cutover. El proyecto es único y multichain; Railway conserva el cálculo Python. `PersistenceProvider` y `DataProvider` siguen siendo las fronteras del motor.
 
 ## Convenciones normativas
 
