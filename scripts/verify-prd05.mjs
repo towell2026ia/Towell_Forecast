@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 const [engine,runner,migration,api,baseline,demo]=await Promise.all([
   readFile("services/ensemble_engine/engine.py","utf8"),
   readFile("services/ensemble_engine/supabase_runner.py","utf8"),
-  readFile("supabase/migrations/202609190002_prd05_ensemble.sql","utf8"),
+  readFile("supabase/legacy_migrations/202609190002_prd05_ensemble.sql","utf8"),
   readFile("app/api/ensemble-runs/route.ts","utf8"),
   readFile("services/ensemble_engine/visual-baseline.json","utf8").then(JSON.parse),
   readFile("services/ensemble_engine/fixtures/ensemble-demo.json","utf8").then(JSON.parse),

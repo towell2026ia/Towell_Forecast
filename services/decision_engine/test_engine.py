@@ -161,7 +161,7 @@ class DecisionEngineTests(unittest.TestCase):
         self.assertIn("fva_evaluation_failed", Path(__file__).with_name("supabase_runner.py").read_text(encoding="utf-8"))
 
     def _sql(self):
-        return (Path(__file__).parents[2] / "supabase/migrations/202609200002_prd07_managerial_decisions.sql").read_text(encoding="utf-8")
+        return (Path(__file__).parents[2] / "supabase/legacy_migrations/202609200002_prd07_managerial_decisions.sql").read_text(encoding="utf-8")
 
     def _assert_visual_hash(self, relative_path: str):
         root = Path(__file__).parents[2]

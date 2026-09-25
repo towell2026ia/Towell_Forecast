@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 
 const [sql, ui, importer] = await Promise.all([
-  readFile("supabase/migrations/202609180001_prd02_base.sql", "utf8"),
+  readFile("supabase/legacy_migrations/202609180001_prd02_base.sql", "utf8"),
   readFile("app/forecast-towell-app.tsx", "utf8"),
   readFile("scripts/migrate-prd01-to-supabase.mjs", "utf8"),
 ]);

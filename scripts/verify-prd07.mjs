@@ -5,7 +5,7 @@ const [engine, runner, closureRunner, migration, api, baseline, demo] = await Pr
   readFile("services/decision_engine/engine.py", "utf8"),
   readFile("services/decision_engine/supabase_runner.py", "utf8"),
   readFile("services/closure_engine/supabase_runner.py", "utf8"),
-  readFile("supabase/migrations/202609200002_prd07_managerial_decisions.sql", "utf8"),
+  readFile("supabase/legacy_migrations/202609200002_prd07_managerial_decisions.sql", "utf8"),
   readFile("app/api/forecast-decisions/route.ts", "utf8"),
   readFile("services/ensemble_engine/visual-baseline.json", "utf8").then(JSON.parse),
   readFile("services/decision_engine/fixtures/decision-demo.json", "utf8").then(JSON.parse),

@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 const [engine, runner, migration, ui, dashboard, demo] = await Promise.all([
   readFile("services/ml_engine/engine.py", "utf8"),
   readFile("services/ml_engine/supabase_runner.py", "utf8"),
-  readFile("supabase/migrations/202609190001_prd04_ml_engine.sql", "utf8"),
+  readFile("supabase/legacy_migrations/202609190001_prd04_ml_engine.sql", "utf8"),
   readFile("app/ml-engine-view.tsx", "utf8"),
   readFile("app/executive-dashboard.tsx", "utf8"),
   readFile("app/data/ml-demo.json", "utf8").then(JSON.parse),

@@ -149,7 +149,7 @@ class ClosureEngineTests(unittest.TestCase):
         self.assertNotEqual(first["snapshot_hash"], second["snapshot_hash"])
 
     def test_cp18_reopening_authorization_is_database_enforced(self):
-        sql = (Path(__file__).parents[2] / "supabase/migrations/202609200001_prd06_closure_learning.sql").read_text(encoding="utf-8")
+        sql = (Path(__file__).parents[2] / "supabase/legacy_migrations/202609200001_prd06_closure_learning.sql").read_text(encoding="utf-8")
         self.assertIn("request_period_reopening", sql)
         self.assertIn("manager_role_required", sql)
 

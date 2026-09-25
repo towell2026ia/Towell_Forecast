@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 
 const [engine, migration, ui, runner, demo] = await Promise.all([
   readFile("services/statistical_engine/engine.py", "utf8"),
-  readFile("supabase/migrations/202609180002_prd03_engine.sql", "utf8"),
+  readFile("supabase/legacy_migrations/202609180002_prd03_engine.sql", "utf8"),
   readFile("app/statistical-engine-view.tsx", "utf8"),
   readFile("services/statistical_engine/supabase_runner.py", "utf8"),
   readFile("app/data/forecast-demo.json", "utf8").then(JSON.parse),

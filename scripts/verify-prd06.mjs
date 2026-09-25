@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 const [engine, runner, migration, api, baseline, demo] = await Promise.all([
   readFile("services/closure_engine/engine.py", "utf8"),
   readFile("services/closure_engine/supabase_runner.py", "utf8"),
-  readFile("supabase/migrations/202609200001_prd06_closure_learning.sql", "utf8"),
+  readFile("supabase/legacy_migrations/202609200001_prd06_closure_learning.sql", "utf8"),
   readFile("app/api/period-closures/route.ts", "utf8"),
   readFile("services/ensemble_engine/visual-baseline.json", "utf8").then(JSON.parse),
   readFile("services/closure_engine/fixtures/closure-demo.json", "utf8").then(JSON.parse),
