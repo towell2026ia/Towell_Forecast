@@ -51,7 +51,7 @@ def content_structure(data, profile):
     return {"atomic_rows": atomic, "product_blocks": blocks}
 
 
-def certify_scopes(books, profiles, authority):
+def certify_scopes(books, profiles, authority, *, allow_empty=False):
     """Reject wildcard/all-sheet policies and unreviewed role upgrades."""
     if authority.get("approved") is not True or not authority.get("rule_sha256"):
         raise ValueError("unapproved_business_authority")
@@ -90,7 +90,7 @@ def certify_scopes(books, profiles, authority):
         if not structure["atomic_rows"] and not structure["product_blocks"]:
             raise ValueError("business_product_structure_required")
         scopes[digest, name] = {**scope, **structure, "review_status": "APPROVED"}
-    if not scopes:
+    if not scopes and not allow_empty:
         raise ValueError("explicit_business_scopes_required")
     # Both sides of an alias must have approved membership scopes.
     if any(key not in scopes or scopes[key]["canonical_commercial_unit"] != unit for key, unit in alias_units.items()):
