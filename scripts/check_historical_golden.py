@@ -22,6 +22,8 @@ def main() -> None:
     parser.add_argument("--chain", required=True)
     parser.add_argument("--year", required=True)
     parser.add_argument("--product-prefix", required=True)
+    parser.add_argument("--expected-count", type=int,
+                        help="Fail if comparable coverage shrinks or expands")
     args = parser.parse_args()
     report = json.loads(args.report.read_text(encoding="utf-8"))
     selected = {(row["key"][1], row["key"][2], row["key"][3]): Decimal(row["value"])
@@ -44,7 +46,8 @@ def main() -> None:
     mismatches = [key for key in selected.keys() & expected.keys() if selected[key] != expected[key]]
     print(json.dumps({"compared": len(selected.keys() & expected.keys()),
                       "missing_expected": len(missing), "mismatches": len(mismatches)}, indent=2))
-    if not selected or missing or mismatches:
+    if not selected or missing or mismatches or (args.expected_count is not None
+                                                and len(selected.keys() & expected.keys()) != args.expected_count):
         raise SystemExit(1)
 
 

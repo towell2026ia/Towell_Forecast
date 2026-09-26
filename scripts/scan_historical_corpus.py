@@ -36,16 +36,31 @@ def main() -> None:
     parser.add_argument("--source", type=source_spec, action="append", required=True)
     parser.add_argument("--output", type=Path, required=True,
                         help="Write private row-level lineage to an ignored local path")
+    parser.add_argument("--hardened", action="store_true", help="PRD 09.2D.1 evidence hierarchy")
+    parser.add_argument("--baseline", type=Path, help="Frozen original conflict report")
     args = parser.parse_args()
     output = args.output.resolve()
     repository = Path(__file__).resolve().parents[1]
     allowed = repository / "outputs"
     if not output.is_relative_to(allowed):
         parser.error("private report must be under the ignored repository outputs/ directory")
-    report = scan_sources(args.source)
+    if output.exists():
+        parser.error("report already exists; use a new output path to preserve evidence")
+    baseline = json.loads(args.baseline.read_text(encoding="utf-8")) if args.baseline else None
+    if args.hardened and baseline is None:
+        parser.error("hardened scan requires the frozen baseline conflict report")
+    report = scan_sources(args.source, hardened=args.hardened, baseline=baseline)
     output.parent.mkdir(parents=True, exist_ok=True)
+    if args.hardened:
+        for field in ("resolution_ledger", "identity_ledger"):
+            ledger_path = output.parent / f"{field}.json"
+            if ledger_path.exists():
+                parser.error("ledger already exists; use a fresh output directory")
+        for field in ("resolution_ledger", "identity_ledger"):
+            (output.parent / f"{field}.json").write_text(
+                json.dumps(report[field], ensure_ascii=False, indent=2), encoding="utf-8")
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps({"summary": report["summary"], "quality_issues": report["quality_issues"],
+    print(json.dumps({"summary": report["summary"], "quality_issues": report.get("quality_issues", {}),
                       "blocking": report["blocking"], "report": str(output)},
                      ensure_ascii=False, indent=2))
 

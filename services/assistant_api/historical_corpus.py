@@ -51,6 +51,7 @@ class Candidate:
     cell: str
     source_cutoff: str
     formula: bool = False
+    evidence_level: str = "A"
 
 
 def sha256_file(path: Path) -> str:
@@ -94,9 +95,20 @@ def _metadata(path: Path) -> dict[str, Any]:
             "quality_issues": [], "duplicate_relationship": None}
 
 
+def _rejection(excluded: list[dict[str, Any]], *, digest: str, sheet: str,
+               cell: str, chain: str, item: str, upc: str, period: str,
+               metric: str, reason: str) -> None:
+    excluded.append({"key": [chain, upc or item, period, metric],
+                     "source_sha256": digest, "sheet": sheet, "cell": cell,
+                     "reason_code": reason, "blocking": False})
+
+
 def _wide_rows(values: Any, formulas: Any, *, chain: str, digest: str,
                sheet: str, header_row: int, aliases: dict[tuple[str, str], str],
-               ambiguous_aliases: set[tuple[str, str]], issues: Counter[str]) -> list[Candidate]:
+               ambiguous_aliases: set[tuple[str, str]], issues: Counter[str],
+               excluded: list[dict[str, Any]] | None = None,
+               allow_ambiguous: bool = False) -> list[Candidate]:
+    excluded = excluded if excluded is not None else []
     headers = next(values.iter_rows(min_row=header_row, max_row=header_row, values_only=True))
     metric_cols: list[tuple[int, str, str]] = []
     for index, header in enumerate(headers):
@@ -122,7 +134,8 @@ def _wide_rows(values: Any, formulas: Any, *, chain: str, digest: str,
             continue
         if (chain, item) in ambiguous_aliases:
             issues["unresolved_identity_rows"] += 1
-            continue
+            if not allow_ambiguous:
+                continue
         upc = aliases.get((chain, item), "")
         description = str(row[1] or "").strip()
         for index, period, metric in metric_cols:
@@ -130,10 +143,18 @@ def _wide_rows(values: Any, formulas: Any, *, chain: str, digest: str,
             expression_value = expression[index] if index < len(expression) else None
             if isinstance(expression_value, str) and expression_value.startswith("="):
                 issues["formula_without_direct_source"] += 1
+                _rejection(excluded, digest=digest, sheet=sheet,
+                           cell=f"{get_column_letter(index + 1)}{row_no}", chain=chain,
+                           item=item, upc=upc, period=period, metric=metric,
+                           reason="FORMULA_UNVERIFIED")
                 continue
             status, value = number(raw)
             if status != "VALUE":
                 issues["missing" if status == "MISSING" else "invalid_value"] += 1
+                _rejection(excluded, digest=digest, sheet=sheet,
+                           cell=f"{get_column_letter(index + 1)}{row_no}", chain=chain,
+                           item=item, upc=upc, period=period, metric=metric,
+                           reason="MISSING" if status == "MISSING" else "INVALID_VALUE")
                 continue
             found.append(Candidate(chain, item, upc, description, "UNCLASSIFIED", period,
                                    metric, value or "", digest, sheet,
@@ -143,7 +164,9 @@ def _wide_rows(values: Any, formulas: Any, *, chain: str, digest: str,
 
 def _summary_rows(values: Any, formulas: Any, *, chain: str, year: int,
                   digest: str, sheet: str, issues: Counter[str],
-                  source_cutoff: str) -> tuple[list[Candidate], dict[tuple[str, str], str]]:
+                  source_cutoff: str, excluded: list[dict[str, Any]] | None = None
+                  ) -> tuple[list[Candidate], dict[tuple[str, str], str]]:
+    excluded = excluded if excluded is not None else []
     """The ITEM/UPC summary has literal historical cells and formula-derived cells.
 
     Formula-derived values are intentionally excluded; a direct Base sheet can
@@ -180,20 +203,29 @@ def _summary_rows(values: Any, formulas: Any, *, chain: str, year: int,
                 formula = expression[index]
                 if isinstance(formula, str) and formula.startswith("="):
                     issues["formula_without_direct_source"] += 1
+                    _rejection(excluded, digest=digest, sheet=sheet,
+                               cell=f"{get_column_letter(index + 1)}{row_no}", chain=chain,
+                               item=item, upc=upc, period=f"{year}-{month:02d}",
+                               metric=metric, reason="FORMULA_UNVERIFIED")
                     continue
                 status, value = number(row[index])
                 if status != "VALUE":
                     issues["missing" if status == "MISSING" else "invalid_value"] += 1
+                    _rejection(excluded, digest=digest, sheet=sheet,
+                               cell=f"{get_column_letter(index + 1)}{row_no}", chain=chain,
+                               item=item, upc=upc, period=f"{year}-{month:02d}",
+                               metric=metric, reason="MISSING" if status == "MISSING" else "INVALID_VALUE")
                     continue
                 result.append(Candidate(chain, item, upc, description, category,
                                         f"{year}-{month:02d}", metric, value or "", digest,
                                         sheet, f"{get_column_letter(index + 1)}{row_no}",
-                                        source_cutoff))
+                                        source_cutoff, evidence_level="C"))
     return result, aliases
 
 
 def _master_rows(values: Any, formulas: Any, *, digest: str, sheet: str,
-                 issues: Counter[str]) -> list[Candidate]:
+                 issues: Counter[str], excluded: list[dict[str, Any]] | None = None) -> list[Candidate]:
+    excluded = excluded if excluded is not None else []
     result: list[Candidate] = []
     rows = values.iter_rows(min_row=18, max_col=24, values_only=True)
     expressions = formulas.iter_rows(min_row=18, max_col=24, values_only=True)
@@ -211,10 +243,18 @@ def _master_rows(values: Any, formulas: Any, *, digest: str, sheet: str,
             formula = expression[index]
             if isinstance(formula, str) and formula.startswith("="):
                 issues["formula_without_direct_source"] += 1
+                _rejection(excluded, digest=digest, sheet=sheet,
+                           cell=f"{get_column_letter(index + 1)}{row_no}", chain=chain,
+                           item=item, upc=upc, period=period, metric=metric,
+                           reason="FORMULA_UNVERIFIED")
                 continue
             status, value = number(row[index])
             if status != "VALUE":
                 issues["missing" if status == "MISSING" else "invalid_value"] += 1
+                _rejection(excluded, digest=digest, sheet=sheet,
+                           cell=f"{get_column_letter(index + 1)}{row_no}", chain=chain,
+                           item=item, upc=upc, period=period, metric=metric,
+                           reason="MISSING" if status == "MISSING" else "INVALID_VALUE")
                 continue
             result.append(Candidate(chain, item, upc, description, category, period,
                                     metric, value or "", digest, sheet,
@@ -223,7 +263,8 @@ def _master_rows(values: Any, formulas: Any, *, digest: str, sheet: str,
     return [replace(row, source_cutoff=cutoff) for row in result]
 
 
-def scan_sources(sources: Iterable[SourceSpec]) -> dict[str, Any]:
+def scan_sources(sources: Iterable[SourceSpec], *, hardened: bool = False,
+                 baseline: dict[str, Any] | None = None) -> dict[str, Any]:
     """Inventory and reconcile without modifying source files or remote state."""
     specs = list(sources)
     for spec in specs:
@@ -234,6 +275,7 @@ def scan_sources(sources: Iterable[SourceSpec]) -> dict[str, Any]:
             raise ValueError("invalid_source_cutoff")
     manifests: list[dict[str, Any]] = []
     candidates: list[Candidate] = []
+    excluded: list[dict[str, Any]] = []
     global_issues: Counter[str] = Counter()
     known_hashes: dict[str, str] = {}
     alias_pairs: dict[tuple[str, str], set[str]] = defaultdict(set)
@@ -292,14 +334,16 @@ def scan_sources(sources: Iterable[SourceSpec]) -> dict[str, Any]:
                 header = next(sheet.iter_rows(min_row=17, max_row=17, max_col=24, values_only=True))
                 if str(header[1]).strip() == "Cadena" and str(header[16]).strip() == "Fecha":
                     candidates.extend(_master_rows(sheet, expression, digest=manifest["sha256"],
-                                                   sheet=sheet.title, issues=sheet_issues))
+                                                   sheet=sheet.title, issues=sheet_issues,
+                                                   excluded=excluded))
                     manifest["detected_fields"].append("BAASE: Cadena/ITEM/UPC/Fecha/Venta/Pedido/Entrega")
                     sheet_record["classification"] = "PRODUCT_ACTUAL_MASTER"
             elif spec.chain_hint and sheet.title == "BD (2)" and spec.summary_year:
                 rows, _ = _summary_rows(sheet, expression, chain=spec.chain_hint,
                                         year=spec.summary_year, digest=manifest["sha256"],
                                         sheet=sheet.title, issues=sheet_issues,
-                                        source_cutoff=spec.source_cutoff or f"{spec.summary_year}-12")
+                                        source_cutoff=spec.source_cutoff or f"{spec.summary_year}-12",
+                                        excluded=excluded)
                 candidates.extend(rows)
                 manifest["detected_fields"].append("BD (2): ITEM/UPC/Venta/Pedido/Entrega")
                 sheet_record["classification"] = "PRODUCT_ACTUAL_SUMMARY_LITERALS_ONLY"
@@ -312,7 +356,8 @@ def scan_sources(sources: Iterable[SourceSpec]) -> dict[str, Any]:
                                                  digest=manifest["sha256"], sheet=sheet.title,
                                                  header_row=header_row, aliases=alias_map,
                                                  ambiguous_aliases=ambiguous_aliases,
-                                                 issues=sheet_issues))
+                                                 issues=sheet_issues, excluded=excluded,
+                                                 allow_ambiguous=hardened))
                     manifest["detected_fields"].append(f"{sheet.title}: Prime Item Nbr/POS Qty/Ordered/Received")
                     sheet_record["classification"] = "PRODUCT_ACTUAL_WIDE"
             sheet_rows = candidates[sheet_start:]
@@ -335,6 +380,11 @@ def scan_sources(sources: Iterable[SourceSpec]) -> dict[str, Any]:
         workbook.close()
         formulas.close()
     global_issues["alias_conflict"] = len(ambiguous_aliases)
+    if hardened:
+        from services.assistant_api.historical_reconciliation import reconcile_historical, regression_sample
+        report = reconcile_historical(manifests, candidates, excluded=excluded, baseline=baseline)
+        report["summary"]["source_regression"] = regression_sample(report, candidates)
+        return report
     return reconcile(manifests, candidates, alias_map, global_issues)
 
 
