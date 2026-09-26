@@ -144,7 +144,8 @@ class MembershipIndex:
                 if entry.upc:
                     self.unresolved_upc.add((entry.source_hash, entry.upc))
 
-    def resolve(self, digest: str, item: str, upc: str, *, explicit_chain: str = "") -> tuple[str, str, str]:
+    def resolve(self, digest: str, item: str, upc: str, *, explicit_chain: str = "",
+                period: str | None = None, source_sheet: str = "") -> tuple[str, str, str]:
         evidence = self.by_item.get((digest, item), []) if item else self.by_upc.get((digest, upc), [])
         if upc:
             evidence = [entry for entry in evidence if not entry.upc or entry.upc == upc]
@@ -234,8 +235,10 @@ def _chain_block(row: Candidate, reason: str) -> dict[str, Any]:
             "resolution_rule": "NO_RAW_FACT_FANOUT", "notes": "No chain inferred from retailer/filename/description"}
 
 
-def parse_candidates(books, profiles, memberships):
-    index = MembershipIndex(memberships)
+def parse_candidates(books, profiles, memberships, *, membership_index=None):
+    # Administrative callers may inject a certified, period-aware resolver.
+    # The legacy/default index and saved historical results remain unchanged.
+    index = membership_index or MembershipIndex(memberships)
     candidates, blocked, excluded, assignments = [], [], [], []
     for profile in profiles:
         sheet = books[profile.source_hash][profile.sheet_name]
@@ -249,9 +252,6 @@ def parse_candidates(books, profiles, memberships):
             if not (item or upc):
                 continue
             parent, fmt, explicit = dimensions(row, profile)
-            chain, mapped_upc, membership_status = index.resolve(profile.source_hash, item, upc, explicit_chain=explicit)
-            if profile.chain_column and not explicit:
-                chain, membership_status = "", "MISSING_CHAIN_MEMBERSHIP"
             description = str(row.get(profile.description_column) or "").strip()
             category = str(row.get(profile.category_column) or "UNCLASSIFIED").strip()
             for field in profile.metric_layout:
@@ -263,6 +263,10 @@ def parse_candidates(books, profiles, memberships):
                     period = when.strftime("%Y-%m") if isinstance(when, (date, datetime)) else None
                 if not period or not "2023-01" <= period <= "2026-12" or cutoff and period > cutoff:
                     continue
+                resolve_args = {"explicit_chain": explicit, "period": period, "source_sheet": profile.sheet_name}
+                chain, mapped_upc, membership_status = index.resolve(profile.source_hash, item, upc, **resolve_args)
+                if profile.chain_column and not explicit:
+                    chain, membership_status = "", "NO_COMMERCIAL_MEMBERSHIP" if membership_index else "MISSING_CHAIN_MEMBERSHIP"
                 cell = f"{field['column']}{row_no}"
                 key = [chain or "UNASSIGNED:" + profile.source_hash, mapped_upc or item, period, field["metric"]]
                 status, value = number(row.get(field["column"]))
@@ -274,9 +278,12 @@ def parse_candidates(books, profiles, memberships):
                 candidate = Candidate(key[0], item, mapped_upc, description, category, period, field["metric"],
                                       value, profile.source_hash, profile.sheet_name, cell, cutoff or period,
                                       evidence_level=field.get("evidence_level", "A"))
+                detail = index.describe(profile.source_hash, item, upc, **resolve_args) if hasattr(index, "describe") else {}
+                if membership_index and profile.chain_column and not explicit:
+                    detail["membership_resolution"] = "NO_COMMERCIAL_MEMBERSHIP"
                 assignments.append({"source_sha256": profile.source_hash, "sheet": profile.sheet_name, "cell": cell,
                                     "key": key, "assignment": membership_status,
-                                    "parent_chain": parent or profile.parent_chain, "commercial_format": fmt})
+                                    "parent_chain": parent or profile.parent_chain, "commercial_format": fmt, **detail})
                 if chain:
                     candidates.append(candidate)
                 else:
@@ -294,7 +301,11 @@ def reconcile_chain_aware(books, manifests, profiles):
     memberships = extract_memberships(books, profiles)
     candidates, chain_blocked, excluded, assignments = parse_candidates(books, profiles, memberships)
     report = reconcile_historical(manifests, candidates, excluded=excluded)
-    # One blocking decision per raw key, retaining every original locator.
+    return append_membership_blocks(report, chain_blocked, candidates, memberships, assignments)
+
+
+def append_membership_blocks(report, chain_blocked, candidates, memberships, assignments):
+    """One blocking decision per raw key, retaining every original locator."""
     grouped = {}
     for decision in chain_blocked:
         key = tuple(decision["key"])
@@ -302,7 +313,8 @@ def reconcile_chain_aware(books, manifests, profiles):
             grouped[key] = {**decision, "sources": [], "values": []}
         grouped[key]["sources"].extend(decision["sources"])
         grouped[key]["values"].extend(decision["values"])
-        if decision["reason_code"] == "AMBIGUOUS_CHAIN_MEMBERSHIP":
+        priority = {"AMBIGUOUS_CHAIN_MEMBERSHIP": 3, "MULTIPLE_COMMERCIAL_MEMBERSHIP": 3, "INSUFFICIENT_IDENTITY": 2}
+        if priority.get(decision["reason_code"], 0) > priority.get(grouped[key]["reason_code"], 0):
             grouped[key]["reason_code"] = decision["reason_code"]
     for decision in grouped.values():
         decision["sources"] = sorted(decision["sources"], key=lambda s: (s["source_sha256"], s["sheet"], s["cell"]))
