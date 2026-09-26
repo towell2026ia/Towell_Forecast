@@ -23,6 +23,7 @@ REASON_CODES = frozenset({
     "ITEM_MULTI_UPC", "ITEM_ONLY_AMBIGUOUS", "DESCRIPTION_ALIAS", "PRE_LAUNCH_ZERO",
     "UNPROVEN_ZERO", "MISSING", "INVALID_VALUE", "CROSS_SOURCE_CONFLICT",
     "INSUFFICIENT_EVIDENCE", "AGGREGATE_ONLY", "DIRECT_FACT", "CONFIRMED_ZERO",
+    "SOURCE_AUTHORITY", "WRONG_GRAIN_EXCLUDED",
 })
 CLASSIFICATIONS = ("AUTO_RESOLVABLE", "RESOLVABLE_AS_REVISION", "EXCLUDED_NON_FACT",
                    "IDENTITY_BLOCKED", "VALUE_BLOCKED")
@@ -79,7 +80,9 @@ class TemporalEvidence:
 
 def _source(row: Candidate) -> dict[str, Any]:
     return {key: value for key, value in asdict(row).items()
-            if key not in {"chain", "description", "category", "period", "metric"}}
+            if key not in {"chain", "description", "category", "period", "metric"}
+            and not (key in {"authority_role", "authority_rule_id", "original_evidence_level"} and not value)
+            and not (key == "fact_eligible" and value is True)}
 
 
 def _stable(row: Candidate) -> tuple[str, str, str]:
@@ -162,6 +165,10 @@ def _resolve(key: tuple[str, ...], rows: list[Candidate],
     direct = [row for row in rows if row.evidence_level == "A" and not row.formula]
     if not direct:
         return _decision(key, rows, "INSUFFICIENT_EVIDENCE", "EXCLUDED_NON_FACT")
+    primary = [row for row in direct if row.authority_role == "PRIMARY"]
+    authority_selected = bool(primary and all(row.authority_role in {"PRIMARY", "SECONDARY_CONTROL"} for row in direct))
+    if authority_selected:
+        direct = primary
     by_source: dict[str, set[str]] = defaultdict(set)
     for row in direct:
         by_source[row.source_sha256].add(row.value)
@@ -170,7 +177,8 @@ def _resolve(key: tuple[str, ...], rows: list[Candidate],
     if len({row.value for row in direct}) == 1:
         winner = min(direct, key=_stable)
         versions = [_fact(key, winner, 1, rows, evidence)]
-        reason = ("DIRECT_VS_SUMMARY" if any(row.value != winner.value for row in rows)
+        reason = ("SOURCE_AUTHORITY" if authority_selected and any(row.value != winner.value for row in rows)
+                  else "DIRECT_VS_SUMMARY" if any(row.value != winner.value for row in rows)
                   else "EQUIVALENT_DUPLICATE" if len(rows) > 1
                   else "CONFIRMED_ZERO" if winner.value == "0" else "DIRECT_FACT")
         return _decision(key, rows, reason, "AUTO_RESOLVABLE", winner=winner, versions=versions)
@@ -205,7 +213,8 @@ def reconcile_historical(manifests: list[dict[str, Any]], candidates: list[Candi
                          excluded: list[dict[str, Any]] | None = None,
                          baseline: dict[str, Any] | None = None,
                          evidence: dict[tuple[str, str], TemporalEvidence] | None = None,
-                         snapshots: dict[str, SnapshotProof] | None = None
+                         snapshots: dict[str, SnapshotProof] | None = None,
+                         scoped_snapshots: dict[tuple[str, ...], dict[str, SnapshotProof]] | None = None
                          ) -> dict[str, Any]:
     evidence = evidence or {}
     for (chain, digest), proof in evidence.items():
@@ -213,6 +222,9 @@ def reconcile_historical(manifests: list[dict[str, Any]], candidates: list[Candi
     snapshots = snapshots or {}
     for digest, proof in snapshots.items():
         proof.validate(digest)
+    for registry in (scoped_snapshots or {}).values():
+        for digest, proof in registry.items():
+            proof.validate(digest)
     mapping, identity_ledger = _identity(candidates)
     ledger = []
     by_product: dict[tuple[str, str], list[Candidate]] = defaultdict(list)
@@ -220,7 +232,9 @@ def reconcile_historical(manifests: list[dict[str, Any]], candidates: list[Candi
         product, ambiguous = _canonical(row, mapping)
         key = (row.chain, product or row.item, row.period, row.metric)
         status, value = number(row.value)
-        if row.formula or row.evidence_level == "D":
+        if not row.fact_eligible:
+            ledger.append(_decision(key, [row], "WRONG_GRAIN_EXCLUDED", "EXCLUDED_NON_FACT"))
+        elif row.formula or row.evidence_level == "D":
             ledger.append(_decision(key, [row], "FORMULA_UNVERIFIED", "EXCLUDED_NON_FACT"))
         elif status != "VALUE":
             ledger.append(_decision(key, [row], "MISSING" if status == "MISSING" else "INVALID_VALUE", "EXCLUDED_NON_FACT"))
@@ -242,7 +256,8 @@ def reconcile_historical(manifests: list[dict[str, Any]], candidates: list[Candi
                 ledger.append(_decision(key, [row], "UNPROVEN_ZERO" if start is None else "PRE_LAUNCH_ZERO", "EXCLUDED_NON_FACT"))
             else:
                 grouped[key].append(row)
-    resolved = {key: _resolve(key, rows, evidence, snapshots) for key, rows in sorted(grouped.items())}
+    resolved = {key: _resolve(key, rows, evidence, (scoped_snapshots or {}).get(key, snapshots))
+                for key, rows in sorted(grouped.items())}
     ledger.extend(resolved.values())
     # Non-facts are retained at their original hash/locator. They never create facts.
     for row in excluded or []:

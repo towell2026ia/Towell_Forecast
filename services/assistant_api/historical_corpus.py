@@ -52,6 +52,10 @@ class Candidate:
     source_cutoff: str
     formula: bool = False
     evidence_level: str = "A"
+    authority_role: str = ""
+    authority_rule_id: str = ""
+    original_evidence_level: str = ""
+    fact_eligible: bool = True
 
 
 def sha256_file(path: Path) -> str:
@@ -264,7 +268,7 @@ def _master_rows(values: Any, formulas: Any, *, digest: str, sheet: str,
 
 
 def scan_sources(sources: Iterable[SourceSpec], *, hardened: bool = False,
-                 baseline: dict[str, Any] | None = None) -> dict[str, Any]:
+                 baseline: dict[str, Any] | None = None, adjudication: Any = None) -> dict[str, Any]:
     """Inventory and reconcile without modifying source files or remote state."""
     specs = list(sources)
     for spec in specs:
@@ -382,7 +386,11 @@ def scan_sources(sources: Iterable[SourceSpec], *, hardened: bool = False,
     global_issues["alias_conflict"] = len(ambiguous_aliases)
     if hardened:
         from services.assistant_api.historical_reconciliation import reconcile_historical, regression_sample
-        report = reconcile_historical(manifests, candidates, excluded=excluded, baseline=baseline)
+        scoped = None
+        if adjudication is not None:
+            candidates, scoped = adjudication.apply(candidates)
+        report = reconcile_historical(manifests, candidates, excluded=excluded, baseline=baseline,
+                                      scoped_snapshots=scoped)
         report["summary"]["source_regression"] = regression_sample(report, candidates)
         return report
     return reconcile(manifests, candidates, alias_map, global_issues)
