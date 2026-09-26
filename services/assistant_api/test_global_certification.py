@@ -262,8 +262,14 @@ class GlobalContracts(unittest.TestCase):
     def test_cli_refuses_unpinned_contract_or_non_private_output(self):
         with self.assertRaises(ValueError):
             run(Path("absent"), "invalid", ROOT / "docs")
-        with self.assertRaises(ValueError):
-            run(Path("absent"), "invalid", ROOT / "outputs/prd09_2d23")
+        # Public CI intentionally has no private historical output directory.
+        # Build the nonempty-output rejection fixture independently of it.
+        (ROOT / "outputs").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=ROOT / "outputs") as temp:
+            output = Path(temp)
+            (output / "synthetic-sentinel").write_bytes(b"do not overwrite")
+            with self.assertRaises(ValueError):
+                run(Path("absent"), "invalid", output)
 
 
 @unittest.skipUnless((PRIVATE / "closure.json").exists(), "private corpus absent; no real data shipped")
