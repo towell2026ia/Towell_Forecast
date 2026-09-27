@@ -79,6 +79,11 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install openpyxl==3.1.5
+      - run: node scripts/test_certified_bootstrap_sql.mjs
       - run: npm run test:supabase-baseline
       - run: npm run test:supabase-security
       - run: npm run lint
