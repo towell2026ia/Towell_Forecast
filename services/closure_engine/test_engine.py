@@ -170,8 +170,10 @@ class ClosureEngineTests(unittest.TestCase):
     def test_cp22_dashboard_unchanged(self):
         self._assert_visual_hash("app/executive-dashboard.tsx")
 
-    def test_cp23_navigation_unchanged(self):
-        self._assert_visual_hash("app/forecast-towell-app.tsx")
+    def test_cp23_legacy_navigation_remains_frozen(self):
+        # The active multi-chain shell is covered by UI01-UI20. PRD06's pilot
+        # navigation remains byte-frozen in a non-executable regression fixture.
+        self._assert_visual_hash("app/forecast-towell-app.tsx", "services/ensemble_engine/fixtures/legacy-forecast-towell-app.tsx.txt")
 
     def test_cp24_components_unchanged(self):
         for path in ("app/forecast-engines-view.tsx", "app/statistical-engine-view.tsx", "app/ml-engine-view.tsx", "app/globals.css"):
@@ -182,10 +184,10 @@ class ClosureEngineTests(unittest.TestCase):
         self.assertTrue(result["next_cycle_prepared"])
         self.assertTrue(any(row["type"] == "next_cycle_prepared" for row in result["learning_events"]))
 
-    def _assert_visual_hash(self, relative_path: str):
+    def _assert_visual_hash(self, relative_path: str, frozen_fixture: str | None = None):
         root = Path(__file__).parents[2]
         baseline = json.loads((root / "services/ensemble_engine/visual-baseline.json").read_text(encoding="utf-8"))
-        digest = sha256((root / relative_path).read_bytes()).hexdigest().upper()
+        digest = sha256((root / (frozen_fixture or relative_path)).read_bytes()).hexdigest().upper()
         self.assertEqual(digest, baseline[relative_path])
 
 

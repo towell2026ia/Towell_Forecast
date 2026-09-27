@@ -147,6 +147,15 @@ only pre-existing coverage-library lint warnings remain. Built browser assets
 are separately scanned for privileged environment references. CI repeats these
 checks plus Docker build and persistent-volume/restart smoke.
 
+The original PRD06/07 navigation hash remains unchanged in
+`services/ensemble_engine/visual-baseline.json`. Its exact approved-base bytes
+are retained as `fixtures/legacy-forecast-towell-app.tsx.txt` (SHA-256
+`9E3810337AC3303F510B4751E43F7C8041F0ABC517E22714799BDE1181A96F09`).
+Those two legacy navigation tests now verify this non-executable frozen artifact;
+they cannot require a pilot hardcode in the deliberately replaced active shell.
+UI01-UI20 and browser-graph tests cover the active portal instead. No baseline
+hash is regenerated, and no decision/closure implementation is modified.
+
 Remote read-only regression confirms 30 masters, 18 actual-bearing scopes, 1,010
 products, 50 categories, 39,270 observations, 28/28 RLS and private buckets.
 An actual anonymous public-key request returns 401 with no protected rows.

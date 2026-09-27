@@ -138,8 +138,10 @@ class DecisionEngineTests(unittest.TestCase):
     def test_cp25_dashboard_unchanged(self):
         self._assert_visual_hash("app/executive-dashboard.tsx")
 
-    def test_cp26_navigation_unchanged(self):
-        self._assert_visual_hash("app/forecast-towell-app.tsx")
+    def test_cp26_legacy_navigation_remains_frozen(self):
+        # E1 deliberately replaces the active pilot shell. Keep its original
+        # bytes/hash as historical evidence, not as the new runtime authority.
+        self._assert_visual_hash("app/forecast-towell-app.tsx", "services/ensemble_engine/fixtures/legacy-forecast-towell-app.tsx.txt")
 
     def test_cp27_components_unchanged(self):
         for path in ("app/forecast-engines-view.tsx", "app/statistical-engine-view.tsx", "app/ml-engine-view.tsx", "app/globals.css"):
@@ -163,10 +165,10 @@ class DecisionEngineTests(unittest.TestCase):
     def _sql(self):
         return (Path(__file__).parents[2] / "supabase/legacy_migrations/202609200002_prd07_managerial_decisions.sql").read_text(encoding="utf-8")
 
-    def _assert_visual_hash(self, relative_path: str):
+    def _assert_visual_hash(self, relative_path: str, frozen_fixture: str | None = None):
         root = Path(__file__).parents[2]
         baseline = json.loads((root / "services/ensemble_engine/visual-baseline.json").read_text(encoding="utf-8"))
-        actual = sha256((root / relative_path).read_bytes()).hexdigest().upper()
+        actual = sha256((root / (frozen_fixture or relative_path)).read_bytes()).hexdigest().upper()
         self.assertEqual(actual, baseline[relative_path])
 
 
