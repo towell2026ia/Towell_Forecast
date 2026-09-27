@@ -2,22 +2,55 @@
 
 ## Status
 
-**IMPLEMENTATION READY — HISTORICAL BOOTSTRAP NOT YET EXECUTED.** The preparation
-script cannot execute SQL. The separate administrative executor requires a clean
-pushed implementation, the exact private source contract, a freshly verified
-linked project and a real approved Auth ADMIN. Remote publication/readback,
-idempotent rerun, security behavior and final CP01–36 remain pending.
-Fresh Towell CLI authorization and project access have now been verified. The
-read-only remote audit found migrations 001–007, 28/28 RLS-enabled baseline
-tables, the expected view and four private buckets. BEFORE counts for chains,
-categories, products, monthly_observations, import_batches and source_evidence
-are all zero. No existing bootstrap jobs were found. A real Auth user has now
-been verified and assigned ACTIVE/ADMIN following explicit user approval; the
-administrative approval is audited. CLI authorization is not a Supabase Auth
-identity. The shared CLI account changed again during the final read-only check;
-execution stops without writes until fresh Towell authorization is verified.
-No bootstrap business INSERT has occurred. Never infer access from a previous
-CLI session or a failed/403 request.
+**REMOTE CERTIFIED BOOTSTRAP GATES: PASS.** The certified corpus was published
+and independently read back from project `bskoyqhbgrycpwhydnnr`. CP01–36 pass;
+CP18/CP34 exercise failure rollback and scoped withdrawal against the baseline
+in local synthetic PostgreSQL, not by deleting the successful remote corpus.
+The final documentation commit must additionally pass GitHub Actions before
+the release is declared `PASS_CERTIFIED_BOOTSTRAP`.
+
+Execution commit: `6e41ba59522460682790f84ef7f1a29e10adc932`.
+Bootstrap ID: `7dcd4781-f485-5479-83d5-1dd9edc29f06`.
+The execution commit, original bootstrap timestamp and sealed plan are retained;
+a later documentation commit does not rebind or republish this historical job.
+
+Fresh normal Supabase CLI authorization used a dedicated profile selected for
+every command. The read-only preflight confirmed migrations 001–007, all 28
+RLS-enabled baseline tables, the expected view and four private buckets. A real
+Auth ADMIN was verified after explicit user approval; that approval is audited.
+CLI authorization is not itself a Supabase Auth identity. Never infer current
+access from an old session or a failed/403 request.
+
+| Remote measure | Before | After / identical rerun |
+| --- | ---: | ---: |
+| Chain/scope masters | 0 | 30 |
+| Categories | 0 | 50 |
+| Products | 0 | 1,010 |
+| Physical import batches | 0 | 18 |
+| Source evidence | 0 | 39,270 |
+| Monthly observations | 0 | 39,270 |
+
+All 18 actual-bearing scopes reconcile independently, including product counts,
+metric counts, period bounds and fact grains. The remaining 12 scope masters
+are proven parent ancestors, not additional manufactured actuals. Remote business
+keys and actual joined values reconstruct the exact dataset SHA below. All
+39,270 observations retain `UNKNOWN` and `available_at=NULL`; fabricated dates,
+loaded scope blockers and loaded quantity conflicts are all zero.
+
+The initial readback encountered a transport failure after 37,000 rows, after
+publication had already committed. Recovery first confirmed the same completed
+job, sealed plan and exact counts, then independently reread all 39,270 rows
+using durable read-only pages. It did not create a new ID or republish facts.
+The subsequent identical-bootstrap rerun left counts, business checksum and
+completion audit unchanged: one completed job, 99 staging chunks and one
+completion audit. The audit attests actor, execution commit, source certification,
+start/completion timestamps and counts.
+
+Real authenticated VIEWER/EDITOR/ADMIN and cross-chain RLS checks pass 10/10.
+Their transaction was rolled back; independent post-probe checks confirm no
+persisted grants, role changes, product probe edits or dataset changes. RLS
+remains enabled 28/28, all four buckets remain private and no source XLSX was
+uploaded. Existing migrations and frozen evidence/goldens are unchanged.
 
 Repository Gate 0 was checked against approved commit
 `4002bded348a6570eaa1b4faeebf4855ec172942`: clean main, HEAD = origin/main,
@@ -63,7 +96,8 @@ must not generate a different ID or assume a connection failure rolled back.
 The planning module itself performs no database or network operation and is
 not imported into the application runtime.
 
-Current local validation: full 39,270-literal replay PASS, exact dataset and
+Completed validation: full 39,270-literal replay immediately before insertion
+PASS, exact dataset and
 certification hashes PASS, source-order determinism PASS, frozen global/FENDI
 goldens unchanged, and 46/46 new offline planning/readback tests plus 13/13
 synthetic PostgreSQL transaction/security tests PASS. Full backend: 452 collected,
@@ -71,11 +105,14 @@ synthetic PostgreSQL transaction/security tests PASS. Full backend: 452 collecte
 110 engine tests, 21/21 SQL security tests, schema tests, motor audit, frontend
 lint/typecheck/build, targeted Ruff and whitespace checks pass. A local format
 roundtrip also reproduces the exact 39,270-fact SHA, all 18 scope totals and
-grain counts. These tests are **not** a claim that remote CP01–36 passed.
+grain counts. Remote readback, idempotency, scope/exclusion checks and security
+also pass independently; local tests alone are not used as remote evidence.
 The dynamic plan contains 30 scope
 masters (18 actual-bearing scopes plus 12 proven parent ancestors), 1,010
-products, 50 named categories and no backlog observations. No master has
-yet been inserted remotely.
+products, 50 named categories and no backlog observations. These exact counts
+were subsequently verified remotely. Implementation CI run 36297899723 passed
+all three jobs, including Docker build and volume/restart smoke. Final closure
+CI is tracked separately against the final documentation commit.
 
 ## Mapping to the existing contract — no migration proposed
 
@@ -85,7 +122,7 @@ multi-chain batch. Physical batches must start `UPLOADED`, then transition
 `VALIDATING → VALIDATED → CONFIRMED → IMPORTED`; `STAGING` is not a permitted
 physical import_batches status. Do not bypass that guard.
 
-The proposed logical `HISTORICAL_CERTIFIED_BOOTSTRAP_V1` starts `STAGING` in
+The logical `HISTORICAL_CERTIFIED_BOOTSTRAP_V1` starts `STAGING` in
 the existing global administrative job/manifest and owns one physical batch
 per dynamically derived actual-bearing scope. Aggregate metadata belongs to
 that logical manifest. This distinction is tested against migrations 001–007
@@ -110,7 +147,7 @@ categories has no arbitrarily chosen current category. `UNCLASSIFIED` is missing
 category evidence, not an extra category. No fuzzy, case or whitespace merge is
 performed without a certified mapping.
 
-## Required remote execution gates — still pending
+## Remote execution gates — completed
 
 1. Fresh account access to project `bskoyqhbgrycpwhydnnr`, linked ref equality,
    migrations exactly 001–007, 28 expected RLS-enabled tables, expected view,
