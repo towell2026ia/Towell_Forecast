@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "FORECAST Towell",
-  description: "Operación, calidad, periodos y auditoría para el piloto FENDI BD.",
+  description: "Consulta del histórico certificado multi-cadena de FORECAST Towell.",
   icons: { icon: "/favicon.svg", shortcut: "/favicon.svg" },
 };
 
