@@ -54,7 +54,7 @@ describe("Multi-chain read-only UI", () => {
   it("PF12/PF14 period failure leaves Dashboard visible and disables only period selectors", async () => {
     const repo = fixture(); repo.getPeriods = vi.fn(async () => { throw new Error("private period failure"); });
     render(<ForecastTowellApp profile={{ id: "u", full_name: "Usuario", global_role: "ADMIN", status: "ACTIVE" }} repository={repo} onLogout={vi.fn()}/>);
-    expect(await screen.findByText("No fue posible cargar periodos.")).toBeTruthy();
+    expect(await screen.findByText("No fue posible cargar los periodos.")).toBeTruthy();
     await screen.findByText("Último periodo disponible"); expect(screen.getByText("2026-03")).toBeTruthy();
     for (const label of ["Periodo desde", "Periodo hasta"]) expect(screen.getByRole("combobox", { name: label }).hasAttribute("disabled")).toBe(true);
     for (const label of ["Cadena / unidad comercial", "Categoría", "Producto"]) expect(screen.getByRole("combobox", { name: label }).hasAttribute("disabled")).toBe(false);
@@ -63,7 +63,7 @@ describe("Multi-chain read-only UI", () => {
   it("PF13/PF15 periods failing keeps History, chain/category/product and pagination usable", async () => {
     const repo = fixture(); repo.getPeriods = vi.fn(async () => { throw new Error("period failure"); });
     filterHarness(repo, <><GlobalFilters/><HistoryView/></>);
-    await screen.findByText("No fue posible cargar periodos.");
+    await screen.findByText("No fue posible cargar los periodos.");
     await screen.findByText("Producto desde RLS");
     await pick("Cadena / unidad comercial", chain1.name);
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Categoría" }).hasAttribute("disabled")).toBe(false));
@@ -75,7 +75,7 @@ describe("Multi-chain read-only UI", () => {
     await userEvent.click(screen.getByRole("button", { name: "Anterior" })); await screen.findByText("Página 1");
     expect(screen.queryByText("No fue posible consultar los datos.")).toBeNull();
   });
-  for (const [method, label, message] of [["getVisibleChains", "Cadena / unidad comercial", "cadenas"], ["getCategories", "Categoría", "categorías"], ["getProducts", "Producto", "productos"]] as const) {
+  for (const [method, label, message] of [["getVisibleChains", "Cadena / unidad comercial", "las cadenas"], ["getCategories", "Categoría", "las categorías"], ["getProducts", "Producto", "los productos"]] as const) {
     it(`isolates ${message} failure to its own control`, async () => {
       const repo = fixture(); repo[method] = vi.fn(async () => { throw new Error("controlled read failure"); });
       filterHarness(repo, <GlobalFilters/>);

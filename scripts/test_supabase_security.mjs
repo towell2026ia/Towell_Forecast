@@ -193,7 +193,14 @@ try {
     assert.deepEqual(periods.map(r => r.chain_id), [ids.a, ids.b])
     assert.equal(periods.length, 2)
   }))
-  await check('PF11', 'VIEWER only sees authorized periods; cross-chain and no-grant reads empty', async () => {
+  await check('PF11', 'EDITOR only sees authorized periods and cannot read or write another scope', async () => as('authenticated', ids.editor, async () => {
+    assert.deepEqual((await rows('select * from public.portal_history_periods')).map(r => r.chain_id), [ids.a])
+    assert.equal((await rows(`select * from public.portal_history_periods where chain_id='${ids.b}'`)).length, 0)
+    for (const sql of ['update public.portal_history_periods set period=\'2026-10-01\'', 'delete from public.portal_history_periods']) {
+      await assert.rejects(db.exec(sql), error => ['42501', '55000'].includes(error.code))
+    }
+  }))
+  await check('PF12', 'VIEWER only sees authorized periods; cross-chain and no-grant reads empty', async () => {
     await as('authenticated', ids.viewer, async () => {
       assert.deepEqual((await rows('select * from public.portal_history_periods')).map(r => r.chain_id), [ids.a])
       assert.equal((await rows(`select * from public.portal_history_periods where chain_id='${ids.b}'`)).length, 0)

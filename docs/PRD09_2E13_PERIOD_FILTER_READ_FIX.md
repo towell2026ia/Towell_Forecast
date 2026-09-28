@@ -37,14 +37,21 @@ focus listener, polling, fixture fallback or model execution was added.
 
 ## Evidence gates
 
-- PF01–PF08: repository tests prove the exact single request, optional upstream
+- PF01: original failing browser HTTP diagnostic remains NOT REPRODUCED;
+  source inspection is not an authenticated production request.
+- PF02–PF08: repository tests prove the exact single request, optional upstream
   chain equality, visible union, sorting, deduplication and no fabricated month.
-- PF09–PF11: isolated PostgreSQL tests execute GRANT/RLS for anon, ADMIN,
-  VIEWER, inactive and no-grant users. Draft versions remain absent.
-- PF12–PF15: UI tests exercise period failure with usable Dashboard, Historical
-  table/pagination and other controls; error messages remain control-specific.
-- PF16: fixed SHA-256 of migration 008 plus unchanged existing view definitions.
-- PF17/PF18: explicit remote read-only audit checks 39,270 facts, UNKNOWN/NULL,
+- PF09–PF12: isolated PostgreSQL tests execute GRANT/RLS for anon, ADMIN,
+  EDITOR, VIEWER, inactive and no-grant users. Draft versions remain absent.
+  EDITOR cannot read another scope or write through the compact period view.
+- PF13–PF19: UI/repository tests exercise period failure with usable Dashboard,
+  Historical table/pagination, category/product IDs and ITEM/UPC search;
+  error messages remain control-specific.
+- PF20–PF23: automated session/auth/assistant regressions preserve the shell,
+  filters, pagination and Lottie across synthetic focus/visibility events.
+  Actual window switching/minimize and authenticated A–H remain owner gates.
+- PF24: fixed SHA-256 of migration 008 plus unchanged existing view definitions.
+- PF25–PF28: explicit remote read-only audit checks 39,270 facts, UNKNOWN/NULL,
   model counts zero, exact migration history, business/lineage checksum and
   fresh private readback using the original `verify_remote_facts` verifier.
   It recomputes the original dataset SHA, not just the count.
@@ -93,3 +100,51 @@ on the base release. Preserve that acceptance; only validate this correction:
 Record the GitHub/Netlify matching SHA and GitHub Actions result. Browser
 acceptance is PENDING until observed or explicitly confirmed by the owner;
 fixture tests and administrative SQL probes do not substitute for it.
+
+## Expanded closure request (2026-09-28)
+
+The requested base remains `52cdf6a88e1e67ab41949d90979c14c63cf94039`;
+the clean entry HEAD/origin main is its already-published descendant
+`25080410a0aeb6adfd0241ad7e0cb63dcf9a6db3`, with successful CI. Do not reset
+that implementation or reapply migration 009. This follow-up changes only
+the exact per-control error copy and an explicit EDITOR period-view test.
+No migration, historical fact, model, auth/session or Lottie source changes.
+
+The expanded PF01 diagnostic gate remains **NOT REPRODUCED** for the original
+failing browser request: the source N+2 pattern is confirmed, but no original
+HTTP status/safe error code is available. The existing authenticated
+`/api/portal-validation` probes all five reads independently; it must be
+observed in a legitimate owner session if the error persists. Never claim a
+specific failed endpoint or upstream code based only on a hypothesis.
+
+Executable aspects of PF02–PF28 are backed by repository, UI, RLS and read-only
+data regression checks. These are not acceptance of scenarios A–H on
+the deployed host. Final public UI closure additionally requires owner or
+browser observation of A–H, including logout and focus/minimize persistence.
+
+Supabase owner settings to confirm (no secret values):
+
+- Site URL: `https://towell-forecastia.netlify.app`
+- Allowed redirect: `https://towell-forecastia.netlify.app/update-password`
+- Public signup remains disabled.
+
+Python stays SQLite/normalized with Supabase disabled. Sites is rollback
+only; no Sites publication is performed in this follow-up.
+
+Follow-up executable verification: portal 111/111, SQL security 36/36 with
+RLS 28/28, baseline constraints, synthetic bootstrap 13/13, backend 455 tests
+(6 skipped) at 87% coverage, engine regressions 110/110 and engine audit PASS.
+Lint has 0 errors (4 existing generated-venv warnings); typecheck, both builds,
+both public bundle scans, backend static checks and dependency audit passed.
+The missing local openpyxl dependency was installed at the existing declared
+version 3.1.5 before re-running the full backend/bootstrap tests successfully.
+No dependency manifest was changed.
+
+Fresh remote read-only verification in the ignored directory
+`outputs/prd09_2e13/expanded_closure_readonly/` re-read all 39,270 facts and
+reproduced the original dataset SHA and business/lineage checksum. Scopes 18,
+products 1,010, latest 2026-07; 43 global months / 19 Al Super months. Historical
+writes 0, productive runs 0, new vintages 0, Champion changes 0.
+Local Docker is unavailable; its build and volume-restart gates are executed
+in GitHub Actions. Publication/CI and real UI acceptance are reported only
+after their respective evidence is available, not pre-certified here.
