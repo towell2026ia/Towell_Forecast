@@ -1,4 +1,15 @@
-# vinext-starter
+# FORECAST Towell
+
+Production frontend: [towell-forecastia.netlify.app](https://towell-forecastia.netlify.app).
+Source of truth: `towell2026ia/Towell_Forecast`, branch `main`.
+Sites/Cloudflare remains a temporary rollback target, not the canonical host.
+
+See [Netlify deployment](docs/NETLIFY_DEPLOYMENT.md) and
+[session stability acceptance](docs/PRD09_2E12_SESSION_STABILITY.md).
+The starter documentation below describes the retained Sites compatibility;
+its workspace-auth examples are not the portal's Supabase authorization model.
+
+## Retained Vinext starter
 
 A clean full-stack starter running on [vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and Drizzle support.
 

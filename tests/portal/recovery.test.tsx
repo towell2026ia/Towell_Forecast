@@ -1,5 +1,5 @@
 import React from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -25,7 +25,8 @@ function sdk() {
   const query = { select: () => query, eq: () => query, abortSignal: () => query, maybeSingle: async () => ({ data: { id: "user-1", full_name: "Fixture", global_role: "ADMIN", status: "ACTIVE" }, error: null }) };
   return { client: { auth, from: () => query } as unknown as SupabaseClient, auth, emit: (event: string) => callback(event, event === "SIGNED_OUT" ? null : session) };
 }
-afterEach(() => { clearRecoverySession(); window.history.replaceState(null, "", "/"); vi.clearAllMocks(); });
+beforeEach(() => { vi.stubEnv("NODE_ENV", "development"); });
+afterEach(() => { clearRecoverySession(); window.history.replaceState(null, "", "/"); vi.clearAllMocks(); vi.unstubAllEnvs(); });
 async function recoveryForm(s: ReturnType<typeof sdk>) {
   window.history.replaceState(null, "", "/update-password");
   render(<UpdatePassword config={config} providedClient={s.client}/>);
@@ -38,6 +39,16 @@ async function submitPassword(password = "Synthetic-password-456", confirmation 
   await userEvent.click(screen.getByRole("button", { name: "Guardar nueva contraseña" }));
 }
 describe("Password recovery", () => {
+  it("request reset in production uses canonical Netlify rather than the browser origin", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const s = sdk(); s.auth.getUser.mockResolvedValue({ data: { user: null }, error: null });
+    render(<PortalAuth login config={{ ...config, siteUrl: "https://towell-forecastia.netlify.app/" }} providedClient={s.client}/>);
+    await userEvent.click(await screen.findByRole("button", { name: "¿Olvidaste tu contraseña?" }));
+    await userEvent.type(screen.getByLabelText("Correo electrónico"), "fixture@example.test");
+    await userEvent.click(screen.getByRole("button", { name: "Enviar enlace de recuperación" }));
+    expect(s.auth.resetPasswordForEmail).toHaveBeenCalledWith("fixture@example.test", { redirectTo: "https://towell-forecastia.netlify.app/update-password" });
+    expect(await screen.findByText(/Si existe una cuenta autorizada/)).toBeTruthy();
+  });
   for (const outcome of ["success", "unknown-account", "network"] as const) {
     it(`request reset: ${outcome} uses the identical generic notice`, async () => {
       const s = sdk(); s.auth.getUser.mockResolvedValue({ data: { user: null }, error: null });

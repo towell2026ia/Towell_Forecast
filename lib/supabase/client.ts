@@ -1,11 +1,13 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { PublicSupabaseConfig } from "./types";
 import { clearRecoverySession, isRecoveryCallback } from "./recovery";
+import { normalizeSiteUrl } from "./site-url";
 
 export function validatePublicConfig(config: PublicSupabaseConfig): boolean {
   try {
     const url = new URL(config.url);
     if (url.protocol !== "https:" || url.username || url.password || url.pathname !== "/") return false;
+    if (config.siteUrl?.trim()) normalizeSiteUrl(config.siteUrl.trim(), process.env.NODE_ENV === "development");
     if (config.key.startsWith("sb_publishable_")) return config.key.length > 20;
     const claims = JSON.parse(atob(config.key.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
     return claims.role === "anon";
@@ -18,7 +20,7 @@ export function getBrowserClient(config: PublicSupabaseConfig): SupabaseClient {
   if (!validatePublicConfig(config)) throw new Error("public_config_unavailable");
   const identity = `${config.url}:${config.key}`;
   if (!singleton || configIdentity !== identity) {
-    // Only the two public configuration fields can enter this module.
+    // The public site URL never changes SDK identity or recreates this client.
     singleton = createClient(config.url, config.key, { auth: {
       persistSession: true, autoRefreshToken: true, flowType: "implicit",
       detectSessionInUrl: isRecoveryCallback,

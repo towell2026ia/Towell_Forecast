@@ -13,6 +13,7 @@ import type { ForecastReadRepository, Profile, PublicSupabaseConfig } from "@/li
 import ForecastTowellApp from "./forecast-towell-app";
 import { passwordRecoveryRedirect, rememberRecoverySession } from "@/lib/supabase/recovery";
 import type { PortalReadDiagnostic } from "@/lib/portal-read-diagnostic";
+import { recoveryOrigin } from "@/lib/supabase/site-url";
 
 export function LoginPanel({ busy, error, configured, onSubmit, onRequestReset }: { busy: boolean; error: string; configured: boolean; onSubmit: (email: string, password: string) => Promise<void>; onRequestReset?: (email: string) => Promise<void> }) {
   const [reset, setReset] = useState(false);
@@ -44,30 +45,56 @@ export function LoginPanel({ busy, error, configured, onSubmit, onRequestReset }
 export default function PortalAuth({ config, login = false, providedClient }: { config: PublicSupabaseConfig; login?: boolean; providedClient?: SupabaseClient }) {
   const { replace } = useRouter();
   const [client, setClient] = useState<SupabaseClient | null>(null);
-  const [access, setAccess] = useState<{ profile: Profile; repository: ForecastReadRepository; epoch: number } | null>(null);
+  const [access, setAccess] = useState<{ profile: Profile; repository: ForecastReadRepository } | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const generation = useRef(0);
   const recovering = useRef(false);
   const repository = useRef<ForecastReadRepository | null>(null);
+  const identity = useRef<string | null>(null);
+  const mountedAccess = useRef<typeof access>(null);
+  const pending = useRef<{ expectedId: string | null; epoch: number } | null>(null);
+  const navigation = useRef(replace);
+  useEffect(() => { navigation.current = replace; }, [replace]);
   const configured = Boolean(providedClient) || validatePublicConfig(config);
   const url = config.url, key = config.key;
   const clear = useCallback(() => {
     generation.current += 1;
-    repository.current?.dispose(); repository.current = null; setAccess(null);
+    repository.current?.dispose(); repository.current = null;
+    identity.current = null; pending.current = null; mountedAccess.current = null; setAccess(null);
   }, []);
 
   useEffect(() => {
     if (!configured) return;
     const sdk = providedClient ?? getBrowserClient({ url, key });
     let alive = true;
-    async function checkSession() {
-      clear(); const epoch = generation.current; setLoading(true);
+    function initialize(expectedId: string | null = null) {
+      if (!alive || recovering.current) return;
+      if (mountedAccess.current && (!expectedId || identity.current === expectedId)) {
+        if (login) navigation.current("/");
+        return;
+      }
+      if (pending.current) {
+        if (!expectedId || pending.current.expectedId === expectedId || identity.current === expectedId) return;
+        clear(); // Cancel only a genuinely different identity, never a refresh.
+      } else if (identity.current && expectedId && identity.current !== expectedId) clear();
+      const task = { expectedId, epoch: generation.current };
+      pending.current = task;
+      if (!mountedAccess.current) setLoading(true);
+      void verifySession(task);
+    }
+    async function verifySession(task: { expectedId: string | null; epoch: number }) {
+      const epoch = task.epoch;
       try {
         const { data, error: authError } = await sdk.auth.getUser();
         if (!alive || epoch !== generation.current || recovering.current) return;
-        if (authError || !data.user) { setLoading(false); if (!login) replace("/login"); return; }
+        if (authError || !data.user) { clear(); setLoading(false); if (!login) navigation.current("/login"); return; }
+        // Auth event user IDs are hints only. Auth + database profile remain
+        // authoritative; a stale or manipulated event cannot select identity.
+        if (task.expectedId && data.user.id !== task.expectedId) throw new Error("session_identity_mismatch");
+        if (mountedAccess.current?.profile.id === data.user.id) { setLoading(false); return; }
+        identity.current = data.user.id;
         const reported = new Set<string>();
         const reportReadFailure = (diagnostic: PortalReadDiagnostic) => {
           const signature = JSON.stringify(diagnostic);
@@ -85,8 +112,9 @@ export default function PortalAuth({ config, login = false, providedClient }: { 
         const repo = new SupabaseForecastReadRepository(sdk, data.user.id, reportReadFailure);
         repository.current = repo;
         const profile = await repo.getCurrentProfile();
-        if (!alive || epoch !== generation.current) { repo.dispose(); return; }
-        setAccess({ profile, repository: repo, epoch }); setError(""); setLoading(false);
+        if (!alive || epoch !== generation.current || recovering.current) return;
+        const next = { profile, repository: repo };
+        mountedAccess.current = next; setAccess(next); setError(""); setLoading(false);
         // Optional HTTP read attestation. It verifies the same JWT at Supabase,
         // never forwards identity to Python, and does not persist auth material.
         if (typeof sdk.auth.getSession === "function") {
@@ -96,30 +124,44 @@ export default function PortalAuth({ config, login = false, providedClient }: { 
             }
           }).catch(() => logPortalEvent("read_error"));
         }
-        if (login) replace("/");
+        if (login) navigation.current("/");
       } catch {
         if (!alive || epoch !== generation.current) return;
-        repository.current?.dispose(); repository.current = null; setAccess(null); setLoading(false);
+        clear(); setLoading(false);
         setError("No tienes acceso activo al portal. Contacta al administrador.");
+      } finally {
+        if (pending.current === task) pending.current = null;
       }
     }
-    queueMicrotask(() => { if (alive) { setClient(sdk); void checkSession(); } });
+    queueMicrotask(() => { if (alive) { setClient(sdk); initialize(); } });
     const { data } = sdk.auth.onAuthStateChange((event, session) => {
-      // Do not await SDK methods inside its auth callback/lock.
-      clear();
+      if (!alive) return;
+      // Classify before mutating. Token renewal and repeated same-user events
+      // must be invisible to the mounted shell. No auth polling/focus listener.
+      if (event === "SIGNED_OUT") {
+        clear(); recovering.current = false; setLoading(false); setBusy(false); setError(""); navigation.current("/login"); return;
+      }
       if (event === "PASSWORD_RECOVERY") {
-        recovering.current = true; setLoading(false);
+        recovering.current = true; generation.current += 1; pending.current = null;
+        mountedAccess.current = null; setAccess(null); setLoading(false); setBusy(false);
         if (session?.user.id) rememberRecoverySession(session.user.id);
-        replace("/update-password"); return;
+        // Redirect unmount owns disposal; a recovery session never opens portal.
+        navigation.current("/update-password"); return;
       }
       if (recovering.current) return;
-      if (event === "SIGNED_OUT") { setLoading(false); setError(""); replace("/login"); }
-      else queueMicrotask(() => { if (alive) void checkSession(); });
+      const userId = session?.user.id ?? null;
+      if ((event === "TOKEN_REFRESHED" || event === "USER_UPDATED") && (!userId || userId === identity.current)) return;
+      if (!["INITIAL_SESSION", "SIGNED_IN", "TOKEN_REFRESHED", "USER_UPDATED"].includes(event)) return;
+      if (userId && mountedAccess.current?.profile.id === userId) return;
+      if (userId && identity.current && identity.current !== userId) clear();
+      // Never await SDK methods inside the auth callback/lock.
+      queueMicrotask(() => { if (alive) initialize(userId); });
     });
-    const focus = () => { void checkSession(); };
-    window.addEventListener("focus", focus);
-    return () => { alive = false; data.subscription.unsubscribe(); window.removeEventListener("focus", focus); generation.current += 1; repository.current?.dispose(); repository.current = null; };
-  }, [clear, url, key, configured, login, providedClient, replace]);
+    return () => {
+      alive = false; data.subscription.unsubscribe(); generation.current += 1;
+      repository.current?.dispose(); repository.current = null; identity.current = null; pending.current = null; mountedAccess.current = null;
+    };
+  }, [clear, url, key, configured, login, providedClient]);
 
   async function signIn(email: string, password: string) {
     if (!client || busy) return;
@@ -134,7 +176,7 @@ export default function PortalAuth({ config, login = false, providedClient }: { 
   async function requestReset(email: string) {
     if (!client || busy) return;
     setBusy(true);
-    try { await client.auth.resetPasswordForEmail(email, { redirectTo: passwordRecoveryRedirect(window.location.origin) }); }
+    try { await client.auth.resetPasswordForEmail(email, { redirectTo: passwordRecoveryRedirect(recoveryOrigin(config.siteUrl, window.location.origin, process.env.NODE_ENV === "development")) }); }
     catch { /* All outcomes use the same public message; no account enumeration. */ }
     finally { setBusy(false); }
   }
@@ -146,5 +188,5 @@ export default function PortalAuth({ config, login = false, providedClient }: { 
   }
   if (loading && configured) return <main className="grid min-h-svh place-items-center bg-[#f7f9fc]" role="status">Verificando sesión…</main>;
   if (!access || login) return <LoginPanel configured={configured} busy={busy} error={error} onSubmit={signIn} onRequestReset={requestReset}/>;
-  return <ForecastTowellApp key={access.profile.id + access.epoch} profile={access.profile} repository={access.repository} onLogout={signOut}/>;
+  return <ForecastTowellApp key={access.profile.id} profile={access.profile} repository={access.repository} onLogout={signOut}/>;
 }

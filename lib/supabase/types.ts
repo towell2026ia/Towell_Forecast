@@ -1,6 +1,6 @@
 export type Role = "ADMIN" | "EDITOR" | "VIEWER";
 export type Profile = { id: string; full_name: string; global_role: Role; status: "ACTIVE" | "INACTIVE" };
-export type PublicSupabaseConfig = { url: string; key: string };
+export type PublicSupabaseConfig = { url: string; key: string; siteUrl?: string };
 export type Chain = { id: string; code: string; name: string; status: string; has_history: boolean; parentId: string | null; scopeType: string | null };
 export type Category = { id: string; chain_id: string; name: string };
 export type Product = { id: string; chain_id: string; category_id: string | null; product_code: string; variant_code: string | null; description: string; identifiers: [string | null, string | null][] };

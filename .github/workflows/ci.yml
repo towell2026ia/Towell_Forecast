@@ -91,3 +91,9 @@ jobs:
       - run: npx tsc --noEmit
       - run: npm run build
       - run: node scripts/check-portal-bundle.mjs
+      - name: Native Next build for Netlify
+        run: npm run build:netlify
+        env:
+          NEXT_PUBLIC_SITE_URL: https://towell-forecastia.netlify.app
+      - name: Netlify browser bundle security
+        run: node scripts/check-portal-bundle.mjs .next/static

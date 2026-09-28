@@ -3,9 +3,10 @@ import { assertActiveProfile, SupabaseForecastReadRepository } from "@/lib/forec
 import { validatePublicConfig } from "@/lib/supabase/client";
 import { emptyFilters, type Profile } from "@/lib/supabase/types";
 import { logReadDiagnostic, parseReadDiagnostic, PortalReadError, type PortalReadDiagnostic } from "@/lib/portal-read-diagnostic";
+import { publicPortalConfig } from "@/lib/supabase/public-config";
 
 async function authorize(request: Request) {
-  const config = { url: process.env.NEXT_PUBLIC_SUPABASE_URL ?? "", key: process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "" };
+  const config = publicPortalConfig();
   const authorization = request.headers.get("authorization");
   const denied = (status: number) => Response.json({ error: "portal_access_denied" }, { status, headers: { "Cache-Control": "no-store" } });
   if (!authorization?.startsWith("Bearer ") || authorization.length > 8192) return denied(401);

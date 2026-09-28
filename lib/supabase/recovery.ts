@@ -1,3 +1,5 @@
+import { normalizeSiteUrl } from "./site-url";
+
 const markerKey = "towell-password-recovery";
 const recoveryWindowMs = 20 * 60 * 1000;
 
@@ -7,9 +9,7 @@ export function isRecoveryCallback(url: URL, params: Record<string, string>): bo
   return url.pathname === "/update-password" && (params.type === "recovery" || Boolean(params.error || params.error_code));
 }
 export function passwordRecoveryRedirect(origin: string): string {
-  const url = new URL(origin);
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && url.hostname === "localhost")) throw new Error("invalid_recovery_origin");
-  return new URL("/update-password", url.origin).href;
+  return new URL("/update-password", normalizeSiteUrl(origin, true)).href;
 }
 export function clearRecoverySession() {
   try { window.sessionStorage.removeItem(markerKey); } catch { /* Storage can be disabled. */ }
