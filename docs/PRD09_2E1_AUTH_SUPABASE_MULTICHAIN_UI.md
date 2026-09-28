@@ -33,6 +33,50 @@ No shared server-global user data cache is used. SSR sends only the public shell
 and public configuration; protected business rows are read after authentication.
 No SSR cookie package is necessary for this client-session architecture.
 
+### Password recovery extension (2026-09-28)
+
+The login now offers “¿Olvidaste tu contraseña?” and an email-only recovery form.
+It calls `supabase.auth.resetPasswordForEmail` with the current origin's
+`/update-password`. Success, unknown-email errors and network failures all show
+the same conditional notice; neither account existence nor SDK details are
+revealed. No public signup, user creation or service-role operation is added.
+
+The official SDK's implicit browser flow processes credentials only on
+`/update-password` and handles `PASSWORD_RECOVERY`. The update screen verifies
+the Auth user before admitting the recovery session; an ordinary login or bare
+URL cannot enable it. Callback fragments are removed, and the page declares
+`no-referrer`. A short-lived sessionStorage marker stores only user ID and
+expiry, allowing a refresh; it is not identity authority, and every update
+revalidates the signed user against Supabase. Expired/mismatched sessions fail
+closed. No password, callback credential or JWT is logged by this flow.
+
+The form requires matching passwords of at least 12 characters, then calls
+`supabase.auth.updateUser({ password })`. On success it clears the form and
+recovery context, signs out locally and redirects to `/login` for normal access
+validation. The application does not change any user's password on their behalf.
+
+The correct project's Auth Redirect URLs were updated through a minimal,
+ignored CLI configuration after reviewing its diff. Only these two exact URLs
+changed; all undeclared Auth settings and the existing Site URL were preserved:
+
+- `http://localhost:5173/update-password`
+- `https://forecast-towell-fendi-bd.fran-hrdz93.chatgpt.site/update-password`
+
+Post-update config diff has zero declared changes, and `enable_signup=false`
+still matches the remote setting. No schema migration, historical write or
+Python provider change is involved. Recovery request/callback/update tests use
+controlled SDK fixtures; actual email delivery and the owner's new-password
+login remain an acceptance step, not something mocks can certify.
+The complete portal suite now has 57 passing tests: 14 recovery UI/security
+cases plus one integration exercising the installed official SDK against a
+synthetic HTTP boundary, including credential verification, event emission
+and URL-fragment removal. No real recovery email or password update is performed
+by these tests. Typecheck, lint, build and privileged-browser-reference scan pass.
+
+Official references: [password reset](https://supabase.com/docs/reference/javascript/auth-resetpasswordforemail),
+[update user](https://supabase.com/docs/reference/javascript/auth-updateuser),
+[redirect URLs](https://supabase.com/docs/guides/auth/redirect-urls).
+
 ## Public configuration
 
 Set these outside Git, locally and in the frontend host:

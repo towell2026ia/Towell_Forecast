@@ -1,5 +1,6 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { PublicSupabaseConfig } from "./types";
+import { clearRecoverySession, isRecoveryCallback } from "./recovery";
 
 export function validatePublicConfig(config: PublicSupabaseConfig): boolean {
   try {
@@ -19,7 +20,8 @@ export function getBrowserClient(config: PublicSupabaseConfig): SupabaseClient {
   if (!singleton || configIdentity !== identity) {
     // Only the two public configuration fields can enter this module.
     singleton = createClient(config.url, config.key, { auth: {
-      persistSession: true, autoRefreshToken: true, detectSessionInUrl: false,
+      persistSession: true, autoRefreshToken: true, flowType: "implicit",
+      detectSessionInUrl: isRecoveryCallback,
       storageKey: `towell-auth-${new URL(config.url).hostname}`,
     } });
     configIdentity = identity;
@@ -28,6 +30,7 @@ export function getBrowserClient(config: PublicSupabaseConfig): SupabaseClient {
 }
 
 export function clearBrowserSession(config: PublicSupabaseConfig) {
+  clearRecoverySession();
   if (typeof window !== "undefined" && config.url) {
     window.localStorage.removeItem(`towell-auth-${new URL(config.url).hostname}`);
   }
