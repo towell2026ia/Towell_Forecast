@@ -12,6 +12,9 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { logPortalEvent } from "@/lib/supabase/client";
 import { resetForChain } from "@/lib/forecast-data";
 import { emptyFilters, type Cursor, type Filters, type ForecastReadRepository, type Profile } from "@/lib/supabase/types";
+import ForecastAssistant from "./forecast-assistant";
+import ForecastAssistantErrorBoundary from "./forecast-assistant-error-boundary";
+import type { AssistantContext } from "./assistant/assistant-service";
 
 const modules = [
   ["inicio", "Inicio", Home], ["historico", "Histórico", History],
@@ -57,6 +60,14 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
   const chains = useRead(useCallback(() => repository.getVisibleChains(), [repository]));
   const subtitle = chains.data?.find(c => c.id === filters.chainId)?.name ?? (profile.global_role === "ADMIN" ? "Todas las cadenas" : "Todas las cadenas autorizadas");
   const title = modules.find(([id]) => id === active)?.[1] ?? "Inicio";
+  const assistantContext: AssistantContext = {
+    user: profile.id, role: profile.global_role === "ADMIN" ? "manager" : profile.global_role === "EDITOR" ? "editor" : "reader",
+    globalRole: profile.global_role, screen: title, moduleId: active,
+    chain: subtitle, chainId: filters.chainId, category: filters.categoryId, categoryId: filters.categoryId,
+    product: filters.productId, productId: filters.productId, color: null, period: null,
+    periodRange: filters.periodRange, search: filters.search,
+    activeFilters: { chainId: filters.chainId, categoryId: filters.categoryId, productId: filters.productId, periodFrom: filters.periodRange[0], periodTo: filters.periodRange[1], search: filters.search },
+  };
   return <ForecastFiltersContext.Provider value={state}><SidebarProvider>
     <Sidebar collapsible="icon" className="border-r border-slate-200">
       <SidebarHeader className="border-b border-slate-200 p-4"><div className="flex items-center gap-3"><div className="grid size-9 shrink-0 place-items-center rounded-xl bg-blue-700 text-sm font-black text-white">FT</div><div className="min-w-0 group-data-[collapsible=icon]:hidden"><p className="truncate text-sm font-bold">FORECAST Towell</p><p className="text-xs text-slate-500">Operación y control</p></div></div></SidebarHeader>
@@ -76,6 +87,7 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
         {active === "auditoria" && <Unavailable title="Auditoría" copy="La consulta de auditoría operativa se habilitará en una fase posterior. No se muestran eventos simulados."/>}
       </main>
     </SidebarInset>
+    <ForecastAssistantErrorBoundary><ForecastAssistant authorized={profile.status === "ACTIVE"} uiEnabled apiEnabled={false} voiceEnabled={false} mode="local" context={assistantContext}/></ForecastAssistantErrorBoundary>
   </SidebarProvider></ForecastFiltersContext.Provider>;
 }
 
@@ -127,7 +139,7 @@ function HistoricalPages({ repository, filters }: { repository: ForecastReadRepo
     <div className="mt-4 flex flex-wrap items-end justify-between gap-3"><Picker label="Filas por página" value={String(size)} onChange={v => { setSize(Number(v) as 50 | 100 | 250); setCursors([null]); }} options={[50, 100, 250].map(n => ({ id: String(n), name: String(n) }))} all="50"/><div className="flex items-center gap-3"><Button variant="outline" disabled={cursors.length === 1 || page.loading} onClick={() => setCursors(c => c.slice(0, -1))}>Anterior</Button><span className="text-sm text-slate-500">Página {cursors.length}</span><Button variant="outline" disabled={!page.data?.next || page.loading} onClick={() => setCursors(c => [...c, page.data!.next])}>Siguiente</Button></div></div>
   </div>;
 }
-function EnginesView({ scope }: { scope: string }) { return <div><Intro title="Motores de Forecast" copy={scope}/><div className="grid gap-4 lg:grid-cols-3">{["Motor Estadístico", "Machine Learning", "Champion / Challenger"].map(title => <Card key={title} className="border-slate-200 shadow-sm"><CardContent className="p-6"><BrainCircuit className="size-6 text-blue-700"/><h2 className="mt-5 font-semibold">{title}</h2><p className="mt-2 text-sm text-slate-500">Sin corrida publicada para este scope.</p><Button disabled className="mt-5" variant="outline">Ejecución no habilitada</Button></CardContent></Card>)}</div><Card className="mt-5 border-slate-200 shadow-sm"><CardContent className="flex items-start gap-3 p-5"><Sparkles className="size-5 shrink-0 text-blue-700"/><p className="text-sm text-slate-500">El asistente y sus acciones permanecen deshabilitados hasta implementar la validación segura de identidad Supabase en Python.</p></CardContent></Card></div>; }
+function EnginesView({ scope }: { scope: string }) { return <div><Intro title="Motores de Forecast" copy={scope}/><div className="grid gap-4 lg:grid-cols-3">{["Motor Estadístico", "Machine Learning", "Champion / Challenger"].map(title => <Card key={title} className="border-slate-200 shadow-sm"><CardContent className="p-6"><BrainCircuit className="size-6 text-blue-700"/><h2 className="mt-5 font-semibold">{title}</h2><p className="mt-2 text-sm text-slate-500">Sin corrida publicada para este scope.</p><Button disabled className="mt-5" variant="outline">Ejecución no habilitada</Button></CardContent></Card>)}</div><Card className="mt-5 border-slate-200 shadow-sm"><CardContent className="flex items-start gap-3 p-5"><Sparkles className="size-5 shrink-0 text-blue-700"/><p className="text-sm text-slate-500">El asistente está disponible en modo visual. La consulta inteligente y sus acciones permanecen deshabilitadas hasta implementar la validación segura de identidad Supabase en Python.</p></CardContent></Card></div>; }
 function QualityView() { return <Unavailable title="Calidad de datos" copy="Esta vista consulta únicamente observaciones publicadas. Los registros pendientes de reconciliación no forman parte del histórico visible. No se muestran alertas demo ni métricas de modelos sin corrida publicada."/>; }
 function PeriodsView() {
   const { repository, filters } = useForecastFilters();

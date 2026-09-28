@@ -12,6 +12,14 @@ export type AssistantContext = {
   product: string | null;
   color: string | null;
   period: string | null;
+  // Display context only, never an authorization claim accepted by a backend.
+  globalRole?: "ADMIN" | "EDITOR" | "VIEWER";
+  moduleId?: string;
+  chainId?: string | null;
+  categoryId?: string | null;
+  productId?: string | null;
+  periodRange?: [string | null, string | null];
+  search?: string;
 };
 
 export type AssistantAction = {
@@ -40,7 +48,7 @@ export class MockProvider implements AssistantProvider {
   async send(_message: string, context: AssistantContext): Promise<AssistantResponse> {
     await new Promise((resolve) => window.setTimeout(resolve, 360));
     return {
-      message: "El asistente está en preparación para la siguiente fase. En este piloto no se envían datos ni se generan análisis automáticos.",
+      message: "El asistente está en preparación para la siguiente fase. No se envían datos ni se generan análisis automáticos.",
       status: "disabled",
       source: "mock",
       actions: [],

@@ -18,6 +18,7 @@ const LazyLottie = dynamic(() => import("./forecast-assistant-lottie"), {
   ssr: false,
   loading: () => <AssistantMark />,
 });
+export const visualAssistantNotice = "Asistente disponible en modo visual. La consulta inteligente y voz se habilitarán en la siguiente fase.";
 
 type ConversationMessage = {
   id: string;
@@ -58,7 +59,7 @@ function ForecastAssistantContent({ apiEnabled, voiceEnabled, mode, context }: O
   const [messages, setMessages] = useState<ConversationMessage[]>([
     { id: "welcome", role: "assistant", text: apiEnabled
       ? "Puedes preguntarme por Forecast, WAPE, Bias, Fill Rate, Champion, Challenger y desempeño de productos."
-      : "El asistente local estará disponible cuando se conecte la API Python." },
+      : visualAssistantNotice },
   ]);
 
   const logEvent = useCallback((event: "open" | "close" | "response" | "lottie_error" | "ui_error") => {
@@ -77,7 +78,7 @@ function ForecastAssistantContent({ apiEnabled, voiceEnabled, mode, context }: O
 
   const submit = async () => {
     const message = draft.trim();
-    if (!message || processing) return;
+    if (!apiEnabled || !message || processing) return;
     setDraft("");
     setMessages((current) => [...current, { id: `user-${sequence.current++}`, role: "user", text: message }]);
     setProcessing(true);
@@ -125,7 +126,7 @@ function ForecastAssistantContent({ apiEnabled, voiceEnabled, mode, context }: O
             <div className="grid size-10 place-items-center rounded-2xl bg-blue-700 text-white"><Sparkles className="size-5" /></div>
             <div>
               <SheetTitle className="text-base text-slate-950">Asistente FORECAST Towell</SheetTitle>
-              <SheetDescription className="mt-0.5 text-xs">Piloto FENDI BD · consulta local</SheetDescription>
+              <SheetDescription className="mt-0.5 text-xs">{context.chain ?? "Todas las cadenas"} · {context.screen} · {context.globalRole ?? context.role}</SheetDescription>
             </div>
           </div>
         </SheetHeader>
@@ -133,9 +134,18 @@ function ForecastAssistantContent({ apiEnabled, voiceEnabled, mode, context }: O
         <ScrollArea className="min-h-0 flex-1">
           <div className="space-y-4 p-5" aria-live="polite" aria-label="Conversación del asistente">
             <div className="rounded-xl border border-blue-100 bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-800">
-              {apiEnabled ? "Consultas sobre resultados existentes del piloto FENDI BD." : "API Python local pendiente de conexión."}
+              {apiEnabled ? "Consultas sobre resultados publicados para el scope seleccionado." : visualAssistantNotice}
             </div>
-            {messages.map((message) => <div key={message.id} className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}>
+            <dl aria-label="Contexto del asistente" className="space-y-1 rounded-xl border border-slate-200 bg-white p-3 text-xs text-slate-600">
+              <div><dt className="inline font-medium">Scope: </dt><dd className="inline">{context.chain ?? "Todas las cadenas"}</dd></div>
+              <div><dt className="inline font-medium">Módulo: </dt><dd className="inline">{context.screen}</dd></div>
+              <div><dt className="inline font-medium">Rol: </dt><dd className="inline">{context.globalRole ?? context.role}</dd></div>
+              <div><dt className="inline font-medium">Categoría: </dt><dd className="inline">{context.categoryId ?? context.category ?? "Todas"}</dd></div>
+              <div><dt className="inline font-medium">Producto: </dt><dd className="inline">{context.productId ?? context.product ?? "Todos"}</dd></div>
+              <div><dt className="inline font-medium">Periodo: </dt><dd className="inline">{context.periodRange ? `${context.periodRange[0] ?? "Inicio"} → ${context.periodRange[1] ?? "Último"}` : context.period ?? "Todos"}</dd></div>
+              <div><dt className="inline font-medium">Búsqueda: </dt><dd className="inline">{context.search || "Sin filtro"}</dd></div>
+            </dl>
+            {messages.filter(message => apiEnabled || message.id !== "welcome").map((message) => <div key={message.id} className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}>
               <div className={`max-w-[88%] rounded-2xl px-4 py-3 text-sm leading-6 ${message.role === "user" ? "rounded-br-md bg-blue-700 text-white" : "rounded-bl-md border border-slate-200 bg-white text-slate-700 shadow-sm"}`}>
                 {message.text}
               </div>
@@ -146,21 +156,22 @@ function ForecastAssistantContent({ apiEnabled, voiceEnabled, mode, context }: O
 
         <div className="border-t border-slate-200 bg-white p-4">
           <div className="flex items-end gap-2">
-            <FutureVoiceControls enabled={voiceEnabled} />
+            {voiceEnabled && <FutureVoiceControls enabled />}
             <Textarea
+              disabled={!apiEnabled || processing}
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Escribe tu pregunta…"
+              placeholder={apiEnabled ? "Escribe tu pregunta…" : "Consulta inteligente disponible en la siguiente fase"}
               aria-label="Mensaje para el asistente"
               rows={2}
               className="max-h-32 min-h-11 resize-none bg-white"
             />
-            <Button type="button" size="icon" disabled={!draft.trim() || processing} onClick={() => void submit()} aria-label="Enviar mensaje" className="shrink-0">
+            <Button type="button" size="icon" disabled={!apiEnabled || !draft.trim() || processing} onClick={() => void submit()} aria-label="Enviar mensaje" className="shrink-0">
               <SendHorizonal className="size-4" />
             </Button>
           </div>
-          <p className="mt-2 text-center text-[11px] text-slate-500">Enter para enviar · Shift+Enter para una nueva línea</p>
+          {apiEnabled && <p className="mt-2 text-center text-[11px] text-slate-500">Enter para enviar · Shift+Enter para una nueva línea</p>}
         </div>
       </SheetContent>
     </Sheet>

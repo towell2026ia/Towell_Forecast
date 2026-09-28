@@ -12,6 +12,7 @@ import { SupabaseForecastReadRepository } from "@/lib/forecast-data";
 import type { ForecastReadRepository, Profile, PublicSupabaseConfig } from "@/lib/supabase/types";
 import ForecastTowellApp from "./forecast-towell-app";
 import { passwordRecoveryRedirect, rememberRecoverySession } from "@/lib/supabase/recovery";
+import type { PortalReadDiagnostic } from "@/lib/portal-read-diagnostic";
 
 export function LoginPanel({ busy, error, configured, onSubmit, onRequestReset }: { busy: boolean; error: string; configured: boolean; onSubmit: (email: string, password: string) => Promise<void>; onRequestReset?: (email: string) => Promise<void> }) {
   const [reset, setReset] = useState(false);
@@ -67,7 +68,21 @@ export default function PortalAuth({ config, login = false, providedClient }: { 
         const { data, error: authError } = await sdk.auth.getUser();
         if (!alive || epoch !== generation.current || recovering.current) return;
         if (authError || !data.user) { setLoading(false); if (!login) replace("/login"); return; }
-        const repo = new SupabaseForecastReadRepository(sdk, data.user.id);
+        const reported = new Set<string>();
+        const reportReadFailure = (diagnostic: PortalReadDiagnostic) => {
+          const signature = JSON.stringify(diagnostic);
+          if (reported.has(signature) || !alive || epoch !== generation.current || typeof sdk.auth.getSession !== "function") return;
+          reported.add(signature);
+          // The normal SDK session stays inside the app. No extraction, auth
+          // material in the body, raw error text or row data is permitted.
+          void sdk.auth.getSession().then(({ data: sessionData }) => {
+            if (alive && epoch === generation.current && sessionData.session) return fetch("/api/portal-validation", {
+              method: "POST", headers: { Authorization: `Bearer ${sessionData.session.access_token}`, "Content-Type": "application/json" },
+              body: signature, cache: "no-store",
+            });
+          }).catch(() => { /* Diagnostics must not affect portal reads. */ });
+        };
+        const repo = new SupabaseForecastReadRepository(sdk, data.user.id, reportReadFailure);
         repository.current = repo;
         const profile = await repo.getCurrentProfile();
         if (!alive || epoch !== generation.current) { repo.dispose(); return; }

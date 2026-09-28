@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Category, Chain, Cursor, Filters, ForecastReadRepository, HistoricalPage, HistoricalRow, Product, Profile, Summary } from "./supabase/types";
+import { controlledReadCode, logReadDiagnostic, PortalReadError, type PortalReadDiagnostic } from "./portal-read-diagnostic";
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 type ProductMapping = { id: string; identifier_mappings?: [string | null, string | null][] };
@@ -42,12 +43,27 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
   private chainTask: Promise<Chain[]> | null = null;
   private mappingTask: Promise<Map<string, Mapping>> | null = null;
   private catalogTask: Promise<Product[]> | null = null;
-  constructor(private client: SupabaseClient, private userId: string) {}
-  dispose() { this.controller.abort(); this.catalog = null; this.chains = null; this.metadata = null; this.chainTask = null; this.mappingTask = null; this.catalogTask = null; }
+  private readDiagnostics = new Map<PortalReadDiagnostic["endpoint"], PortalReadDiagnostic>();
+  constructor(private client: SupabaseClient, private userId: string, private onReadFailure?: (diagnostic: PortalReadDiagnostic) => void) {}
+  dispose() { this.controller.abort(); this.catalog = null; this.chains = null; this.metadata = null; this.chainTask = null; this.mappingTask = null; this.catalogTask = null; this.readDiagnostics.clear(); }
+  getReadDiagnostic(endpoint: PortalReadDiagnostic["endpoint"]) { return this.readDiagnostics.get(endpoint) ?? null; }
   private ensureOpen() { if (this.controller.signal.aborted) throw new Error("session_disposed"); }
-  private async rows<T>(query: PromiseLike<{ data: unknown; error: unknown }>): Promise<T> {
+  private fail(endpoint: PortalReadDiagnostic["endpoint"], table: PortalReadDiagnostic["table"], operation: PortalReadDiagnostic["operation"], code: unknown, status = 0): never {
+    const diagnostic = { endpoint, table, operation, code: controlledReadCode(code), http_status: Number.isInteger(status) && status >= 0 && status <= 599 ? status : 0 };
+    logReadDiagnostic(diagnostic);
+    this.readDiagnostics.set(endpoint, diagnostic);
+    try { this.onReadFailure?.(diagnostic); } catch { /* Telemetry never changes the read result. */ }
+    throw new PortalReadError(diagnostic);
+  }
+  private check(result: { error: unknown; status?: number }, endpoint: PortalReadDiagnostic["endpoint"], table: PortalReadDiagnostic["table"], operation: PortalReadDiagnostic["operation"]) {
+    this.ensureOpen();
+    if (result.error) this.fail(endpoint, table, operation, (result.error as { code?: unknown }).code, result.status);
+    this.readDiagnostics.set(endpoint, { endpoint, table, operation, http_status: result.status ?? 0, code: "OK" });
+  }
+  private async rows<T>(query: PromiseLike<{ data: unknown; error: unknown; status?: number }>, endpoint?: PortalReadDiagnostic["endpoint"], table?: PortalReadDiagnostic["table"], operation: PortalReadDiagnostic["operation"] = "select"): Promise<T> {
     this.ensureOpen(); const result = await query; this.ensureOpen();
-    if (result.error) throw new Error("read_failed");
+    if (endpoint && table) this.check(result, endpoint, table, operation);
+    else if (result.error) throw new Error("read_failed");
     return result.data as T;
   }
   async getCurrentProfile() {
@@ -63,7 +79,7 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
   }
   private async loadMappings() {
     if (this.metadata) return this.metadata;
-    const versions = await this.rows<{ chain_id: string; mapping_json: Mapping }[]>(this.client.from("import_profile_versions").select("chain_id,mapping_json").order("version", { ascending: false }).limit(1000).abortSignal(this.controller.signal));
+    const versions = await this.rows<{ chain_id: string; mapping_json: Mapping }[]>(this.client.from("import_profile_versions").select("chain_id,mapping_json").order("version", { ascending: false }).limit(1000).abortSignal(this.controller.signal), "getProducts", "import_profile_versions");
     const mapping = new Map<string, Mapping>();
     for (const version of versions) if (!mapping.has(version.chain_id)) mapping.set(version.chain_id, version.mapping_json);
     this.metadata = mapping; return mapping;
@@ -75,14 +91,14 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
   }
   private async loadChains() {
     if (this.chains) return this.chains;
-    const masters = await this.rows<Omit<Chain, "has_history" | "parentId" | "scopeType">[]>(this.client.from("chains").select("id,code,name,status").order("name").limit(1000).abortSignal(this.controller.signal));
+    const masters = await this.rows<Omit<Chain, "has_history" | "parentId" | "scopeType">[]>(this.client.from("chains").select("id,code,name,status").order("name").limit(1000).abortSignal(this.controller.signal), "getVisibleChains", "chains");
     const mappings = await this.getMappings();
     const result: Chain[] = [];
     // HEAD counts, not raw facts; no per-product query or invented has_history column.
     for (let offset = 0; offset < masters.length; offset += 6) {
       result.push(...await Promise.all(masters.slice(offset, offset + 6).map(async c => {
         const q = await this.client.from(publishedHistoryView).select("observation_id", { count: "exact", head: true }).eq("chain_id", c.id).abortSignal(this.controller.signal);
-        if (q.error) throw new Error("read_failed"); this.ensureOpen();
+        this.check(q, "getVisibleChains", publishedHistoryView, "head_count");
         const meta = mappings.get(c.id)?.scope;
         return { ...c, has_history: (q.count ?? 0) > 0, parentId: meta?.parent_uuid ?? null, scopeType: meta?.scope_type ?? null };
       })));
@@ -92,7 +108,7 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
   async getCategories(chainId?: string | null) {
     let query = this.client.from("categories").select("id,chain_id,name").order("name").limit(1000);
     if (chainId) query = query.eq("chain_id", chainId);
-    return this.rows<Category[]>(query.abortSignal(this.controller.signal));
+    return this.rows<Category[]>(query.abortSignal(this.controller.signal), "getCategories", "categories");
   }
   private async loadCatalog(): Promise<Product[]> {
       const mapping = await this.getMappings();
@@ -101,7 +117,7 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
       const catalog: Product[] = [];
       // Small RLS catalog only; facts are never preloaded into browser memory.
       for (let offset = 0; ; offset += 250) {
-        const page = await this.rows<Omit<Product, "identifiers">[]>(this.client.from("products").select("id,chain_id,category_id,product_code,variant_code,description").order("id").range(offset, offset + 249).abortSignal(this.controller.signal));
+        const page = await this.rows<Omit<Product, "identifiers">[]>(this.client.from("products").select("id,chain_id,category_id,product_code,variant_code,description").order("id").range(offset, offset + 249).abortSignal(this.controller.signal), "getProducts", "products", "catalog_page");
         catalog.push(...page.map(p => ({ ...p, identifiers: identifiers.get(p.id)?.identifier_mappings ?? [] })));
         if (page.length < 250) break;
       }
@@ -113,7 +129,8 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
     if (!this.catalogTask) this.catalogTask = this.loadCatalog().catch(error => { this.catalogTask = null; throw error; });
     const catalog = this.catalog ?? await this.catalogTask;
     const term = search.toLocaleLowerCase().trim();
-    return catalog.filter(p => (!chainId || p.chain_id === chainId) && (!categoryId || p.category_id === categoryId) && (!term || [p.description, p.product_code, p.variant_code, ...p.identifiers.flat()].some(v => v?.toLocaleLowerCase().includes(term))));
+    try { return catalog.filter(p => (!chainId || p.chain_id === chainId) && (!categoryId || p.category_id === categoryId) && (!term || [p.description, p.product_code, p.variant_code, ...p.identifiers.flat()].some(v => v?.toLocaleLowerCase().includes(term)))); }
+    catch { this.fail("getProducts", "products", "catalog_filter", "TRANSFORM_FAILED", 200); }
   }
   private async filtered(filters: Filters, head = false) {
     const selected = await this.getProducts(filters.chainId, filters.categoryId, filters.search);
@@ -136,9 +153,14 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
       q = q.or(`chain_id.gt.${c.chain_id},and(chain_id.eq.${c.chain_id},product_id.gt.${c.product_id}),and(chain_id.eq.${c.chain_id},product_id.eq.${c.product_id},period.gt.${c.period})`);
     }
     const result = await q.order("chain_id").order("product_id").order("period").order("metric_code").limit(pagination.size * 3 + 3);
-    this.ensureOpen(); if (result.error) throw new Error("read_failed");
+    this.check(result, "getHistoricalObservations", publishedHistoryView, c ? "cursor_page" : "page_1");
     const raw = result.data as unknown as Observation[];
-    const grouped = combineObservations(raw, new Map(products.map(p => [p.id, p])), pagination.size + 1);
+    let grouped: HistoricalRow[];
+    try { grouped = combineObservations(raw, new Map(products.map(p => [p.id, p])), pagination.size + 1); }
+    catch (error) {
+      const code = error instanceof Error && error.message === "duplicate_current_metric" ? "DUPLICATE_CURRENT_METRIC" : error instanceof Error && error.message === "invalid_observation_value" ? "INVALID_OBSERVATION_VALUE" : "TRANSFORM_FAILED";
+      this.fail("getHistoricalObservations", publishedHistoryView, "combine_metrics", code, result.status ?? 200);
+    }
     const rows = grouped.slice(0, pagination.size);
     const last = rows.at(-1);
     return { rows, next: grouped.length > pagination.size && last ? { chain_id: last.chain_id, product_id: last.product_id, period: last.period } : null, observationCount: result.count ?? 0 };
@@ -147,16 +169,17 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
     let first = this.client.from(publishedHistoryView).select("period");
     let last = this.client.from(publishedHistoryView).select("period");
     if (chainId) { first = first.eq("chain_id", chainId); last = last.eq("chain_id", chainId); }
-    const [lo, hi] = await Promise.all([this.rows<{ period: string }[]>(first.order("period").limit(1).abortSignal(this.controller.signal)), this.rows<{ period: string }[]>(last.order("period", { ascending: false }).limit(1).abortSignal(this.controller.signal))]);
+    const [lo, hi] = await Promise.all([this.rows<{ period: string }[]>(first.order("period").limit(1).abortSignal(this.controller.signal), "getPeriods", publishedHistoryView, "period_bounds"), this.rows<{ period: string }[]>(last.order("period", { ascending: false }).limit(1).abortSignal(this.controller.signal), "getPeriods", publishedHistoryView, "period_bounds")]);
     if (!lo.length || !hi.length) return [];
     const periods: string[] = [];
     const date = new Date(lo[0].period + "T00:00:00Z"), end = hi[0].period.slice(0, 7);
+    if (!Number.isFinite(date.getTime())) this.fail("getPeriods", publishedHistoryView, "period_bounds", "INVALID_PERIOD", 200);
     while (date.toISOString().slice(0, 7) <= end) {
       const period = date.toISOString().slice(0, 7);
       let q = this.client.from(publishedHistoryView).select("observation_id", { head: true, count: "exact" }).eq("period", period + "-01");
       if (chainId) q = q.eq("chain_id", chainId);
       const r = await q.abortSignal(this.controller.signal);
-      this.ensureOpen(); if (r.error) throw new Error("read_failed");
+      this.check(r, "getPeriods", publishedHistoryView, "period_count");
       if ((r.count ?? 0) > 0) periods.push(period);
       date.setUTCMonth(date.getUTCMonth() + 1);
     }
