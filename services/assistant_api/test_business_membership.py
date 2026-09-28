@@ -257,10 +257,11 @@ class BusinessContracts(unittest.TestCase):
 
     def test_CP36_no_runtime_import_or_schema(self):
         self.assertNotIn("business_membership", (ROOT/"services/assistant_api/api.py").read_text())
-        # Membership reconciliation still adds no schema. PRD09.2E.1.1 later
-        # authorizes one separate display-only view (its original pins tested).
+        # Membership reconciliation still adds no schema. Later PRDs authorize
+        # only these two independent read-only portal views (pins tested).
         migrations = [p for p in (ROOT/"supabase/migrations").glob("*.sql")
-                      if p.name != "202609280001_portal_published_history.sql"]
+                      if p.name not in {"202609280001_portal_published_history.sql",
+                                        "202609280002_portal_history_periods.sql"}]
         self.assertEqual(len(migrations), 7)
 
     def test_grouped_review_and_scope_guards(self):

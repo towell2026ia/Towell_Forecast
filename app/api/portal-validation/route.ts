@@ -45,7 +45,7 @@ export async function GET(request: Request) {
       probe("getVisibleChains", "chains", "complete", () => repo.getVisibleChains()),
       probe("getCategories", "categories", "complete", () => repo.getCategories()),
       probe("getProducts", "products", "complete", () => repo.getProducts()),
-      probe("getPeriods", "portal_monthly_observations_current", "complete", () => repo.getPeriods()),
+      probe("getPeriods", "portal_history_periods", "period_catalog", () => repo.getPeriods()),
       probe("getHistoricalObservations", "portal_monthly_observations_current", "page_1", () => repo.getHistoricalObservations(emptyFilters, { size: 50 })),
     ]);
     if (!chains || !categories || !products || !periods || !history) return Response.json({ error: "read_failed" }, { status: 502, headers: { "Cache-Control": "no-store" } });

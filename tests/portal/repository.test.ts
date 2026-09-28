@@ -98,7 +98,7 @@ describe("Bounded repository and security contracts", () => {
     await expect(new SupabaseForecastReadRepository(mock.client, "user").getHistoricalObservations(emptyFilters, { size: 1000 as 50 })).rejects.toThrow("invalid_page_size");
   });
   it("PH07/PH23 periods, has_history and summary all use published history, never temporal current", async () => {
-    const mock = fakeClient(table => ({ data: table === "chains" ? [{ id: "c", code: "C", name: "Cadena", status: "ACTIVE" }] : table === "products" ? [product] : table === "portal_monthly_observations_current" ? [observed("SALES", 2)] : [], count: 1 }));
+    const mock = fakeClient(table => ({ data: table === "chains" ? [{ id: "c", code: "C", name: "Cadena", status: "ACTIVE" }] : table === "products" ? [product] : table === "portal_monthly_observations_current" ? [observed("SALES", 2)] : table === "portal_history_periods" ? [{ period: "2025-01-01" }] : [], count: 1 }));
     const repo = new SupabaseForecastReadRepository(mock.client, "user");
     expect((await repo.getVisibleChains())[0].has_history).toBe(true);
     expect(await repo.getPeriods()).toEqual(["2025-01"]);

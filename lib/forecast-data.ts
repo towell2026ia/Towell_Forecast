@@ -6,6 +6,7 @@ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 type ProductMapping = { id: string; identifier_mappings?: [string | null, string | null][] };
 type Mapping = { scope?: { parent_uuid?: string; scope_type?: string }; products?: ProductMapping[] };
 const publishedHistoryView = "portal_monthly_observations_current";
+const publishedPeriodsView = "portal_history_periods";
 type Observation = Cursor & { metric_code: "SALES" | "ORDER" | "DELIVERY"; value: number; availability_source: string; product_code: string; variant_code: string | null; product_description: string; category_id: string | null; chain_name: string };
 
 export function assertActiveProfile(profile: Profile | null, userId: string): Profile {
@@ -166,24 +167,15 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
     return { rows, next: grouped.length > pagination.size && last ? { chain_id: last.chain_id, product_id: last.product_id, period: last.period } : null, observationCount: result.count ?? 0 };
   }
   async getPeriods(chainId?: string | null) {
-    let first = this.client.from(publishedHistoryView).select("period");
-    let last = this.client.from(publishedHistoryView).select("period");
-    if (chainId) { first = first.eq("chain_id", chainId); last = last.eq("chain_id", chainId); }
-    const [lo, hi] = await Promise.all([this.rows<{ period: string }[]>(first.order("period").limit(1).abortSignal(this.controller.signal), "getPeriods", publishedHistoryView, "period_bounds"), this.rows<{ period: string }[]>(last.order("period", { ascending: false }).limit(1).abortSignal(this.controller.signal), "getPeriods", publishedHistoryView, "period_bounds")]);
-    if (!lo.length || !hi.length) return [];
-    const periods: string[] = [];
-    const date = new Date(lo[0].period + "T00:00:00Z"), end = hi[0].period.slice(0, 7);
-    if (!Number.isFinite(date.getTime())) this.fail("getPeriods", publishedHistoryView, "period_bounds", "INVALID_PERIOD", 200);
-    while (date.toISOString().slice(0, 7) <= end) {
-      const period = date.toISOString().slice(0, 7);
-      let q = this.client.from(publishedHistoryView).select("observation_id", { head: true, count: "exact" }).eq("period", period + "-01");
-      if (chainId) q = q.eq("chain_id", chainId);
-      const r = await q.abortSignal(this.controller.signal);
-      this.check(r, "getPeriods", publishedHistoryView, "period_count");
-      if ((r.count ?? 0) > 0) periods.push(period);
-      date.setUTCMonth(date.getUTCMonth() + 1);
-    }
-    return periods;
+    let query = this.client.from(publishedPeriodsView).select("period");
+    if (chainId) query = query.eq("chain_id", chainId);
+    const result = await query.order("period", { ascending: true }).abortSignal(this.controller.signal);
+    this.check(result, "getPeriods", publishedPeriodsView, "period_catalog");
+    // Never infer months from bounds: a gap remains a gap. The compact view is
+    // scope x month; union duplicate months only within this user's RLS read.
+    const periods = result.data as { period: string }[];
+    if (!Array.isArray(periods) || periods.some(p => !p || typeof p.period !== "string" || !/^\d{4}-(0[1-9]|1[0-2])-01$/.test(p.period))) this.fail("getPeriods", publishedPeriodsView, "period_catalog", "INVALID_PERIOD", result.status ?? 200);
+    return [...new Set(periods.map(p => p.period.slice(0, 7)))].sort();
   }
   async getHistoricalSummary(filters: Filters): Promise<Summary> {
     const [chains, products] = await Promise.all([this.getVisibleChains(), this.getProducts(filters.chainId, filters.categoryId, filters.search)]);

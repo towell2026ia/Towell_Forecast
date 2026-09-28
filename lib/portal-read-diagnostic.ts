@@ -1,7 +1,7 @@
 // Deliberately excludes identity, filters, request URLs, headers and upstream text.
 export const readEndpoints = ["getVisibleChains", "getCategories", "getProducts", "getPeriods", "getHistoricalObservations"] as const;
-export const readTables = ["chains", "categories", "products", "import_profile_versions", "portal_monthly_observations_current"] as const;
-export const readOperations = ["select", "head_count", "catalog_page", "period_bounds", "period_count", "page_1", "cursor_page", "combine_metrics", "catalog_filter", "complete"] as const;
+export const readTables = ["chains", "categories", "products", "import_profile_versions", "portal_monthly_observations_current", "portal_history_periods"] as const;
+export const readOperations = ["select", "head_count", "catalog_page", "period_bounds", "period_count", "period_catalog", "page_1", "cursor_page", "combine_metrics", "catalog_filter", "complete"] as const;
 export type PortalReadDiagnostic = {
   endpoint: typeof readEndpoints[number];
   table: typeof readTables[number];

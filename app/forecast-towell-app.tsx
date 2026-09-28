@@ -113,7 +113,7 @@ export function GlobalFilters() {
       <div className="flex items-end gap-4 pb-1"><label className="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" checked={showEmpty} onChange={e => setShowEmpty(e.target.checked)}/>Mostrar scopes sin histórico</label><Button variant="ghost" size="sm" onClick={() => setFilters({ ...emptyFilters })}>Limpiar</Button></div>
     </div>
     {(products.data?.length ?? 0) > 100 && <p className="mt-3 text-sm text-slate-500">{number(products.data!.length)} productos coinciden. Usa la búsqueda para encontrar un producto específico.</p>}
-    {[chains, categories, products, periods].some(r => r.error) && <ReadState loading={false} error/>}
+    {[[chains.error, "cadenas"], [categories.error, "categorías"], [products.error, "productos"], [periods.error, "periodos"]].map(([failed, control]) => failed && <p key={String(control)} role="alert" className="mt-3 text-sm text-rose-700">No fue posible cargar {control}.</p>)}
   </section>;
 }
 function Intro({ title, copy }: { title: string; copy: string }) { return <div className="mb-5"><h1 className="text-2xl font-semibold tracking-tight text-slate-950 sm:text-3xl">{title}</h1><p className="mt-2 text-sm leading-6 text-slate-500">{copy}</p></div>; }

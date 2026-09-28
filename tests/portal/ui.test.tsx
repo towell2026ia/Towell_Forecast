@@ -33,6 +33,58 @@ async function pick(label: string, option: string) {
   await userEvent.click(await screen.findByRole("option", { name: option }));
 }
 describe("Multi-chain read-only UI", () => {
+  it("PF04/PF05 all chains -> selected chain -> all chains updates real period options", async () => {
+    const repo = fixture(); repo.getPeriods = vi.fn(async id => id ? ["2026-03"] : ["2025-02", "2026-03"]);
+    filterHarness(repo, <GlobalFilters/>);
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Periodo desde" }).hasAttribute("disabled")).toBe(false));
+    await pick("Periodo desde", "2025-02");
+    await pick("Cadena / unidad comercial", chain1.name);
+    await waitFor(() => expect(repo.getPeriods).toHaveBeenLastCalledWith(chain1.id));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Periodo desde" }).hasAttribute("disabled")).toBe(false));
+    await userEvent.click(screen.getByRole("combobox", { name: "Periodo desde" }));
+    expect(await screen.findByRole("option", { name: "2026-03" })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: "2025-02" })).toBeNull(); await userEvent.keyboard("{Escape}");
+    await pick("Cadena / unidad comercial", "Todas las cadenas");
+    await waitFor(() => expect(repo.getPeriods).toHaveBeenLastCalledWith(null));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Periodo desde" }).hasAttribute("disabled")).toBe(false));
+    await userEvent.click(screen.getByRole("combobox", { name: "Periodo desde" }));
+    expect(await screen.findByRole("option", { name: "2025-02" })).toBeTruthy();
+    expect(screen.queryByText("No fue posible consultar los datos.")).toBeNull();
+  });
+  it("PF12/PF14 period failure leaves Dashboard visible and disables only period selectors", async () => {
+    const repo = fixture(); repo.getPeriods = vi.fn(async () => { throw new Error("private period failure"); });
+    render(<ForecastTowellApp profile={{ id: "u", full_name: "Usuario", global_role: "ADMIN", status: "ACTIVE" }} repository={repo} onLogout={vi.fn()}/>);
+    expect(await screen.findByText("No fue posible cargar periodos.")).toBeTruthy();
+    await screen.findByText("Último periodo disponible"); expect(screen.getByText("2026-03")).toBeTruthy();
+    for (const label of ["Periodo desde", "Periodo hasta"]) expect(screen.getByRole("combobox", { name: label }).hasAttribute("disabled")).toBe(true);
+    for (const label of ["Cadena / unidad comercial", "Categoría", "Producto"]) expect(screen.getByRole("combobox", { name: label }).hasAttribute("disabled")).toBe(false);
+    expect(screen.queryByText("No fue posible consultar los datos.")).toBeNull(); expect(screen.queryByText("private period failure")).toBeNull();
+  });
+  it("PF13/PF15 periods failing keeps History, chain/category/product and pagination usable", async () => {
+    const repo = fixture(); repo.getPeriods = vi.fn(async () => { throw new Error("period failure"); });
+    filterHarness(repo, <><GlobalFilters/><HistoryView/></>);
+    await screen.findByText("No fue posible cargar periodos.");
+    await screen.findByText("Producto desde RLS");
+    await pick("Cadena / unidad comercial", chain1.name);
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Categoría" }).hasAttribute("disabled")).toBe(false));
+    await pick("Categoría", "Categoría desde RLS");
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Producto" }).hasAttribute("disabled")).toBe(false));
+    await pick("Producto", "Producto desde RLS · ITEM-ABC");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Siguiente" }).hasAttribute("disabled")).toBe(false));
+    await userEvent.click(screen.getByRole("button", { name: "Siguiente" })); await screen.findByText("Página 2");
+    await userEvent.click(screen.getByRole("button", { name: "Anterior" })); await screen.findByText("Página 1");
+    expect(screen.queryByText("No fue posible consultar los datos.")).toBeNull();
+  });
+  for (const [method, label, message] of [["getVisibleChains", "Cadena / unidad comercial", "cadenas"], ["getCategories", "Categoría", "categorías"], ["getProducts", "Producto", "productos"]] as const) {
+    it(`isolates ${message} failure to its own control`, async () => {
+      const repo = fixture(); repo[method] = vi.fn(async () => { throw new Error("controlled read failure"); });
+      filterHarness(repo, <GlobalFilters/>);
+      await screen.findByText(`No fue posible cargar ${message}.`);
+      expect(screen.getByRole("combobox", { name: label }).hasAttribute("disabled")).toBe(true);
+      for (const other of ["Cadena / unidad comercial", "Categoría", "Producto", "Periodo desde", "Periodo hasta"].filter(item => item !== label)) expect(screen.getByRole("combobox", { name: other }).hasAttribute("disabled")).toBe(false);
+      expect(screen.queryByText("No fue posible consultar los datos.")).toBeNull();
+    });
+  }
   it("UI07 chains are dynamic and hierarchy comes from evidence", async () => {
     filterHarness(fixture(), <GlobalFilters/>);
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Cadena / unidad comercial" }).hasAttribute("disabled")).toBe(false));

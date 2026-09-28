@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { createHash } from 'node:crypto'
 import { PGlite } from '@electric-sql/pglite'
 
 // An isolated PostgreSQL engine: synthetic identities, real GRANT/RLS evaluation,
@@ -80,6 +81,17 @@ try {
   await db.exec(readFileSync(join(sqlDir, '202609280001_portal_published_history.sql'), 'utf8'))
   await check('PH17', 'migration 008 leaves temporal view byte-definition unchanged', async () => {
     assert.equal((await rows("select pg_get_viewdef('public.monthly_observations_current'::regclass,true) as definition"))[0].definition, temporalBefore)
+  })
+  const historyBefore009 = (await rows("select pg_get_viewdef('public.portal_monthly_observations_current'::regclass,true) as definition"))[0].definition
+  await db.exec(readFileSync(join(sqlDir, '202609280002_portal_history_periods.sql'), 'utf8'))
+  await check('PF16', 'migration 008 frozen; 009 leaves both existing view definitions unchanged', async () => {
+    const digest = createHash('sha256').update(readFileSync(join(sqlDir, '202609280001_portal_published_history.sql'), 'utf8').replace(/\r\n/g, '\n')).digest('hex')
+    assert.equal(digest, '4203cb1d5021a5225d6d2247e1b648e268875637887c4631ffe4331b7dccb195')
+    assert.equal((await rows("select pg_get_viewdef('public.portal_monthly_observations_current'::regclass,true) as definition"))[0].definition, historyBefore009)
+    assert.equal((await rows("select pg_get_viewdef('public.monthly_observations_current'::regclass,true) as definition"))[0].definition, temporalBefore)
+    const columns = (await rows("select column_name from information_schema.columns where table_schema='public' and table_name='portal_history_periods' order by ordinal_position")).map(r => r.column_name)
+    assert.deepEqual(columns, ['chain_id', 'period'])
+    assert.equal((await rows("select reloptions @> array['security_invoker=true'] as invoker from pg_class where oid='public.portal_history_periods'::regclass"))[0].invoker, true)
   })
   await db.exec('grant usage on schema public, private to service_role; grant all on all tables in schema public to service_role;')
 
@@ -174,6 +186,30 @@ try {
       await assert.rejects(db.exec(sql), error => ['42501', '55000'].includes(error.code))
     }
   }))
+
+  await check('PF09', 'anon cannot read the compact period catalog', async () => as('anon', null, () => denied('select * from public.portal_history_periods')))
+  await check('PF10', 'ADMIN sees distinct published scope/months, not draft or duplicate versions', async () => as('authenticated', ids.admin, async () => {
+    const periods = await rows('select * from public.portal_history_periods order by chain_id')
+    assert.deepEqual(periods.map(r => r.chain_id), [ids.a, ids.b])
+    assert.equal(periods.length, 2)
+  }))
+  await check('PF11', 'VIEWER only sees authorized periods; cross-chain and no-grant reads empty', async () => {
+    await as('authenticated', ids.viewer, async () => {
+      assert.deepEqual((await rows('select * from public.portal_history_periods')).map(r => r.chain_id), [ids.a])
+      assert.equal((await rows(`select * from public.portal_history_periods where chain_id='${ids.b}'`)).length, 0)
+    })
+    for (const user of [ids.stranger, ids.inactive]) await as('authenticated', user, async () => assert.equal((await rows('select * from public.portal_history_periods')).length, 0))
+  })
+  await check('PF08-SQL', 'gap months remain absent and published periods remain real', async () => {
+    await db.exec('begin')
+    try {
+      await db.exec(`insert into public.monthly_observations(chain_id,product_id,period,metric_code,value,version_no,availability_source,source_batch_id) values ('${ids.a}','${ids.product}','2026-11-01','SALES',0,1,'UNKNOWN','${ids.batch}')`)
+      await as('authenticated', ids.admin, async () => {
+        const months = (await rows("select distinct to_char(period,'YYYY-MM') as month from public.portal_history_periods order by month")).map(r => r.month)
+        assert.deepEqual(months, ['2026-09', '2026-11'])
+      })
+    } finally { await db.exec('rollback') }
+  })
 
   await check('CP01', 'anon cannot read operational tables', async () => as('anon', null, () => denied('select * from public.products')))
   await check('CP02', 'inactive user sees no chain rows', async () => as('authenticated', ids.inactive, async () => assert.equal((await rows('select * from public.categories')).length, 0)))

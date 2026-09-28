@@ -7,3 +7,9 @@ Antes de cada push se debe confirmar proyecto vinculado, historial remoto, inven
 La migration `008` (`202609280001_portal_published_history.sql`) añade únicamente
 la vista de consulta histórica publicada. No cambia la vista temporal ni facts,
 lotes, políticas o evidencia. Véase [el contrato de lectura del portal](../../docs/PRD09_2E11_PUBLISHED_HISTORICAL_PORTAL.md).
+
+La migration `009` (`202609280002_portal_history_periods.sql`) añade sólo
+`portal_history_periods`: pares distintos `chain_id, period`, derivados de 008,
+con `security_invoker=true`, SELECT para authenticated y sin acceso public/anon.
+No cambia 008, datos, políticas ni elegibilidad temporal. Véase
+[la corrección del selector de periodos](../../docs/PRD09_2E13_PERIOD_FILTER_READ_FIX.md).
