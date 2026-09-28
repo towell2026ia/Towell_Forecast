@@ -4,7 +4,8 @@ import type { Category, Chain, Cursor, Filters, ForecastReadRepository, Historic
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 type ProductMapping = { id: string; identifier_mappings?: [string | null, string | null][] };
 type Mapping = { scope?: { parent_uuid?: string; scope_type?: string }; products?: ProductMapping[] };
-type Observation = Cursor & { metric_code: "SALES" | "ORDER" | "DELIVERY"; value: number; availability_source: string; products: Omit<Product, "identifiers">; chains: { name: string } };
+const publishedHistoryView = "portal_monthly_observations_current";
+type Observation = Cursor & { metric_code: "SALES" | "ORDER" | "DELIVERY"; value: number; availability_source: string; product_code: string; variant_code: string | null; product_description: string; category_id: string | null; chain_name: string };
 
 export function assertActiveProfile(profile: Profile | null, userId: string): Profile {
   if (!profile || profile.id !== userId || profile.status !== "ACTIVE" || !["ADMIN", "EDITOR", "VIEWER"].includes(profile.global_role)) throw new Error("profile_access_denied");
@@ -19,7 +20,7 @@ export function combineObservations(observations: Observation[], products: Map<s
     const key = `${o.chain_id}/${o.product_id}/${o.period}`;
     let row = groups.get(key);
     if (!row) {
-      row = { chain_id: o.chain_id, product_id: o.product_id, period: o.period, product: products.get(o.product_id) ?? { ...o.products, identifiers: [] }, chain: o.chains.name, SALES: null, ORDER: null, DELIVERY: null, availability: o.availability_source };
+      row = { chain_id: o.chain_id, product_id: o.product_id, period: o.period, product: products.get(o.product_id) ?? { id: o.product_id, chain_id: o.chain_id, category_id: o.category_id, product_code: o.product_code, variant_code: o.variant_code, description: o.product_description, identifiers: [] }, chain: o.chain_name, SALES: null, ORDER: null, DELIVERY: null, availability: o.availability_source };
       groups.set(key, row);
     }
     // Current view guarantees one version per scope/product/period/metric.
@@ -80,7 +81,7 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
     // HEAD counts, not raw facts; no per-product query or invented has_history column.
     for (let offset = 0; offset < masters.length; offset += 6) {
       result.push(...await Promise.all(masters.slice(offset, offset + 6).map(async c => {
-        const q = await this.client.from("monthly_observations_current").select("id", { count: "exact", head: true }).eq("chain_id", c.id).abortSignal(this.controller.signal);
+        const q = await this.client.from(publishedHistoryView).select("observation_id", { count: "exact", head: true }).eq("chain_id", c.id).abortSignal(this.controller.signal);
         if (q.error) throw new Error("read_failed"); this.ensureOpen();
         const meta = mappings.get(c.id)?.scope;
         return { ...c, has_history: (q.count ?? 0) > 0, parentId: meta?.parent_uuid ?? null, scopeType: meta?.scope_type ?? null };
@@ -116,10 +117,10 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
   }
   private async filtered(filters: Filters, head = false) {
     const selected = await this.getProducts(filters.chainId, filters.categoryId, filters.search);
-    let q = this.client.from("monthly_observations_current").select("chain_id,product_id,period,metric_code,value,availability_source,products!inner(id,chain_id,category_id,product_code,variant_code,description),chains!inner(name)", { count: "exact", head });
+    let q = this.client.from(publishedHistoryView).select("chain_id,chain_name,product_id,product_code,variant_code,product_description,category_id,period,metric_code,value,availability_source", { count: "exact", head });
     if (filters.chainId) q = q.eq("chain_id", filters.chainId);
     if (filters.productId) q = q.eq("product_id", filters.productId);
-    if (filters.categoryId) q = q.eq("products.category_id", filters.categoryId);
+    if (filters.categoryId) q = q.eq("category_id", filters.categoryId);
     if (filters.search) q = selected.length ? q.in("product_id", selected.map(p => p.id)) : q.eq("product_id", "00000000-0000-0000-0000-000000000000");
     if (filters.periodRange[0]) q = q.gte("period", filters.periodRange[0] + "-01");
     if (filters.periodRange[1]) q = q.lte("period", filters.periodRange[1] + "-01");
@@ -143,8 +144,8 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
     return { rows, next: grouped.length > pagination.size && last ? { chain_id: last.chain_id, product_id: last.product_id, period: last.period } : null, observationCount: result.count ?? 0 };
   }
   async getPeriods(chainId?: string | null) {
-    let first = this.client.from("monthly_observations_current").select("period");
-    let last = this.client.from("monthly_observations_current").select("period");
+    let first = this.client.from(publishedHistoryView).select("period");
+    let last = this.client.from(publishedHistoryView).select("period");
     if (chainId) { first = first.eq("chain_id", chainId); last = last.eq("chain_id", chainId); }
     const [lo, hi] = await Promise.all([this.rows<{ period: string }[]>(first.order("period").limit(1).abortSignal(this.controller.signal)), this.rows<{ period: string }[]>(last.order("period", { ascending: false }).limit(1).abortSignal(this.controller.signal))]);
     if (!lo.length || !hi.length) return [];
@@ -152,7 +153,7 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
     const date = new Date(lo[0].period + "T00:00:00Z"), end = hi[0].period.slice(0, 7);
     while (date.toISOString().slice(0, 7) <= end) {
       const period = date.toISOString().slice(0, 7);
-      let q = this.client.from("monthly_observations_current").select("id", { head: true, count: "exact" }).eq("period", period + "-01");
+      let q = this.client.from(publishedHistoryView).select("observation_id", { head: true, count: "exact" }).eq("period", period + "-01");
       if (chainId) q = q.eq("chain_id", chainId);
       const r = await q.abortSignal(this.controller.signal);
       this.ensureOpen(); if (r.error) throw new Error("read_failed");

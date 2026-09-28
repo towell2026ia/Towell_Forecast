@@ -76,6 +76,11 @@ try {
     await db.exec(readFileSync(join(sqlDir, file), 'utf8'))
     process.stdout.write(`SQL PASS ${file}\n`)
   }
+  const temporalBefore = (await rows("select pg_get_viewdef('public.monthly_observations_current'::regclass,true) as definition"))[0].definition
+  await db.exec(readFileSync(join(sqlDir, '202609280001_portal_published_history.sql'), 'utf8'))
+  await check('PH17', 'migration 008 leaves temporal view byte-definition unchanged', async () => {
+    assert.equal((await rows("select pg_get_viewdef('public.monthly_observations_current'::regclass,true) as definition"))[0].definition, temporalBefore)
+  })
   await db.exec('grant usage on schema public, private to service_role; grant all on all tables in schema public to service_role;')
 
   await db.exec(`
@@ -118,6 +123,58 @@ try {
       values ('${ids.decision}','${ids.vintage}','${ids.a}','${ids.product}','2026-10-01',1,100,110,110,'test','${ids.editor}');
   `)
 
+  // Published A/B facts, a higher non-imported revision, and an unbatched revision.
+  // Real PostgreSQL joins, distinct-on, permissions and RLS, not client mocks.
+  await db.exec(`
+    insert into public.import_profiles(id,chain_id,name) values ('00000000-0000-4000-8000-000000000401','${ids.b}','B');
+    insert into public.import_profile_versions(id,profile_id,chain_id,version,mapping_json,required_columns,created_by)
+      values ('00000000-0000-4000-8000-000000000402','00000000-0000-4000-8000-000000000401','${ids.b}',1,'{}','[]','${ids.admin}');
+    insert into public.import_batches(id,chain_id,profile_version_id,filename,sha256,period,uploaded_by) values
+      ('00000000-0000-4000-8000-000000000403','${ids.b}','00000000-0000-4000-8000-000000000402','B.csv','${hash}','2026-09-01','${ids.admin}'),
+      ('00000000-0000-4000-8000-000000000404','${ids.a}','${ids.version}','draft.csv','${'b'.repeat(64)}','2026-09-01','${ids.admin}');
+    update public.import_batches set status='VALIDATING' where id in ('${ids.batch}','00000000-0000-4000-8000-000000000403');
+    update public.import_batches set row_count=1,valid_rows=1,status='VALIDATED' where status='VALIDATING';
+    update public.import_batches set status='CONFIRMED' where status='VALIDATED';
+    update public.import_batches set status='IMPORTED' where status='CONFIRMED';
+    insert into public.products(id,chain_id,product_code,description,first_seen_period,last_seen_period,created_from_batch_id)
+      values ('00000000-0000-4000-8000-000000000405','${ids.b}','SKU-B','B product','2026-09-01','2026-09-01','00000000-0000-4000-8000-000000000403');
+    insert into public.monthly_observations(chain_id,product_id,period,metric_code,value,version_no,availability_source,source_batch_id) values
+      ('${ids.a}','${ids.product}','2026-09-01','SALES',10,1,'UNKNOWN','${ids.batch}'),
+      ('${ids.a}','${ids.product}','2026-09-01','SALES',20,2,'UNKNOWN','${ids.batch}'),
+      ('${ids.a}','${ids.product}','2026-09-01','SALES',99,3,'UNKNOWN','00000000-0000-4000-8000-000000000404'),
+      ('${ids.a}','${ids.product}','2026-09-01','SALES',88,4,'UNKNOWN',null),
+      ('${ids.b}','00000000-0000-4000-8000-000000000405','2026-09-01','SALES',30,1,'UNKNOWN','00000000-0000-4000-8000-000000000403');
+  `)
+  await check('PH14/PH15', 'only IMPORTED batches, no draft or unbatched facts', async () => {
+    const facts = await rows('select * from public.portal_monthly_observations_current')
+    assert.equal(facts.length, 2)
+    assert.ok(facts.every(r => r.source_batch_id !== '00000000-0000-4000-8000-000000000404' && r.source_batch_id !== null))
+    assert.equal((await rows('select * from public.monthly_observations')).length, 5)
+  })
+  await check('PH16', 'latest published version, not latest draft', async () => {
+    const fact = (await rows(`select * from public.portal_monthly_observations_current where chain_id='${ids.a}'`))[0]
+    assert.equal(fact.version_no, 2); assert.equal(Number(fact.value), 20)
+    assert.equal(fact.chain_name, 'Chain A'); assert.equal(fact.product_description, 'Fixture')
+  })
+  await check('PH11/PH12', 'display UNKNOWN/NULL without making temporal rows eligible', async () => {
+    assert.ok((await rows('select * from public.portal_monthly_observations_current')).every(r => r.availability_source === 'UNKNOWN' && r.available_at === null))
+    assert.equal((await rows('select * from public.monthly_observations_current')).length, 0)
+  })
+  await check('PH18', 'anon view blocked', async () => as('anon', null, () => denied('select * from public.portal_monthly_observations_current')))
+  for (const [id, user] of [['PH19', ids.viewer], ['PH20', ids.editor]]) {
+    await check(id, 'caller RLS filters every join to authorized chain', async () => as('authenticated', user, async () => {
+      const facts = await rows('select * from public.portal_monthly_observations_current')
+      assert.equal(facts.length, 1); assert.equal(facts[0].chain_id, ids.a)
+      assert.equal((await rows(`select * from public.portal_monthly_observations_current where chain_id='${ids.b}'`)).length, 0)
+    }))
+  }
+  await check('PH21', 'active admin global view access', async () => as('authenticated', ids.admin, async () => assert.equal((await rows('select * from public.portal_monthly_observations_current')).length, 2)))
+  await check('PH35', 'view is read-only even for ADMIN', async () => as('authenticated', ids.admin, async () => {
+    for (const sql of ['update public.portal_monthly_observations_current set value=999', 'delete from public.portal_monthly_observations_current']) {
+      await assert.rejects(db.exec(sql), error => ['42501', '55000'].includes(error.code))
+    }
+  }))
+
   await check('CP01', 'anon cannot read operational tables', async () => as('anon', null, () => denied('select * from public.products')))
   await check('CP02', 'inactive user sees no chain rows', async () => as('authenticated', ids.inactive, async () => assert.equal((await rows('select * from public.categories')).length, 0)))
   await check('CP03', 'no chain grant means no rows', async () => as('authenticated', ids.stranger, async () => assert.equal((await rows('select * from public.categories')).length, 0)))
@@ -150,7 +207,7 @@ try {
   const rls = await rows("select relname, relrowsecurity from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname='public' and c.relkind='r'")
   assert.equal(rls.length, 28)
   assert(rls.every((r) => r.relrowsecurity))
-  process.stdout.write(`Security behavior: ${passed}/21 PASS; RLS: 28/28 PASS\n`)
+  process.stdout.write(`Security behavior: ${passed}/${passed} PASS; RLS: 28/28 PASS\n`)
 } catch (error) {
   process.stderr.write(`Security test failure: ${error.code ?? 'ASSERT'} ${error.message}\n`)
   process.exitCode = 1

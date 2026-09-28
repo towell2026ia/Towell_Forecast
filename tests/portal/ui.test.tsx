@@ -64,12 +64,14 @@ describe("Multi-chain read-only UI", () => {
     await pick("Categoría", "Categoría desde RLS");
     await waitFor(() => expect(repo.getProducts).toHaveBeenCalledWith(chain1.id, "cat-a", ""));
   });
-  it("UI12 tuple pagination defaults to 50 and advances using cursor", async () => {
+  it("PH24/UI12 tuple pagination defaults to 50, advances and returns to previous page", async () => {
     const repo = fixture(); filterHarness(repo, <HistoryView/>);
     await screen.findByText("Producto desde RLS");
     expect(repo.getHistoricalObservations).toHaveBeenCalledWith(emptyFilters, { size: 50, cursor: null });
     await userEvent.click(screen.getByRole("button", { name: "Siguiente" }));
     await waitFor(() => expect(repo.getHistoricalObservations).toHaveBeenLastCalledWith(emptyFilters, { size: 50, cursor: expect.any(Object) }));
+    await userEvent.click(screen.getByRole("button", { name: "Anterior" }));
+    await waitFor(() => expect(repo.getHistoricalObservations).toHaveBeenLastCalledWith(emptyFilters, { size: 50, cursor: null }));
   });
   it("UI13 historical filters passed upstream and zero is not missing", async () => {
     const repo = fixture(), filters: Filters = { ...emptyFilters, chainId: chain1.id, productId: product.id, periodRange: ["2026-03", "2026-03"] };
@@ -88,7 +90,7 @@ describe("Multi-chain read-only UI", () => {
       expect(screen.queryByRole("option", { name: /Unidad dinámica B/ })).toBeNull();
     });
   }
-  it("UI18 ADMIN sees all authorized scopes and Users", async () => {
+  it("PH22/UI18 ADMIN dashboard loads real repository summaries and authorized scopes", async () => {
     render(<ForecastTowellApp profile={{ id: "u", full_name: "Usuario", global_role: "ADMIN", status: "ACTIVE" }} repository={fixture()} onLogout={vi.fn()}/>);
     expect(screen.getByText("Usuarios")).toBeTruthy();
     await screen.findByText(chain2.name);
