@@ -74,6 +74,11 @@ describe("Session and execution R01–R10", () => {
     await userEvent.click(screen.getByRole("button", { name: "Estadístico" })); const calls = vi.mocked(api.latest).mock.calls.length;
     await userEvent.click(screen.getByRole("button", { name: "Histórico" })); await screen.findByText("Histórico operativo");
     await userEvent.click(screen.getByRole("button", { name: "Motores de Forecast" })); expect(screen.getByRole("button", { name: "Estadístico" }).getAttribute("aria-pressed")).toBe("true"); expect(screen.getByTestId("line-statistical")).toBeTruthy(); expect(vi.mocked(api.latest).mock.calls).toHaveLength(calls); expect(api.create).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("tab", { name: "Motor Estadístico" }));
+    await userEvent.click(screen.getByRole("button", { name: "Histórico" }));
+    await userEvent.click(screen.getByRole("button", { name: "Motores de Forecast" }));
+    expect(screen.getByRole("tab", { name: "Motor Estadístico" }).getAttribute("aria-selected")).toBe("true");
+    expect(vi.mocked(api.latest).mock.calls).toHaveLength(calls); expect(api.create).not.toHaveBeenCalled();
   });
   it("R01/R02 focus and visibility events do not refetch or remount", async () => { const api = client(); render(<Harness api={api}/>); await screen.findByText("H12"); fireEvent(window, new Event("focus")); fireEvent(document, new Event("visibilitychange")); expect(api.latest).toHaveBeenCalledTimes(1); expect(api.create).not.toHaveBeenCalled(); });
   it("R03 category/period changes only affect visualization; R04 switches survive", async () => { const api = client(); const view = render(<Harness api={api}/>); await screen.findByText("H12"); await userEvent.click(screen.getByRole("button", { name: "Estadístico" })); expect(screen.getByTestId("line-statistical")).toBeTruthy(); view.rerender(<Harness api={api} f={{ ...filters, periodRange: ["2026-05", "2026-05"] }}/>); await waitFor(() => expect(screen.getByTestId("line-statistical")).toBeTruthy()); expect(api.latest).toHaveBeenCalledTimes(1); expect(api.create).not.toHaveBeenCalled(); });

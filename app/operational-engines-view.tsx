@@ -7,6 +7,8 @@ import { ForecastTraderChart } from "@/components/forecast/forecast-trader-chart
 import { EngineComparison } from "@/components/forecast/engine-comparison";
 import { ForecastGrid, ForecastHorizonTable, ExecutiveComparison } from "@/components/forecast/forecast-horizon-table";
 import { ForecastSummary, humanStatus } from "@/components/forecast/forecast-summary";
+import { ForecastEnginesTabs, type EngineTab } from "@/components/forecast/forecast-engines-tabs";
+import { StatisticalEngineDetail } from "@/components/forecast/statistical-engine-detail";
 import { useForecastFilters } from "./forecast-towell-app";
 
 type View = { key: string; result: PreviewJob | null; job: PreviewJob | null; error: string; loading: boolean };
@@ -17,6 +19,8 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
   const { repository, filters, profile, seriesVisibility, setSeriesVisibility } = useForecastFilters();
   const client = repository.previews;
   const [localVisibility, setLocalVisibility] = useState<SeriesVisibility>({ ...defaultVisibility });
+  const [tab, setTab] = useState<EngineTab>("summary");
+  const [compareTowell, setCompareTowell] = useState(false);
   const visible = seriesVisibility ?? localVisibility, setVisible = setSeriesVisibility ?? setLocalVisibility;
   const [view, setView] = useState<View | null>(null);
   const [history, setHistory] = useState<{ key: string; rows: HistoricalMonth[]; customer: CustomerMonth[]; categoryName: string | null; error: boolean; customerError: boolean } | null>(null);
@@ -88,7 +92,10 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
     {current?.error && <p role="alert" className="text-sm text-rose-700">No fue posible completar la consulta operacional: {current.error}</p>}
     {current?.job && <div role="status" className="rounded-xl border bg-white p-3 text-sm"><span>{humanStatus(current.job.status)}</span>{busy && <ol className="mt-3 flex flex-wrap gap-3 text-xs">{labels.map((label, i) => <li key={label} className={i === stages.indexOf(current.job!.status) ? "font-semibold text-blue-700" : "text-slate-500"}>{i < stages.indexOf(current.job!.status) ? "✓" : i === stages.indexOf(current.job!.status) ? "●" : "○"} {label}</li>)}</ol>}</div>}
     {!current?.job && !current?.loading && !current?.error && <p className="text-sm text-slate-500">Sin vista previa calculada</p>}
-    {filters.chainId ? <>
+    <ForecastEnginesTabs value={tab} onChange={setTab}/>
+    {tab === "statistical" && <div role="tabpanel" id="engine-panel-statistical" aria-labelledby="engine-tab-statistical"><StatisticalEngineDetail scope={selected} scopes={scopes} filters={filters} historical={actual?.rows ?? []} historyError={actual?.error} cutsStatus={current?.result?.cuts_status ?? current?.job?.cuts_status} compareTowell={compareTowell} onCompare={() => setCompareTowell(v => !v)}/></div>}
+    {tab === "ml" && <div role="tabpanel" id="engine-panel-ml" aria-labelledby="engine-tab-ml" className="rounded-xl border bg-white p-5 text-sm text-slate-500">Detalle ML disponible en siguiente fase. El resumen operacional permanece en Resumen.</div>}
+    {tab === "summary" && <div role="tabpanel" id="engine-panel-summary" aria-labelledby="engine-tab-summary" className="space-y-5">{filters.chainId ? <>
       <ForecastSummary scope={selected} horizons={horizons}/>
       {product && <p className="text-sm text-slate-500">{product.description} · {humanStatus(product.forecast_status)}{!horizons.length && ` · Sin forecast elegible: ${product.forecast_status}`}</p>}
       {actual?.error && <p role="alert" className="text-sm text-rose-700">No fue posible consultar el histórico para la gráfica.</p>}
@@ -103,6 +110,6 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
       <p className="rounded-xl border bg-white p-5 text-sm text-slate-500">Selecciona una cadena para visualizar la evolución temporal y el pronóstico.</p>
       {current?.job?.cuts_status === "CUTS_NOT_ALIGNED" && <p className="inline-block rounded-full bg-blue-50 px-3 py-1 text-xs text-blue-800">Cortes diferentes por cadena · CUTS_NOT_ALIGNED</p>}
       {scopes.length > 0 && <ForecastGrid headers={["Cadena", "Corte", "Evaluados", "Stat", "ML", "Preview Leader", "Estado"]} rows={scopes.map(s => [s.chain_name ?? s.chain_id, s.issue_period ?? "—", quantity(s.eligibility?.evaluated), quantity(s.eligibility?.stat_eligible), quantity(s.eligibility?.ml_eligible), s.selection?.preview_leader?.model ?? s.selection?.preview_leader?.strategy ?? "—", s.error_code ?? humanStatus(s.status)])}/>}
-    </>}
+    </>}</div>}
   </section>;
 }
