@@ -24,18 +24,18 @@ function harness(client: PreviewClient, filters: Filters = { ...emptyFilters, ch
 afterEach(() => vi.unstubAllGlobals());
 describe("E2 operational UI", () => {
   it("real engine cards, distribution, cutoff, ML not eligible and no pilot/demo", async () => {
-    harness(api()); await screen.findByText("Productos evaluados: 7");
-    expect(screen.getByText("WAPE retrospectivo: 12.5%")).toBeTruthy();
-    expect(screen.getByText("Croston: 1")).toBeTruthy(); expect(screen.getByText("Holt: 1")).toBeTruthy();
-    expect(screen.getByText("Estado: NOT_ELIGIBLE")).toBeTruthy(); expect(screen.getByText(/Datos reales hasta: 2026-07/)).toBeTruthy();
-    expect(screen.getByText("Automatic promotion: OFF")).toBeTruthy();
+    harness(api()); await screen.findAllByText("2 de 7 · 28.6%");
+    expect(screen.getByText("12.5%")).toBeTruthy();
+    expect(screen.getAllByText("Croston").length).toBeGreaterThan(0); expect(screen.getAllByText("Holt").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("No elegible").length).toBeGreaterThan(0); expect(screen.getByText(/Datos reales hasta: 2026-07/)).toBeTruthy();
+    expect(screen.getByText("Promoción automática")).toBeTruthy(); expect(screen.getByText("OFF")).toBeTruthy();
     expect(document.body.textContent).not.toMatch(/FENDI|Walmart|demo forecast|Ejecución no habilitada/);
   });
   it("selected product H1-H12, literal missing bands, search identifiers do not hide selected product", async () => {
     const client = api(); harness(client, { ...emptyFilters, chainId: "a", productId: "p", search: "UPC-from-catalog" });
-    await screen.findByText("H12"); expect(screen.getByText("2026-08")).toBeTruthy(); expect(screen.getByText("2027-07")).toBeTruthy();
-    expect(client.latest).toHaveBeenCalledWith("a", "p"); expect(screen.getAllByRole("row").length).toBe(15);
-    expect(screen.getAllByText("Sin evidencia").length).toBeGreaterThan(12);
+    await screen.findByText("H12"); expect(screen.getAllByText("2026-08").length).toBeGreaterThan(0); expect(screen.getAllByText("2027-07").length).toBeGreaterThan(0);
+    expect(client.latest).toHaveBeenCalledWith("a", "p"); expect(screen.getAllByText(/^H\d+$/)).toHaveLength(12);
+    expect(screen.getAllByText("—").length).toBeGreaterThan(12);
   });
   it("all scopes have independent cuts, no consolidated fake total", async () => {
     harness(api({ latest: vi.fn(async () => ({ ...job, cuts_status: "CUTS_NOT_ALIGNED", scopes: [...job.scopes, { chain_id: "b", chain_name: "Segundo scope", status: "PREVIEW", issue_period: "2026-03" }] })) }), emptyFilters);
@@ -44,7 +44,7 @@ describe("E2 operational UI", () => {
     expect(screen.queryByText("WAPE retrospectivo: 12.5%")).toBeNull();
   });
   it("viewer is read only while authorized results stay visible", async () => {
-    const client = api(); harness(client, { ...emptyFilters, chainId: "a" }, "VIEWER"); await screen.findByText("Productos evaluados: 7");
+    const client = api(); harness(client, { ...emptyFilters, chainId: "a" }, "VIEWER"); await screen.findAllByText("2 de 7 · 28.6%");
     expect(screen.getByRole("button", { name: "Calcular vista previa" }).hasAttribute("disabled")).toBe(true); expect(client.create).not.toHaveBeenCalled();
   });
   it("double click stays loading and creates only one asynchronous job", async () => {
@@ -60,7 +60,7 @@ describe("E2 operational UI", () => {
   });
   it("safe failed state with insufficient product does not display fake forecast zero", async () => {
     harness(api({ latest: vi.fn(async () => ({ ...job, status: "FAILED", scopes: [{ chain_id: "a", status: "FAILED", error_code: "NO_ELIGIBLE_PRODUCTS", products: [{ product_id: "p", product_code: "code", description: "Producto corto", category_id: "cat", forecast_status: "INSUFFICIENT" }] }] })) }), { ...emptyFilters, chainId: "a", productId: "p" });
-    await screen.findByText("Sin forecast elegible: INSUFFICIENT"); expect(screen.getByText("Estado: FAILED")).toBeTruthy(); expect(screen.queryByText("H1")).toBeNull();
+    await screen.findByText(/Sin forecast elegible: INSUFFICIENT/); expect(screen.getByText("Error de cálculo")).toBeTruthy(); expect(screen.queryByText("H1")).toBeNull();
   });
   it("errors expose fixed safe codes, not upstream messages", async () => {
     harness(api({ latest: vi.fn(async () => { throw new Error("private upstream message"); }) }));

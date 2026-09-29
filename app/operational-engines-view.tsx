@@ -1,27 +1,33 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { PreviewReadError, type PreviewJob } from "@/lib/forecast-preview";
+import { defaultVisibility, quantity, scopeHorizons, traderPoints, type CustomerMonth, type HistoricalMonth, type SeriesVisibility } from "@/lib/forecast-chart-data";
+import { ForecastTraderChart } from "@/components/forecast/forecast-trader-chart";
+import { EngineComparison } from "@/components/forecast/engine-comparison";
+import { ForecastGrid, ForecastHorizonTable, ExecutiveComparison } from "@/components/forecast/forecast-horizon-table";
+import { ForecastSummary, humanStatus } from "@/components/forecast/forecast-summary";
 import { useForecastFilters } from "./forecast-towell-app";
 
-const n = (value: number | null | undefined) => value == null ? "Sin evidencia" : value.toLocaleString("es-MX", { maximumFractionDigits: 2 });
 type View = { key: string; result: PreviewJob | null; job: PreviewJob | null; error: string; loading: boolean };
 const safeError = (error: unknown) => error instanceof PreviewReadError ? error.code : "DATA_READ_FAILED";
-function GridTable({ headers, rows }: { headers: string[]; rows: (string | number)[][] }) {
-  return <div className="mt-4 overflow-auto rounded-xl border bg-white"><Table><TableHeader><TableRow>{headers.map(title => <TableHead key={title}>{title}</TableHead>)}</TableRow></TableHeader><TableBody>{rows.map((row, index) => <TableRow key={index}>{row.map((value, column) => <TableCell key={column}>{value}</TableCell>)}</TableRow>)}</TableBody></Table></div>;
-}
-export function ForecastEnginesView({ scope }: { scope: string }) {
-  const { repository, filters, profile } = useForecastFilters();
+const stages = ["QUEUED", "READING_DATA", "ELIGIBILITY", "STATISTICAL", "ML", "ENSEMBLE", "QUALITY_GATE"];
+const labels = ["En cola", "Datos", "Elegibilidad", "Estadístico", "Machine Learning", "Ensamble", "Quality Gate"];
+export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit?: () => void }) {
+  const { repository, filters, profile, seriesVisibility, setSeriesVisibility } = useForecastFilters();
   const client = repository.previews;
+  const [localVisibility, setLocalVisibility] = useState<SeriesVisibility>({ ...defaultVisibility });
+  const visible = seriesVisibility ?? localVisibility, setVisible = setSeriesVisibility ?? setLocalVisibility;
   const [view, setView] = useState<View | null>(null);
+  const [history, setHistory] = useState<{ key: string; rows: HistoricalMonth[]; customer: CustomerMonth[]; categoryName: string | null; error: boolean; customerError: boolean } | null>(null);
   const key = `${filters.chainId}/${filters.productId}`;
-  const revision = useRef(0);
-  useEffect(() => () => { revision.current += 1; }, []);
+  const revision = useRef(0), running = useRef(false);
+  const visited = useRef(onVisit);
+  useEffect(() => { visited.current?.(); return () => { revision.current += 1; }; }, []);
   useEffect(() => {
     let alive = true;
     const version = ++revision.current;
+    running.current = false;
     if (!client) return;
     void client.latest(filters.chainId, filters.productId).then(result => {
       if (alive && revision.current === version) setView({ key, result: result?.status === "READY_PREVIEW" ? result : null, job: result, error: "", loading: false });
@@ -33,50 +39,70 @@ export function ForecastEnginesView({ scope }: { scope: string }) {
   useEffect(() => {
     if (!client || !jobId || !status || ["READY_PREVIEW", "FAILED"].includes(status)) return;
     let alive = true; let timer: ReturnType<typeof setTimeout>;
-    const id = jobId;
+    const version = revision.current, id = jobId;
     async function poll() {
       try {
         const job = await client!.status(id);
         const result = job.status === "READY_PREVIEW" ? await client!.result(id, filters.productId) : null;
-        if (!alive) return;
-        setView({ key, job, result, error: "", loading: false });
+        if (!alive || version !== revision.current) return;
+        setView(previous => previous?.key === key ? { ...previous, job, result: result ?? previous.result, error: "", loading: false } : previous);
         if (!["READY_PREVIEW", "FAILED"].includes(job.status)) timer = setTimeout(poll, 2500);
-      } catch (error) { if (alive) setView(previous => previous?.key === key ? { ...previous, error: safeError(error) } : previous); }
+      } catch (error) { if (alive && version === revision.current) setView(previous => previous?.key === key ? { ...previous, error: safeError(error) } : previous); }
     }
     timer = setTimeout(poll, 1500);
     return () => { alive = false; clearTimeout(timer); };
   }, [client, jobId, status, key, filters.productId]);
   async function run() {
-    if (!client) return;
+    if (!client || running.current) return;
+    running.current = true;
     const version = ++revision.current;
-    setView({ key, job: null, result: null, error: "", loading: true });
-    try { const job = await client.create(filters.chainId, filters.productId); if (revision.current === version) setView({ key, job, result: null, error: "", loading: false }); }
-    catch (error) { if (revision.current === version) setView({ key, job: null, result: null, error: safeError(error), loading: false }); }
+    setView(previous => ({ key, job: null, result: previous?.key === key ? previous.result : null, error: "", loading: true }));
+    try { const job = await client.create(filters.chainId, filters.productId); if (revision.current === version) setView(previous => ({ key, job, result: previous?.key === key ? previous.result : null, error: "", loading: false })); }
+    catch (error) { if (revision.current === version) setView(previous => ({ key, job: null, result: previous?.key === key ? previous.result : null, error: safeError(error), loading: false })); }
+    finally { if (revision.current === version) running.current = false; }
   }
   const busy = current?.loading || Boolean(current?.job && !["READY_PREVIEW", "FAILED"].includes(current.job.status));
   const scopes = current?.result?.scopes ?? current?.job?.scopes ?? [];
-  const selected = scopes.length === 1 ? scopes[0] : null;
-  const products = (selected?.products ?? []).filter(product => (!filters.categoryId || product.category_id === filters.categoryId)
-    && (!filters.productId || product.product_id === filters.productId)
-    && (filters.productId || !filters.search || `${product.description} ${product.product_code}`.toLowerCase().includes(filters.search.toLowerCase())));
-  const statLeader = Object.entries(selected?.statistical?.models ?? {}).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0];
-  return <section>
-    <div className="mb-5 flex flex-wrap items-start justify-between gap-3"><div><h1 className="text-2xl font-semibold">Motores de Forecast</h1><p className="mt-2 text-sm text-slate-500">{scope} · Venta · RETROSPECTIVE PREVIEW</p><p className="mt-1 text-sm text-slate-500">Datos reales hasta: {selected?.issue_period ?? "corte independiente por scope"} · H1 → H12</p><p className="mt-1 text-xs text-slate-500">{current?.result?.engine_version ?? "Versión disponible tras la corrida"}</p></div><Button onClick={() => void run()} disabled={!client || profile.global_role === "VIEWER" || busy}>{busy ? "Calculando vista previa…" : "Calcular vista previa"}</Button></div>
-    <p className="mb-5 rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">Vista previa retrospectiva. El histórico tiene valores certificados, pero no dispone de fechas originales de disponibilidad; por ello las métricas mostradas no constituyen certificación point-in-time. Los periodos históricos no cambian el corte operacional.</p>
-    {profile.global_role === "VIEWER" && <p className="mb-3 text-sm text-slate-500">Sólo consulta: no tienes permiso para iniciar corridas.</p>}
-    {!client && <p className="mb-3 text-sm text-slate-500">Conexión operacional pendiente de configuración.</p>}
-    {current?.error && <p role="alert" className="mb-4 text-sm text-rose-700">No fue posible completar la consulta operacional: {current.error}</p>}
-    {current?.job && <p role="status" className="mb-4 text-sm">Estado: {current.job.status} {current.job.cuts_status === "CUTS_NOT_ALIGNED" && "· CUTS_NOT_ALIGNED — no se consolida entre scopes"}</p>}
-    <p className="mb-3 text-xs text-slate-500">Última corrida: {current?.job?.created_at ? new Date(current.job.created_at * 1000).toLocaleString("es-MX") : "Sin corrida"} · Producto: {products.find(product => product.product_id === filters.productId)?.description ?? "Todos los productos"}</p>
-    <div className="grid gap-4 lg:grid-cols-3">
-      <Card><CardContent className="p-5"><h2 className="font-semibold">Motor Estadístico</h2><p>Estado: {selected?.statistical?.status ?? (scopes.length > 1 ? "Consultar cobertura por scope" : "Sin vista previa")}</p><p>Productos evaluados: {n(selected?.eligibility?.evaluated)}</p><p>Elegibles: {n(selected?.eligibility?.stat_eligible)}</p><p>Modelos candidatos: {selected?.statistical?.available_candidates?.length ?? new Set(selected?.statistical?.candidates.map(item => item.model)).size}</p><p>Modelo líder por cobertura: {statLeader ?? "Sin candidato elegible"}</p><p>WAPE retrospectivo: {n(selected?.statistical?.retrospective_wape)}%</p><p>Bias retrospectivo: {n(selected?.statistical?.retrospective_bias)}%</p><details className="mt-3"><summary>Ver detalle</summary>{Object.entries(selected?.statistical?.models ?? {}).map(([model, count]) => <p key={model}>{model}: {count}</p>)}</details></CardContent></Card>
-      <Card><CardContent className="p-5"><h2 className="font-semibold">Machine Learning</h2><p>Estado: {selected?.ml?.status ?? "Sin vista previa"}</p><p>Muestras de entrenamiento: {n(selected?.ml?.training_samples)}</p><p>Elegibles: {n(selected?.eligibility?.ml_eligible)}</p><p>Candidate leader: {selected?.ml?.leader ?? "Sin candidato elegible"}</p><p>WAPE retrospectivo: {n(selected?.ml?.retrospective_wape)}%</p><p>Bias retrospectivo: {n(selected?.ml?.retrospective_bias)}%</p><details className="mt-3"><summary>Ver detalle ML</summary>{(selected?.ml?.available_candidates ?? selected?.ml?.candidates.map(item => item.model ?? "") ?? []).map(model => <p key={model}>{model} · WAPE {n(selected?.ml?.candidates.find(item => item.model === model)?.retrospective_validation_wape)}%</p>)}</details></CardContent></Card>
-      <Card><CardContent className="p-5"><h2 className="font-semibold">Champion / Challenger</h2><p>Estado: PREVIEW — NO PUBLICADO</p><p>Champion publicado: {selected?.selection?.published_champion?.version ?? "Sin Champion publicado"}</p><p>Candidate leader: {selected?.selection?.preview_leader?.strategy ?? "Sin evidencia"}</p><p>Challenger: {selected?.selection?.preview_challenger?.strategy ?? "Sin evidencia"}</p><p>No Degradation: {selected?.selection?.no_degradation == null ? "N/A" : selected.selection.no_degradation ? "PASS" : "FAIL"}</p><p>Certificación: {selected ? "PROVISIONAL_TEMPORAL_UNKNOWN" : "Sin evidencia"}</p><p>Automatic promotion: OFF</p></CardContent></Card>
-    </div>
-    {scopes.length > 0 && <GridTable headers={["Scope", "Corte", "Productos", "Stat", "ML", "Preview leader", "WAPE retro", "Status"]} rows={scopes.map(item => [item.chain_name ?? item.chain_id, item.issue_period ?? "Sin corte", n(item.eligibility?.visible_products), n(item.eligibility?.stat_eligible), n(item.eligibility?.ml_eligible), item.selection?.preview_leader?.strategy ?? "Sin candidato", n(item.statistical?.retrospective_wape), item.error_code ?? item.status])}/>}
-    {selected?.eligibility && <p className="mt-4 text-sm text-slate-500">Cold start: {n(selected.eligibility.COLD_START)} · Inactive: {n(selected.eligibility.INACTIVE)} · Pre-launch: {n(selected.eligibility["PRE-LAUNCH"])} · Insufficient: {n(selected.eligibility.INSUFFICIENT)}</p>}
-    <h2 className="mt-6 font-semibold">Forecast Towell H1–H12</h2>
-    {!filters.productId && <p className="mt-2 text-sm text-slate-500">Selecciona un producto para consultar sus doce horizontes.</p>}
-    {filters.productId && products.map(product => <div key={product.product_id} className="mt-3"><p className="text-sm">{product.description} · {product.forecast_status}</p>{!product.horizons?.length ? <p className="p-4 text-sm">Sin forecast elegible: {product.forecast_status}</p> : <GridTable headers={["Horizonte", "Periodo", "Estadístico", "ML", "Fcst Towell", "P10", "P50", "P90", "P95"]} rows={product.horizons.map(row => [`H${row.horizon}`, row.target_period, ...[row.statistical_value, row.ml_value, row.forecast_towell, row.p10, row.p50, row.p90, row.p95].map(n)])}/>}</div>)}
+  const selected = filters.chainId ? scopes.find(s => s.chain_id === filters.chainId) ?? null : null;
+  const cutoff = selected?.issue_period;
+  const historyKey = `${JSON.stringify(filters)}/${cutoff ?? ""}`;
+  useEffect(() => {
+    let alive = true;
+    if (!filters.chainId) return;
+    const readHistory = repository.getForecastHistory?.(filters) ?? Promise.resolve([]);
+    const readCustomer = cutoff && repository.getCustomerForecast ? repository.getCustomerForecast(filters, cutoff) : Promise.resolve([]);
+    const readCategories = filters.categoryId && repository.getCategories ? repository.getCategories(filters.chainId) : Promise.resolve([]);
+    void Promise.allSettled([readHistory, readCustomer, readCategories]).then(([h, c, categories]) => { if (alive) setHistory({ key: historyKey, rows: h.status === "fulfilled" ? h.value : [], customer: c.status === "fulfilled" ? c.value : [], categoryName: categories.status === "fulfilled" ? categories.value.find(category => category.id === filters.categoryId && category.chain_id === filters.chainId)?.name ?? null : null, error: h.status === "rejected", customerError: c.status === "rejected" }); });
+    return () => { alive = false; };
+  }, [repository, filters, cutoff, historyKey]);
+  const actual = history?.key === historyKey ? history : null;
+  const horizons = scopeHorizons(selected, filters);
+  const points = traderPoints(actual?.rows ?? [], actual?.customer ?? [], horizons, cutoff, filters);
+  const product = selected?.products?.find(p => p.product_id === filters.productId);
+  const previous = Boolean(busy && current?.result || current?.result && current.job?.status === "FAILED");
+  return <section className="space-y-5">
+    <div className="flex flex-wrap items-start justify-between gap-3"><div><h1 className="text-2xl font-semibold tracking-tight">Motores de Forecast</h1><p className="mt-2 text-sm text-slate-500">{scope}{filters.categoryId && ` · ${actual?.categoryName ?? "Categoría seleccionada"}`} · {product?.description ?? "Todos los productos"} · Venta</p><p className="mt-1 text-xs text-slate-500">Datos reales hasta: {selected?.latest_actual_period ?? cutoff ?? "corte independiente por scope"} · Preview retrospectivo</p></div><Button onClick={() => void run()} disabled={!client || profile.global_role === "VIEWER" || busy}>{busy ? "Calculando vista previa…" : "Calcular vista previa"}</Button></div>
+    <p className="border-l-2 border-blue-200 pl-3 text-xs leading-5 text-slate-500">Vista previa retrospectiva. Los datos históricos están certificados en valor, pero no en fecha original de disponibilidad; las métricas no constituyen certificación point-in-time.</p>
+    {profile.global_role === "VIEWER" && <p className="text-sm text-slate-500">Sólo consulta: no tienes permiso para iniciar corridas.</p>}
+    {!client && <p className="text-sm text-slate-500">Conexión operacional pendiente de configuración.</p>}
+    {current?.error && <p role="alert" className="text-sm text-rose-700">No fue posible completar la consulta operacional: {current.error}</p>}
+    {current?.job && <div role="status" className="rounded-xl border bg-white p-3 text-sm"><span>{humanStatus(current.job.status)}</span>{busy && <ol className="mt-3 flex flex-wrap gap-3 text-xs">{labels.map((label, i) => <li key={label} className={i === stages.indexOf(current.job!.status) ? "font-semibold text-blue-700" : "text-slate-500"}>{i < stages.indexOf(current.job!.status) ? "✓" : i === stages.indexOf(current.job!.status) ? "●" : "○"} {label}</li>)}</ol>}</div>}
+    {!current?.job && !current?.loading && !current?.error && <p className="text-sm text-slate-500">Sin vista previa calculada</p>}
+    {filters.chainId ? <>
+      <ForecastSummary scope={selected} horizons={horizons}/>
+      {product && <p className="text-sm text-slate-500">{product.description} · {humanStatus(product.forecast_status)}{!horizons.length && ` · Sin forecast elegible: ${product.forecast_status}`}</p>}
+      {actual?.error && <p role="alert" className="text-sm text-rose-700">No fue posible consultar el histórico para la gráfica.</p>}
+      {!actual && <p className="text-xs text-slate-500">Consultando histórico…</p>}
+      {actual?.customerError && <p className="text-xs text-slate-500">Fcst Cliente: consulta no disponible. No se sustituyen datos ausentes.</p>}
+      {filters.search && !filters.productId && <p className="text-xs text-slate-500">El histórico refleja la búsqueda. Selecciona un producto para comparar su forecast; E2 no entrega un agregado de la búsqueda.</p>}
+      <ForecastTraderChart points={points} cutoff={cutoff} visible={visible} onChange={series => setVisible(v => ({ ...v, [series]: !v[series] }))} previous={previous}/>
+      {selected && <EngineComparison scope={selected}/>}
+      <ExecutiveComparison points={points}/>
+      <ForecastHorizonTable horizons={horizons} product={Boolean(filters.productId)}/>
+    </> : <>
+      <p className="rounded-xl border bg-white p-5 text-sm text-slate-500">Selecciona una cadena para visualizar la evolución temporal y el pronóstico.</p>
+      {current?.job?.cuts_status === "CUTS_NOT_ALIGNED" && <p className="inline-block rounded-full bg-blue-50 px-3 py-1 text-xs text-blue-800">Cortes diferentes por cadena · CUTS_NOT_ALIGNED</p>}
+      {scopes.length > 0 && <ForecastGrid headers={["Cadena", "Corte", "Evaluados", "Stat", "ML", "Preview Leader", "Estado"]} rows={scopes.map(s => [s.chain_name ?? s.chain_id, s.issue_period ?? "—", quantity(s.eligibility?.evaluated), quantity(s.eligibility?.stat_eligible), quantity(s.eligibility?.ml_eligible), s.selection?.preview_leader?.model ?? s.selection?.preview_leader?.strategy ?? "—", s.error_code ?? humanStatus(s.status)])}/>}
+    </>}
   </section>;
 }

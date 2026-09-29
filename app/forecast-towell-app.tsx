@@ -16,6 +16,7 @@ import ForecastAssistant from "./forecast-assistant";
 import ForecastAssistantErrorBoundary from "./forecast-assistant-error-boundary";
 import type { AssistantContext } from "./assistant/assistant-service";
 import { ForecastEnginesView } from "./operational-engines-view";
+import { defaultVisibility, type SeriesVisibility } from "@/lib/forecast-chart-data";
 
 const modules = [
   ["inicio", "Inicio", Home], ["historico", "Histórico", History],
@@ -24,7 +25,7 @@ const modules = [
   ["usuarios", "Usuarios", Users], ["auditoria", "Auditoría", FileClock],
 ] as const;
 type ModuleId = typeof modules[number][0];
-type FilterState = { filters: Filters; setFilters: React.Dispatch<React.SetStateAction<Filters>>; repository: ForecastReadRepository; profile: Profile };
+type FilterState = { filters: Filters; setFilters: React.Dispatch<React.SetStateAction<Filters>>; repository: ForecastReadRepository; profile: Profile; seriesVisibility?: SeriesVisibility; setSeriesVisibility?: React.Dispatch<React.SetStateAction<SeriesVisibility>> };
 export const ForecastFiltersContext = createContext<FilterState | null>(null);
 export function useForecastFilters() {
   const state = useContext(ForecastFiltersContext);
@@ -56,8 +57,10 @@ function Picker({ label, value, onChange, options, all = "Todas", disabled = fal
 
 export default function ForecastTowellApp({ profile, repository, onLogout }: { profile: Profile; repository: ForecastReadRepository; onLogout: () => Promise<void> }) {
   const [active, setActive] = useState<ModuleId>("inicio");
+  const [motorVisited, setMotorVisited] = useState(false);
+  const [seriesVisibility, setSeriesVisibility] = useState<SeriesVisibility>({ ...defaultVisibility });
   const [filters, setFilters] = useState<Filters>({ ...emptyFilters });
-  const state = useMemo(() => ({ filters, setFilters, repository, profile }), [filters, repository, profile]);
+  const state = useMemo(() => ({ filters, setFilters, repository, profile, seriesVisibility, setSeriesVisibility }), [filters, repository, profile, seriesVisibility]);
   const chains = useRead(useCallback(() => repository.getVisibleChains(), [repository]));
   const subtitle = chains.data?.find(c => c.id === filters.chainId)?.name ?? (profile.global_role === "ADMIN" ? "Todas las cadenas" : "Todas las cadenas autorizadas");
   const title = modules.find(([id]) => id === active)?.[1] ?? "Inicio";
@@ -80,7 +83,7 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
       <main className="mx-auto w-full max-w-[1480px] p-4 md:p-7"><GlobalFilters/>
         {active === "inicio" && <Dashboard/>}
         {active === "historico" && <HistoryView/>}
-        {active === "motor" && <ForecastEnginesView scope={subtitle}/>}
+        {(active === "motor" || motorVisited) && <div hidden={active !== "motor"}><ForecastEnginesView scope={subtitle} onVisit={() => setMotorVisited(true)}/></div>}
         {active === "calidad" && <QualityView/>}
         {active === "periodos" && <PeriodsView/>}
         {active === "usuarios" && profile.global_role === "ADMIN" && <UsersView/>}

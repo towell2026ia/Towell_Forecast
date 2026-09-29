@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Category, Chain, Cursor, Filters, ForecastReadRepository, HistoricalPage, HistoricalRow, Product, Profile, Summary } from "./supabase/types";
 import { controlledReadCode, logReadDiagnostic, PortalReadError, type PortalReadDiagnostic } from "./portal-read-diagnostic";
 import { RailwayPreviewClient } from "./forecast-preview";
+import type { HistoricalMonth, CustomerMonth } from "./forecast-chart-data";
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 type ProductMapping = { id: string; identifier_mappings?: [string | null, string | null][] };
@@ -178,6 +179,58 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
     const periods = result.data as { period: string }[];
     if (!Array.isArray(periods) || periods.some(p => !p || typeof p.period !== "string" || !/^\d{4}-(0[1-9]|1[0-2])-01$/.test(p.period))) this.fail("getPeriods", publishedPeriodsView, "period_catalog", "INVALID_PERIOD", result.status ?? 200);
     return [...new Set(periods.map(p => p.period.slice(0, 7)))].sort();
+  }
+  async getForecastHistory(filters: Filters): Promise<HistoricalMonth[]> {
+    if (!filters.chainId) return []; // Never consolidate overlapping multi-chain scopes.
+    const months = new Map<string, HistoricalMonth>();
+    let cursor: Cursor | null = null;
+    for (let page = 0; page < 800; page++) {
+      const result = await this.getHistoricalObservations(filters, { size: 250, cursor });
+      for (const row of result.rows) {
+        if (row.chain_id !== filters.chainId || filters.productId && row.product_id !== filters.productId || filters.categoryId && row.product.category_id !== filters.categoryId) throw new Error("chart_identity_mismatch");
+        const period = row.period.slice(0, 7);
+        const month = months.get(period) ?? { period, sale: null, order: null, delivery: null };
+        for (const [metric, key] of [["SALES", "sale"], ["ORDER", "order"], ["DELIVERY", "delivery"]] as const) {
+          if (row[metric] !== null) month[key] = (month[key] ?? 0) + row[metric];
+        }
+        months.set(period, month);
+      }
+      if (!result.next) return [...months.values()].sort((a, b) => a.period.localeCompare(b.period));
+      if (JSON.stringify(cursor) === JSON.stringify(result.next)) throw new Error("chart_pagination_invalid");
+      cursor = result.next;
+    }
+    throw new Error("chart_history_limit"); // Never render a silently truncated aggregate.
+  }
+  async getCustomerForecast(filters: Filters, issuePeriod: string): Promise<CustomerMonth[]> {
+    if (!filters.chainId) return [];
+    // Only visible, validated/frozen versions; drafts and superseded versions are not authority.
+    const versions = await this.rows<{ id: string; chain_id: string; status: string; issue_period: string }[]>(this.client.from("customer_forecast_versions")
+      .select("id,chain_id,status,issue_period").eq("chain_id", filters.chainId).in("status", ["VALIDATED", "FROZEN"])
+      .lte("issue_period", issuePeriod + "-01").order("issue_period", { ascending: false }).order("version_no", { ascending: false }).limit(1).abortSignal(this.controller.signal));
+    const version = versions[0];
+    if (!version) return [];
+    if (versions.length !== 1 || version.chain_id !== filters.chainId || !["VALIDATED", "FROZEN"].includes(version.status) || version.issue_period.slice(0, 7) > issuePeriod) throw new Error("customer_version_invalid");
+    const products = await this.getProducts(filters.chainId, filters.categoryId, filters.productId ? "" : filters.search);
+    const allowed = new Set(products.filter(p => !filters.productId || p.id === filters.productId).map(p => p.id));
+    if (!allowed.size) return [];
+    const months = new Map<string, number>(), seen = new Set<string>();
+    for (let offset = 0; offset < 200000; offset += 500) {
+      let query = this.client.from("customer_forecast_rows").select("chain_id,product_id,forecast_version_id,target_period,value")
+        .eq("chain_id", filters.chainId).eq("forecast_version_id", version.id);
+      if (filters.productId) query = query.eq("product_id", filters.productId);
+      const rows: { chain_id: string; product_id: string; forecast_version_id: string; target_period: string; value: number }[] = await this.rows(query.order("product_id").order("target_period").range(offset, offset + 499).abortSignal(this.controller.signal));
+      for (const row of rows) {
+        if (row.chain_id !== filters.chainId || row.forecast_version_id !== version.id || !products.some(p => p.id === row.product_id) && !filters.categoryId && !filters.search && !filters.productId) throw new Error("customer_identity_mismatch");
+        if (!allowed.has(row.product_id)) continue;
+        const key = `${row.product_id}/${row.target_period}`;
+        if (seen.has(key) || !/^\d{4}-(0[1-9]|1[0-2])-01$/.test(row.target_period) || row.value === null || !Number.isFinite(Number(row.value)) || Number(row.value) < 0) throw new Error("customer_row_invalid");
+        seen.add(key);
+        const period = row.target_period.slice(0, 7);
+        months.set(period, (months.get(period) ?? 0) + Number(row.value));
+      }
+      if (rows.length < 500) return [...months].sort(([a], [b]) => a.localeCompare(b)).map(([period, value]) => ({ period, value }));
+    }
+    throw new Error("customer_forecast_limit");
   }
   async getHistoricalSummary(filters: Filters): Promise<Summary> {
     const [chains, products] = await Promise.all([this.getVisibleChains(), this.getProducts(filters.chainId, filters.categoryId, filters.search)]);
