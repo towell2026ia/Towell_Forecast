@@ -50,6 +50,9 @@ class Settings:
     local_intent_router_enabled: bool = True
     openai_enabled: bool = False
     supabase_enabled: bool = False
+    operational_preview_enabled: bool = False
+    supabase_url: str = ""
+    supabase_publishable_key: str = field(default="", repr=False)
     voice_enabled: bool = False
     deep_research_enabled: bool = False
     assistant_token: str = field(default="", repr=False)
@@ -85,22 +88,37 @@ class Settings:
             raise ValueError("invalid_app_env")
         if not 1 <= self.api_port <= 65535:
             raise ValueError("invalid_integer:API_PORT")
-        if self.assistant_provider != "local" or self.data_provider != "normalized" or \
+        if self.assistant_provider != "local" or self.data_provider not in {"normalized", "supabase"} or \
                 self.persistence_provider != "sqlite" or self.research_provider != "local":
             raise ValueError("provider_disabled")
         if self.persistence_mode not in {"local", "hosted-volume"}:
             raise ValueError("invalid_persistence_mode")
-        if any((self.openai_enabled, self.supabase_enabled, self.voice_enabled, self.deep_research_enabled)):
+        if any((self.openai_enabled, self.voice_enabled, self.deep_research_enabled)):
             raise ValueError("future_provider_disabled")
+        if self.data_provider == "supabase" or self.supabase_enabled or self.operational_preview_enabled:
+            if not (self.data_provider == "supabase" and self.supabase_enabled and self.operational_preview_enabled):
+                raise ValueError("operational_preview_configuration_missing")
+            if self.legacy_pilot_enabled or self.ai_assistant_api_enabled:
+                raise ValueError("preview_only_configuration_required")
+            supabase = urlparse(self.supabase_url)
+            if supabase.scheme != "https" or not supabase.hostname or not supabase.hostname.endswith(".supabase.co") \
+                    or supabase.username or supabase.password or supabase.path not in {"", "/"} \
+                    or supabase.query or supabase.fragment:
+                raise ValueError("invalid_supabase_url")
+            if not self.supabase_publishable_key.startswith("sb_publishable_") or len(self.supabase_publishable_key) < 24:
+                raise ValueError("supabase_publishable_key_required")
+            if self.max_forecast_runs > 2:
+                raise ValueError("operational_concurrency_maximum_two")
         if not self.local_research_enabled or not self.local_intent_router_enabled:
             raise ValueError("local_provider_disabled")
         parsed = urlparse(self.frontend_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc or "*" in self.frontend_url:
             raise ValueError("invalid_frontend_url")
         if self.strict_auth:
-            if parsed.scheme != "https" or not self.assistant_token or not self.manager_ids:
+            if parsed.scheme != "https" or (not self.operational_preview_enabled and
+                    (not self.assistant_token or not self.manager_ids)):
                 raise ValueError("strict_auth_configuration_missing")
-            if len(self.assistant_token) < 32:
+            if not self.operational_preview_enabled and len(self.assistant_token) < 32:
                 raise ValueError("weak_auth_secret")
             if self.api_host != "0.0.0.0":
                 raise ValueError("host_must_bind_all_interfaces")
@@ -154,6 +172,9 @@ class Settings:
             local_intent_router_enabled=flag("LOCAL_INTENT_ROUTER_ENABLED", True),
             openai_enabled=flag("OPENAI_ENABLED", False),
             supabase_enabled=flag("SUPABASE_ENABLED", False),
+            operational_preview_enabled=flag("OPERATIONAL_PREVIEW_ENABLED", False),
+            supabase_url=env.get("SUPABASE_URL", ""),
+            supabase_publishable_key=env.get("SUPABASE_PUBLISHABLE_KEY", ""),
             voice_enabled=flag("VOICE_ENABLED", False),
             deep_research_enabled=flag("DEEP_RESEARCH_ENABLED", False),
             assistant_token=env.get("ASSISTANT_API_TOKEN", ""),

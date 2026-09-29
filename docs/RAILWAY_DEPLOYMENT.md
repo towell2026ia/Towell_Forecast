@@ -1,5 +1,7 @@
 # Railway staging/bootstrap — FastAPI
 
+For the separately authorized multi-chain operational preview cutover, use [PRD 09.2E.2 deployment gate](PRD09_2E2_OPERATIONAL_ENGINE.md). The bootstrap below remains the safe initial configuration and is not the E2 activation block.
+
 Este procedimiento prepara el **primer despliegue del backend**, no habilita el asistente público ni cierra el E2E del PRD 09.1. La fuente única es `towell2026ia/Towell_Forecast`, rama `main`, imagen `Dockerfile.api`. No crear otro backend ni subir Excel, SQLite, `.env` o credenciales. Seleccionar un commit con CI verde antes de desplegarlo; la conexión GitHub→Railway por sí sola no impone ese gate.
 
 ## Configuración manual en Railway Hobby

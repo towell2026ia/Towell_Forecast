@@ -11,6 +11,7 @@ export type HistoricalRow = Cursor & { product: Product; chain: string; SALES: n
 export type HistoricalPage = { rows: HistoricalRow[]; next: Cursor | null; observationCount: number };
 export type Summary = { scopeCount: number; productCount: number; observationCount: number; latestPeriod: string | null; byScope: { chain: Chain; observations: number }[] };
 export interface ForecastReadRepository {
+  previews?: import("../forecast-preview").PreviewClient;
   getCurrentProfile(): Promise<Profile>;
   getVisibleChains(): Promise<Chain[]>;
   getCategories(chainId?: string | null): Promise<Category[]>;

@@ -59,7 +59,7 @@ class ForecastPolicy:
 class Observation:
     period: str
     value: float | None
-    available_at: str
+    available_at: str | None
 
 
 @dataclass
@@ -97,6 +97,9 @@ class ProductSeries:
             result.append(item.value)
         return result
 
+    def known(self, observation: Observation, cutoff: str) -> bool:
+        return observation.available_at is not None and observation.available_at <= month_end(cutoff)
+
     def lifecycle(self, cutoff: str, policy: ForecastPolicy) -> str:
         history = self.history(cutoff)
         if not history:
@@ -106,6 +109,73 @@ class ProductSeries:
         if all(value == 0 for value in history[-6:]):
             return "INACTIVE"
         return "ACTIVE"
+
+
+class RetrospectiveProductSeries(ProductSeries):
+    """Explicit period-based history; original availability remains literal/unknown."""
+
+    def known(self, observation: Observation, cutoff: str) -> bool:
+        return observation.period <= cutoff
+
+    def history(self, issue_period: str) -> list[float]:
+        result = []
+        period = issue_period
+        while (item := self.observations.get(period)) is not None and item.value is not None:
+            result.append(item.value)
+            period = add_month(period, -1)
+        result.reverse()
+        first = next((index for index, value in enumerate(result) if value > 0), None)
+        # Real trailing zeroes still count; an all-zero product is PRE-LAUNCH.
+        return result[first:] if first is not None else []
+
+    def lifecycle(self, cutoff: str, policy: ForecastPolicy) -> str:
+        observed = [item for item in self.observations.values() if item.period <= cutoff]
+        if not observed or not any(item.value is not None and item.value > 0 for item in observed):
+            return "PRE-LAUNCH"
+        history = self.history(cutoff)
+        if not history:
+            return "INSUFFICIENT"
+        if len(history) < policy.min_train_observations:
+            return "COLD_START"
+        return "INACTIVE" if all(value == 0 for value in history[-6:]) else "ACTIVE"
+
+
+def normalize_retrospective_dataset(rows: Iterable[dict[str, Any]], cutoff: str,
+                                    *, chain_id: str | None = None, product_id: str | None = None,
+                                    objective: str = "Venta") -> list[ProductSeries]:
+    """Separate boundary; never delegates to PIT by fabricating availability."""
+    if objective != "Venta":
+        raise ValueError("unsupported_forecast_objective")
+    date.fromisoformat(month_end(cutoff))
+    grouped: dict[str, ProductSeries] = {}
+    for row in rows:
+        if row.get("objective") != objective:
+            continue
+        if row.get("evidence_mode", "RETROSPECTIVE_TRAINING") != "RETROSPECTIVE_TRAINING":
+            raise ValueError("mixed_evidence_modes")
+        chain, product = str(row.get("chain_id") or ""), str(row.get("product_id") or "")
+        if not chain or not product:
+            raise ValueError("identity_missing")
+        if chain_id and chain != chain_id or product_id and product != product_id:
+            continue
+        period = row["period"]
+        date.fromisoformat(month_end(period))
+        if period > cutoff:
+            raise ValueError("data_leakage_detected")
+        raw = row.get("value")
+        value = None if row.get("is_missing") is True or raw is None else float(raw)
+        if value is not None and (not math.isfinite(value) or value < 0):
+            raise ValueError("invalid_observation")
+        key = f"{chain}|{product}|{objective}"
+        if key not in grouped:
+            grouped[key] = RetrospectiveProductSeries(chain, product, str(row.get("product_code") or product),
+                str(row.get("description") or product), str(row.get("category") or "UNCLASSIFIED"),
+                str(row.get("variant") or ""), objective)
+        current = Observation(period, value, row.get("available_at"))
+        if period in grouped[key].observations:
+            raise ValueError("duplicate_observation_conflict")
+        grouped[key].observations[period] = current
+    return [grouped[key] for key in sorted(grouped)]
 
 
 def normalize_dataset(rows: Iterable[dict[str, Any]], cutoff: str,
@@ -171,7 +241,34 @@ def _stat_predict(name: str, values: list[float], steps: int, parameters: dict[s
                                    alpha=parameters["alpha"], beta=parameters["beta"])
     else:
         output = stat.MODELS[name](values, steps)
-    return max(0.0, float(output[-1]))
+    prediction = float(output[-1])
+    if not math.isfinite(prediction):
+        raise ValueError("invalid_statistical_prediction")
+    return max(0.0, prediction)
+
+
+def _ml_prediction(model, prep, vector) -> float:
+    prediction = float(model.predict(prep.transform([vector]))[0])
+    if not math.isfinite(prediction):
+        raise ValueError("invalid_ml_prediction")
+    return max(0.0, prediction)
+
+
+def _ensemble_weights(common, choices, ml_choice, incumbent):
+    weights = [round(1 - index / 10, 2) for index in range(11)] if ml_choice else [1.0]
+    if ml_choice and incumbent and incumbent.get("statistical_weight") is not None:
+        weight = float(incumbent["statistical_weight"])
+        if not math.isfinite(weight) or not 0 <= weight <= 1:
+            raise ValueError("invalid_ensemble_weight")
+        weights.append(weight)
+    if common:
+        coarse = sorted(((_metrics([(row["actual"], row["statistical"][choices[row["product_id"]]] * weight
+                                     + row["ml"][ml_choice] * (1 - weight)) for row in common])["wape"], weight)
+                         for weight in weights))
+        center = coarse[0][1]
+        weights = sorted(set(weights + [round(max(0.0, min(1.0, center + offset * 0.025)), 3)
+                                         for offset in range(-4, 5)]))
+    return weights
 
 
 def _stat_options(values: list[float]) -> dict[str, dict[str, float]]:
@@ -228,7 +325,7 @@ def _training_samples(series: list[ProductSeries], train_end: str,
     first = min(min(item.observations) for item in series)
     for item in series:
         for target, observation in sorted(item.observations.items()):
-            if target > train_end or observation.value is None or observation.available_at > month_end(train_end):
+            if target > train_end or observation.value is None or not item.known(observation, train_end):
                 continue
             for horizon in HORIZONS:
                 issue = add_month(target, -horizon)
@@ -275,10 +372,17 @@ def forecast_dataset(rows: Iterable[dict[str, Any]], issue_period: str,
                      objective: str = "Venta", policy: ForecastPolicy | None = None,
                      incumbent: dict[str, Any] | None = None,
                      research: dict[str, Any] | None = None,
-                     version_sequence: int = 1) -> dict[str, Any]:
+                     version_sequence: int = 1, evidence_mode: str = "POINT_IN_TIME", on_stage=None) -> dict[str, Any]:
     """Produce product H1-H12 and reconciled aggregates; never publish a Champion."""
     policy = policy or ForecastPolicy()
-    products = normalize_dataset(rows, issue_period, chain_id=chain_id, product_id=product_id,
+    if evidence_mode not in {"POINT_IN_TIME", "RETROSPECTIVE_TRAINING"}:
+        raise ValueError("invalid_evidence_mode")
+    rows = list(rows)
+    if any(row.get("evidence_mode", evidence_mode) != evidence_mode for row in rows):
+        raise ValueError("mixed_evidence_modes")
+    retrospective = evidence_mode == "RETROSPECTIVE_TRAINING"
+    normalizer = normalize_retrospective_dataset if retrospective else normalize_dataset
+    products = normalizer(rows, issue_period, chain_id=chain_id, product_id=product_id,
                                  objective=objective)
     cutoff_date = month_end(issue_period)
     if research:
@@ -289,15 +393,47 @@ def forecast_dataset(rows: Iterable[dict[str, Any]], issue_period: str,
             raise ValueError("research_leakage_detected")
     if not products:
         raise ValueError("no_eligible_products")
-    return {"engine_version": ENGINE_VERSION, "issue_period": issue_period,
+    result = {"engine_version": ENGINE_VERSION, "issue_period": issue_period,
             "objective": objective, "policy": asdict(policy),
-            "chains": [_forecast_chain(group, issue_period, policy, incumbent, version_sequence)
+            "chains": [_forecast_chain(group, issue_period, policy, incumbent, version_sequence,
+                                       retrospective=retrospective, on_stage=on_stage)
                        for chain in sorted({item.chain_id for item in products})
                        if (group := [item for item in products if item.chain_id == chain])]}
+    if retrospective:
+        def provisional(value):
+            if isinstance(value, list):
+                return [provisional(item) for item in value]
+            if not isinstance(value, dict):
+                return value
+            output = {}
+            for key, item in value.items():
+                if key.startswith("certified_"):
+                    output[key.replace("certified_", "retrospective_holdout_", 1)] = provisional(item)
+                    output[key] = None
+                elif key.startswith("validation_"):
+                    output[key.replace("validation_", "retrospective_validation_", 1)] = provisional(item)
+                elif key == "certification_status":
+                    output[key] = "PROVISIONAL_TEMPORAL_UNKNOWN"
+                elif key == "certification_range":
+                    output["retrospective_holdout_range"] = item
+                elif key == "certification_targets":
+                    output["retrospective_holdout_targets"] = item
+                else:
+                    output[key] = provisional(item)
+            output["temporal_certification"] = False
+            return output
+        result = provisional(result)
+        result["evidence_mode"] = evidence_mode
+        for chain in result["chains"]:
+            chain["selection"]["status"] = "PREVIEW"
+            chain["selection"]["initial_champion_candidate"] = None
+            chain["selection"]["challenger"] = None
+    return result
 
 
 def _forecast_chain(products: list[ProductSeries], issue: str, policy: ForecastPolicy,
-                    incumbent: dict[str, Any] | None, version_sequence: int) -> dict[str, Any]:
+                    incumbent: dict[str, Any] | None, version_sequence: int,
+                    *, retrospective: bool = False, on_stage=None) -> dict[str, Any]:
     chain = products[0].chain_id
     start = min(min(item.observations) for item in products)
     months = month_distance(start, issue) + 1
@@ -317,6 +453,11 @@ def _forecast_chain(products: list[ProductSeries], issue: str, policy: ForecastP
     identities = sorted({value for item in products if item.history(train_end)
                          for value in (item.chain_id, item.category, item.key)})
     features, targets = _training_samples(products, train_end, identities)
+    if on_stage:
+        on_stage("STATISTICAL")
+    options = {item.key: _stat_options(item.history(train_end)) for item in products}
+    if on_stage:
+        on_stage("ML")
     ml_models: dict[str, tuple[Preprocessor, Any]] = {}
     ml_failures: list[dict[str, str]] = []
     if len(features) >= policy.min_train_observations:
@@ -327,14 +468,13 @@ def _forecast_chain(products: list[ProductSeries], issue: str, policy: ForecastP
             except Exception as exc:
                 ml_failures.append({"model": name, "error": type(exc).__name__})
                 continue
-    options = {item.key: _stat_options(item.history(train_end)) for item in products}
     rows: list[dict[str, Any]] = []
     for target in target_periods:
         for item in products:
             for horizon in HORIZONS:
                 origin = add_month(target, -horizon)
                 observed = item.observations.get(target)
-                if observed is None or observed.value is None or observed.available_at > month_end(issue):
+                if observed is None or observed.value is None or not item.known(observed, issue):
                     continue
                 # Certification is a sealed holdout: all predictions use the
                 # last pre-certification target as their feature/history cutoff.
@@ -353,7 +493,7 @@ def _forecast_chain(products: list[ProductSeries], issue: str, policy: ForecastP
                 ml = {}
                 for name, (prep, model) in ml_models.items():
                     try:
-                        ml[name] = float(max(0.0, model.predict(prep.transform([vector]))[0]))
+                        ml[name] = _ml_prediction(model, prep, vector)
                     except Exception as exc:
                         ml_failures.append({"model": name, "error": type(exc).__name__})
                 rows.append({"product_id": item.product_id, "category": item.category,
@@ -405,16 +545,16 @@ def _forecast_chain(products: list[ProductSeries], issue: str, policy: ForecastP
     ml_choice = ml_choices[0]["model"] if ml_choices else None
     common = [row for row in selection if statistical_choices[row["product_id"]] in row["statistical"]
               and ml_choice is not None and ml_choice in row["ml"]]
-    weights = [round(1 - index / 10, 2) for index in range(11)] if ml_choice else [1.0]
-    if ml_choice and incumbent and incumbent.get("statistical_weight") is not None:
-        weights.append(float(incumbent["statistical_weight"]))
-    if common:
-        coarse = sorted(((_metrics([(row["actual"], row["statistical"][statistical_choices[row["product_id"]]] * weight
-                                     + row["ml"][ml_choice] * (1 - weight)) for row in common])["wape"], weight)
-                         for weight in weights))
-        center = coarse[0][1]
-        weights = sorted(set(weights + [round(max(0.0, min(1.0, center + offset * 0.025)), 3)
-                                         for offset in range(-4, 5)]))
+    if on_stage:
+        on_stage("ENSEMBLE")
+    ensemble_failures = []
+    try:
+        weights = _ensemble_weights(common, statistical_choices, ml_choice, incumbent)
+    except Exception:
+        if not retrospective:
+            raise
+        weights = [1.0]
+        ensemble_failures.append("ENSEMBLE_FAILED")
     def candidates_on(data: list[dict[str, Any]], weight: float) -> list[tuple[float, float]]:
         return [(row["actual"], row["statistical"][statistical_choices[row["product_id"]]] * weight
                  + (row["ml"][ml_choice] if ml_choice else 0.0) * (1 - weight))
@@ -439,6 +579,8 @@ def _forecast_chain(products: list[ProductSeries], issue: str, policy: ForecastP
                               if row["strategy"] == incumbent_strategy), None))
     official_weight = incumbent_weight if incumbent_weight is not None else 1.0
     official = next((row for row in candidates if row["statistical_weight"] == official_weight), best)
+    if retrospective and incumbent is None:
+        official, official_weight = best, best["statistical_weight"]
     def certified(weight: float) -> dict[str, Any]:
         pair = candidates_on(certification, weight)
         score = _metrics(pair)
@@ -493,7 +635,7 @@ def _forecast_chain(products: list[ProductSeries], issue: str, policy: ForecastP
                 # Fit a fresh operational model on all currently known history,
                 # never on a future target; certification used a separate frozen fit.
                 try:
-                    ml_value = float(max(0.0, model.predict(prep.transform([_feature(item, issue, target, identities)]))[0]))
+                    ml_value = _ml_prediction(model, prep, _feature(item, issue, target, identities))
                 except Exception as exc:
                     ml_failures.append({"model": ml_choice, "error": type(exc).__name__})
             value = statistical_value * official_weight + (ml_value or 0.0) * (1 - official_weight) if ml_value is not None else statistical_value
@@ -528,8 +670,11 @@ def _forecast_chain(products: list[ProductSeries], issue: str, policy: ForecastP
                              "certification_status": status if lifecycle == "ACTIVE" and
                              sum(row["product_id"] == item.product_id for row in certification) >=
                              policy.min_product_observations else "PROVISIONAL",
-                             "probability": _bands(value, residuals),
-                             "band_basis": band_basis if residuals else "insufficient",
+                             "statistical_model": selected_model, "ml_model": ml_choice,
+                             "ensemble_value": round(value, 2) if applied_strategy == "ensemble" else None,
+                             "probability": _bands(value, residuals) if not retrospective or len(residuals) >= 3 else None,
+                             "band_basis": ("RETROSPECTIVE_" + band_basis.upper() if retrospective else band_basis)
+                             if residuals and (not retrospective or len(residuals) >= 3) else "insufficient",
                              "band_observations": len(residuals)})
     aggregates = []
     for level in ("category", "chain"):
@@ -562,7 +707,12 @@ def _forecast_chain(products: list[ProductSeries], issue: str, policy: ForecastP
              "certification_range": [cert_targets[0], cert_targets[-1]] if cert_targets else None,
              "validation_targets": selection_targets, "certification_targets": cert_targets,
              "candidate_models": evaluations, "statistical_parameters": options,
-             "ml_failures": ml_failures,
+             "ml_failures": ml_failures, "ensemble_failures": ensemble_failures,
+             "training_samples": len(features), "ml_candidates": list(ml_models),
+             "available_ml_candidates": list(MODEL_FACTORIES), "available_statistical_candidates": list(stat.MODELS),
+             "retrospective_statistical_metrics": _metrics(candidates_on(selection, 1.0)) if retrospective else None,
+             "retrospective_ml_metrics": _metrics([(row["actual"], row["ml"][ml_choice]) for row in ml_baseline
+                 if ml_choice in row["ml"]]) if retrospective else None,
              "selected_candidate": candidate_payload,
              "incumbent": incumbent, "challenger": candidate_payload if eligible else None,
              **best_cert, "origins": {"selection": len(selection_targets), "certification": len(cert_targets)},
@@ -575,6 +725,10 @@ def _forecast_chain(products: list[ProductSeries], issue: str, policy: ForecastP
             "selection": {"official": incumbent, "applied_strategy": official,
                           "initial_champion_candidate": candidate_payload if incumbent is None else None,
                           "challenger": candidate_payload if eligible else None,
+                          "preview_leader": candidate_payload if retrospective else None,
+                          "preview_challenger": candidates[1] if retrospective and len(candidates) > 1 else None,
+                          "no_degradation": (eligible if incumbent is not None else None),
+                          "promotion_allowed": False,
                           "status": "INITIAL_CHAMPION_CANDIDATE" if incumbent is None else "CHALLENGER" if eligible else "REJECTED",
                           "automatic_promotion": False, "incumbent": incumbent},
             "certification_status": status, "certified_metrics": incumbent_cert,

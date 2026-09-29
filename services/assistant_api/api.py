@@ -17,8 +17,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from .auth import ADMIN, EXECUTE, READ, AuthFailure, AuthProvider, LocalAuthProvider, Principal, SignedAuthProvider, authorize
-from .data_provider import DataProvider, NormalizedDataProvider, PersistedObservationProvider
+from .auth import ADMIN, EXECUTE, READ, AuthFailure, AuthProvider, LocalAuthProvider, Principal, SignedAuthProvider, SupabaseAuthProvider, authorize
+from .data_provider import DataProvider, NormalizedDataProvider, PersistedObservationProvider, SupabaseDataProvider
 from .generalized_historical import GeneralizedHistoricalForecastRunner
 from .orchestrator import AssistantProvider, ForecastOrchestrator
 from .persistence import LocalPersistenceProvider, PersistenceProvider
@@ -85,12 +85,19 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
                auth_provider: AuthProvider | None = None,
                telemetry: TelemetryProvider | None = None) -> FastAPI:
     config = (settings or Settings.from_env()).validate()
-    data = provider or NormalizedDataProvider(data_dir=config.data_dir, state_dir=config.state_dir)
+    from .supabase_access import PreviewError, SupabaseReadClient
+    from .operational_preview import OperationalMultiChainForecastRunner
+    from .preview_api import mount_preview_routes
+    supabase_client = SupabaseReadClient(config.supabase_url, config.supabase_publishable_key,
+        timeout=config.external_timeout_seconds) if config.operational_preview_enabled else None
+    data = provider or (SupabaseDataProvider(supabase_client) if supabase_client else
+                        NormalizedDataProvider(data_dir=config.data_dir, state_dir=config.state_dir))
     state_dir = (Path(historical_state_dir) if historical_state_dir else
                  Path(getattr(data, "state_dir", config.state_dir)) / "historical")
     storage = persistence or LocalPersistenceProvider(config.database_path if not historical_state_dir else
                                                        state_dir / "historical.sqlite3")
-    identity = auth_provider or (SignedAuthProvider(config) if config.strict_auth else LocalAuthProvider(config))
+    identity = auth_provider or (SupabaseAuthProvider(supabase_client) if supabase_client else
+                                SignedAuthProvider(config) if config.strict_auth else LocalAuthProvider(config))
     metrics = telemetry or LocalTelemetryProvider()
     rate_limiter = SlidingWindowRateLimiter()
     historical_slots = threading.BoundedSemaphore(config.max_historical_runs)
@@ -106,16 +113,16 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
                        allow_methods=["GET", "POST"], allow_headers=["Authorization", "Content-Type",
                                                                        "Idempotency-Key", "X-Assistant-Token",
                                                                        "X-Actor-Id", "X-Request-ID"])
-    orchestrator = ForecastOrchestrator(data, assistant_provider=assistant_provider)
+    orchestrator = None if config.operational_preview_enabled else ForecastOrchestrator(data, assistant_provider=assistant_provider)
     model_data = data if provider is not None else PersistedObservationProvider(data, storage)
-    historical = GeneralizedHistoricalForecastRunner(model_data, storage,
+    historical = None if config.operational_preview_enabled else GeneralizedHistoricalForecastRunner(model_data, storage,
         research=LocalResearchProvider(), state_dir=state_dir / "generic")
     legacy_historical = None
     if config.legacy_pilot_enabled:
         from .historical_runner import LegacyHistoricalForecastRunner
         legacy_historical = LegacyHistoricalForecastRunner(data, research=LocalResearchProvider(),
             state_dir=state_dir, persistence=storage)
-    forecast_runner = GeneralizedMonthlyForecastRunner(model_data, research=LocalResearchProvider(),
+    forecast_runner = None if config.operational_preview_enabled else GeneralizedMonthlyForecastRunner(model_data, research=LocalResearchProvider(),
         state_dir=config.state_dir, persistence=storage)
     if config.legacy_pilot_enabled and forecast_pipeline is not None:
         from .runner import MonthlyForecastRunner
@@ -129,6 +136,16 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
     app.state.persistence = storage
     app.state.telemetry = metrics
     app.state.auth = identity
+    preview_runner = OperationalMultiChainForecastRunner(storage, concurrency=config.max_forecast_runs,
+        environment=config.app_env) if config.operational_preview_enabled else None
+    app.state.preview_runner = preview_runner
+    if preview_runner:
+        mount_preview_routes(app, config, identity, data, preview_runner, rate_limiter)
+
+    @app.exception_handler(PreviewError)
+    async def preview_exception(request: Request, exc: PreviewError):
+        return JSONResponse(status_code=exc.status, content={"status": "error", "error_code": exc.code,
+            "request_id": getattr(request.state, "request_id", None)})
 
     @app.middleware("http")
     async def request_context(request: Request, call_next):
@@ -177,6 +194,9 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
         def dependency(request: Request, authorization: str | None = Header(default=None),
                        x_assistant_token: str | None = Header(default=None),
                        x_actor_id: str | None = Header(default=None)) -> Principal:
+            # E2 exposes only operational preview routes; no pilot/model publication paths.
+            if config.operational_preview_enabled:
+                raise HTTPException(status_code=503, detail="REQUEST_001")
             token = authorization.removeprefix("Bearer ") if authorization and authorization.startswith("Bearer ") \
                 else x_assistant_token
             try:
@@ -231,6 +251,12 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
     @app.get("/api/ready")
     @app.get("/api/v1/ready")
     def ready():
+        if config.operational_preview_enabled:
+            providers = {"data": data.health(), "persistence": storage.health(), "auth": identity.health()}
+            healthy = all(item["status"] == "healthy" for item in providers.values())
+            return JSONResponse(status_code=200 if healthy else 503, content={"status": "ok" if healthy else "not_ready",
+                "version": config.app_version, "environment": config.app_env, "providers": providers,
+                "operational_preview": True, "official_publication": False})
         providers = {"data": data.health(), "persistence": storage.health(),
                      "assistant": orchestrator.assistant_provider.health(),
                      "research": historical.research.health(), "auth": identity.health()}
@@ -534,6 +560,8 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
 
     @app.on_event("shutdown")
     def shutdown() -> None:
+        if preview_runner:
+            preview_runner.close()
         executor.shutdown(wait=True, cancel_futures=False)
         forecast_executor.shutdown(wait=True, cancel_futures=False)
 

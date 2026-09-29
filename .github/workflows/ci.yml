@@ -57,6 +57,7 @@ jobs:
             sleep 1
           done
           test "$(docker inspect --format '{{.State.Health.Status}}' forecast-towell-ci-1)" = healthy
+          docker exec forecast-towell-ci-1 python -c "from pathlib import Path; uid=next(line for line in Path('/proc/1/status').read_text().splitlines() if line.startswith('Uid:')).split()[1]; assert int(uid) > 0"
           docker exec forecast-towell-ci-1 python -c "from pathlib import Path; from services.assistant_api.persistence import LocalPersistenceProvider; p=LocalPersistenceProvider(Path('/var/lib/forecast-towell/historical/historical.sqlite3')); p.put('source_evidence','TEST-CI-VOLUME',{'status':'persisted'})"
           docker stop forecast-towell-ci-1 >/dev/null
           docker run --rm -d --name forecast-towell-ci-2 -p 127.0.0.1:18080:18081 \

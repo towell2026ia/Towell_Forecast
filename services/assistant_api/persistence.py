@@ -17,6 +17,7 @@ ENTITIES = (
     "forecast_horizons", "forecast_bands", "actual_evaluations",
     "performance_metrics", "run_logs", "vintage_registry", "forecast_jobs", "champion_registry",
     "import_batches", "normalized_observations",
+    "forecast_previews",
 )
 IMMUTABLE = set(ENTITIES) - {"historical_runs", "monthly_runs", "actual_evaluations", "performance_metrics", "run_logs", "vintage_registry", "forecast_jobs", "champion_registry"}
 

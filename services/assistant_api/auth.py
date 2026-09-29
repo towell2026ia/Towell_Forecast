@@ -38,6 +38,8 @@ class Principal:
     role: str
     permissions: frozenset[str]
     session_id: str
+    chain_ids: frozenset[str] = frozenset()
+    execute_chain_ids: frozenset[str] = frozenset()
 
 
 class AuthProvider(ABC):
@@ -139,9 +141,22 @@ class SignedAuthProvider(AuthProvider):
 
 
 class SupabaseAuthProvider(AuthProvider):
+    def __init__(self, client=None):
+        self.client = client
+
     def authenticate(self, *, token: str | None, actor_id: str | None,
                      client_host: str | None) -> Principal:
-        raise NotImplementedError("supabase_auth_not_connected")
+        from .supabase_access import PreviewError
+        del actor_id, client_host
+        if not self.client or not token:
+            raise AuthFailure("AUTH_001", 401)
+        try:
+            identity = self.client.bind(token).identity()
+        except PreviewError as exc:
+            raise AuthFailure("AUTH_001" if exc.status == 401 else "AUTH_002", exc.status) from None
+        role = {"ADMIN": "manager", "EDITOR": "editor", "VIEWER": "reader"}[identity["role"]]
+        return Principal(identity["user_id"], role, ROLE_PERMISSIONS[role], identity["session_id"],
+                         identity["chain_ids"], identity["execute_chain_ids"])
 
     def health(self) -> dict[str, str]:
-        return {"status": "disabled", "provider": "SupabaseAuthProvider"}
+        return {"status": "healthy" if self.client else "disabled", "provider": "SupabaseAuthProvider"}

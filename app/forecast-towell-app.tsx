@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { BrainCircuit, CalendarRange, ClipboardCheck, FileClock, History, Home, LogOut, PanelLeft, ShieldCheck, Sparkles, Users } from "lucide-react";
+import { BrainCircuit, CalendarRange, ClipboardCheck, FileClock, History, Home, LogOut, PanelLeft, ShieldCheck, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -15,6 +15,7 @@ import { emptyFilters, type Cursor, type Filters, type ForecastReadRepository, t
 import ForecastAssistant from "./forecast-assistant";
 import ForecastAssistantErrorBoundary from "./forecast-assistant-error-boundary";
 import type { AssistantContext } from "./assistant/assistant-service";
+import { ForecastEnginesView } from "./operational-engines-view";
 
 const modules = [
   ["inicio", "Inicio", Home], ["historico", "Histórico", History],
@@ -79,7 +80,7 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
       <main className="mx-auto w-full max-w-[1480px] p-4 md:p-7"><GlobalFilters/>
         {active === "inicio" && <Dashboard/>}
         {active === "historico" && <HistoryView/>}
-        {active === "motor" && <EnginesView scope={subtitle}/>}
+        {active === "motor" && <ForecastEnginesView scope={subtitle}/>}
         {active === "calidad" && <QualityView/>}
         {active === "periodos" && <PeriodsView/>}
         {active === "usuarios" && profile.global_role === "ADMIN" && <UsersView/>}
@@ -139,7 +140,6 @@ function HistoricalPages({ repository, filters }: { repository: ForecastReadRepo
     <div className="mt-4 flex flex-wrap items-end justify-between gap-3"><Picker label="Filas por página" value={String(size)} onChange={v => { setSize(Number(v) as 50 | 100 | 250); setCursors([null]); }} options={[50, 100, 250].map(n => ({ id: String(n), name: String(n) }))} all="50"/><div className="flex items-center gap-3"><Button variant="outline" disabled={cursors.length === 1 || page.loading} onClick={() => setCursors(c => c.slice(0, -1))}>Anterior</Button><span className="text-sm text-slate-500">Página {cursors.length}</span><Button variant="outline" disabled={!page.data?.next || page.loading} onClick={() => setCursors(c => [...c, page.data!.next])}>Siguiente</Button></div></div>
   </div>;
 }
-function EnginesView({ scope }: { scope: string }) { return <div><Intro title="Motores de Forecast" copy={scope}/><div className="grid gap-4 lg:grid-cols-3">{["Motor Estadístico", "Machine Learning", "Champion / Challenger"].map(title => <Card key={title} className="border-slate-200 shadow-sm"><CardContent className="p-6"><BrainCircuit className="size-6 text-blue-700"/><h2 className="mt-5 font-semibold">{title}</h2><p className="mt-2 text-sm text-slate-500">Sin corrida publicada para este scope.</p><Button disabled className="mt-5" variant="outline">Ejecución no habilitada</Button></CardContent></Card>)}</div><Card className="mt-5 border-slate-200 shadow-sm"><CardContent className="flex items-start gap-3 p-5"><Sparkles className="size-5 shrink-0 text-blue-700"/><p className="text-sm text-slate-500">El asistente está disponible en modo visual. La consulta inteligente y sus acciones permanecen deshabilitadas hasta implementar la validación segura de identidad Supabase en Python.</p></CardContent></Card></div>; }
 function QualityView() { return <Unavailable title="Calidad de datos" copy="Esta vista consulta únicamente observaciones publicadas. Los registros pendientes de reconciliación no forman parte del histórico visible. No se muestran alertas demo ni métricas de modelos sin corrida publicada."/>; }
 function PeriodsView() {
   const { repository, filters } = useForecastFilters();
