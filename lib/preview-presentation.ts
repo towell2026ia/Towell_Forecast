@@ -27,8 +27,15 @@ export function previewMetrics(scope: PreviewScope, productId: string | null) {
   };
 }
 
+export function previewCandidateLabel(candidate?: PreviewCandidate | null): string {
+  const model = candidate?.model?.replace(/\s+/g, " ").trim();
+  const strategy = candidate?.strategy?.replace(/\s+/g, " ").trim();
+  return model || strategy || "—";
+}
+
 export function distinctChallenger(leader?: PreviewCandidate | null, challenger?: PreviewCandidate | null): PreviewCandidate | null {
-  if (!leader || !challenger) return null;
-  const key = (c: PreviewCandidate) => `${c.model ?? ""}|${c.strategy ?? ""}|${"statistical_weight" in c ? c.statistical_weight : ""}`;
-  return key(leader) === key(challenger) ? null : challenger;
+  const leaderLabel = previewCandidateLabel(leader);
+  const challengerLabel = previewCandidateLabel(challenger);
+  if (leaderLabel === "—" || challengerLabel === "—") return null;
+  return leaderLabel.toLowerCase() === challengerLabel.toLowerCase() ? null : challenger ?? null;
 }
