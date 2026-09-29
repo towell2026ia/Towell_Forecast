@@ -27,7 +27,7 @@ export function PreviewPerformancePanel({ job, scope, productId, historical = fa
       ["WAPE Stat retrospectivo", metrics.stat.wape], ["WAPE ML retrospectivo", metrics.ml.wape],
       ["WAPE Fcst Towell retrospectivo", metrics.towell.wape], ["Bias Fcst Towell retrospectivo", metrics.towell.bias],
     ].map(([label, value]) => <div className="rounded-xl border border-slate-200 bg-white p-4" key={label}><p className="text-xs text-slate-500">{label}</p><p className="mt-2 text-2xl font-semibold">{percent(value as number | null)}</p></div>)}</div>
-    <p className="text-xs text-slate-500">{productId ? "Métricas del producto seleccionado." : "Métricas del scope seleccionado; no se promedian métricas por producto."} Evaluación retrospectiva rolling-origin. No constituye certificación point-in-time.</p>
+    <p className="text-xs text-slate-500">{productId ? "Métricas del producto seleccionado." : "Métricas del scope de cadena; no se promedian por producto ni se recalculan por categoría o periodo."} Evaluación retrospectiva rolling-origin. No constituye certificación point-in-time.</p>
     {historical && <details className="rounded-xl border bg-white p-4"><summary className="cursor-pointer font-semibold">Ver desempeño de modelos</summary><div className="mt-4 space-y-4"><ForecastGrid headers={["Motor", "Modelo", "WAPE", "Bias", "Observaciones", "Estado / motivo"]} rows={detail}/><h3 className="text-sm font-semibold">Desempeño por horizonte disponible</h3><ForecastGrid headers={["Horizonte", "Motor", "WAPE", "Bias", "Observaciones"]} rows={horizons}/></div></details>}
   </section>;
 }
