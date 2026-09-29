@@ -17,7 +17,7 @@ from .persistence import content_hash
 from .supabase_access import PreviewError
 from services.forecast_engine.registry import ChampionRegistry
 
-PREVIEW_ENGINE_VERSION = ENGINE_VERSION + "-operational-preview-1"
+PREVIEW_ENGINE_VERSION = ENGINE_VERSION + "-operational-preview-2-retrospective"
 STAGES = ("QUEUED", "READING_DATA", "ELIGIBILITY", "STATISTICAL", "ML", "ENSEMBLE", "QUALITY_GATE", "READY_PREVIEW", "FAILED")
 
 
@@ -178,6 +178,9 @@ class OperationalMultiChainForecastRunner:
             "p10": (row.get("probability") or {}).get("p10"), "p50": row["forecast_towell"],
             "p90": (row.get("probability") or {}).get("p90"), "p95": (row.get("probability") or {}).get("p95"),
             "evidence_mode": job["mode"]} for row in horizons if row["product_id"] == state["product_id"]]} for state in states]
+        for product in products:
+            first = next((row for row in product["horizons"] if row["horizon"] == 1), {})
+            product.update(statistical_model=first.get("statistical_model"), classification=first.get("classification"))
         ml_eligible = sum(any(row["ml_value"] is not None for row in item["horizons"]) for item in products)
         return {"chain_id": chain, "objective": "Venta", "issue_period": issue, "latest_actual_period": latest,
             "cutoff": month_end(issue), "evidence_mode": job["mode"], "mode": job["mode"], "status": "PREVIEW",
@@ -191,9 +194,12 @@ class OperationalMultiChainForecastRunner:
             "statistical": {"status": "COMPLETED" if horizons else "NOT_ELIGIBLE", "models": distribution,
                 "available_candidates": audit.get("available_statistical_candidates", []),
                 "candidates": [row for row in candidates if row.get("family") == "statistical"],
+                "scope_candidates": audit.get("scope_statistical_candidates", []),
+                "selected_metrics": audit.get("selected_statistical_metrics"),
                 "retrospective_wape": (audit.get("retrospective_statistical_metrics") or {}).get("wape"),
                 "retrospective_bias": (audit.get("retrospective_statistical_metrics") or {}).get("bias")},
             "ml": {"status": "COMPLETED" if ml_eligible else "NOT_ELIGIBLE", "training_samples": audit.get("training_samples", 0),
+                "training_products": audit.get("training_products"), "features": audit.get("feature_names", []),
                 "available_candidates": audit.get("available_ml_candidates", []),
                 "leader": next((row["ml_model"] for row in horizons if row["ml_model"]), None),
                 "trained_candidates": audit.get("ml_candidates", []), "candidates": [row for row in candidates if row.get("family") == "ml"],
@@ -204,6 +210,7 @@ class OperationalMultiChainForecastRunner:
                 "preview_challenger": selection.get("preview_challenger"), "no_degradation": selection.get("no_degradation"),
                 "automatic_promotion": False, "promotion_allowed": False,
                 "failures": audit.get("ensemble_failures", [])},
+            "evaluation_mode": audit.get("evaluation_mode"),
             "products": products, "aggregates": result["aggregates"] if result else []}
 
     def _compatible_champion(self, chain, digest):

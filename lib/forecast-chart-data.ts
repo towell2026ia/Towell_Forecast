@@ -51,10 +51,10 @@ export function traderPoints(history: HistoricalMonth[], customer: CustomerMonth
   const points: TraderPoint[] = [];
   for (let period = dates[0], count = 0; period <= dates.at(-1)! && count < 2400; period = addMonth(period, 1), count++) {
     const actual = byPeriod.get(period), future = fcst.get(period);
-    const product = future && "statistical_value" in future ? future : null;
+    const product = future && "p50" in future ? future : null;
     const bands = product && [product.p10, product.p50, product.p90, product.p95].every(v => v !== null && Number.isFinite(v)) && product.p10! <= product.p50 && product.p50 <= product.p90! && product.p90! <= product.p95!;
     points.push({ period, sale: actual?.sale ?? null, order: actual?.order ?? null, delivery: actual?.delivery ?? null,
-      client: client.get(period) ?? null, towell: future?.forecast_towell ?? null, statistical: product?.statistical_value ?? null, ml: product?.ml_value ?? null,
+      client: client.get(period) ?? null, towell: future?.forecast_towell ?? null, statistical: future && "statistical_value" in future ? future.statistical_value ?? null : null, ml: future && "ml_value" in future ? future.ml_value ?? null : null,
       p10: product?.p10 ?? null, p50: product?.p50 ?? null, p90: product?.p90 ?? null, p95: product?.p95 ?? null,
       band90: bands ? [product.p10!, product.p90!] : null, band95: bands ? [product.p10!, product.p95!] : null });
   }

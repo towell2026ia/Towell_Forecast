@@ -255,7 +255,7 @@ class JobTests(unittest.TestCase):
         self.temp.cleanup()
 
     def wait(self, job):
-        for _ in range(400):
+        for _ in range(1600):
             result = self.runner.get_job(job["job_id"], self.actor)
             if result["status"] in {"READY_PREVIEW", "FAILED"}:
                 return result

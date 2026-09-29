@@ -410,7 +410,7 @@ def forecast_dataset(rows: Iterable[dict[str, Any]], issue_period: str,
                 if key.startswith("certified_"):
                     output[key.replace("certified_", "retrospective_holdout_", 1)] = provisional(item)
                     output[key] = None
-                elif key.startswith("validation_"):
+                elif key.startswith("validation_") and key != "validation_observations":
                     output[key.replace("validation_", "retrospective_validation_", 1)] = provisional(item)
                 elif key == "certification_status":
                     output[key] = "PROVISIONAL_TEMPORAL_UNKNOWN"
@@ -434,6 +434,9 @@ def forecast_dataset(rows: Iterable[dict[str, Any]], issue_period: str,
 def _forecast_chain(products: list[ProductSeries], issue: str, policy: ForecastPolicy,
                     incumbent: dict[str, Any] | None, version_sequence: int,
                     *, retrospective: bool = False, on_stage=None) -> dict[str, Any]:
+    if retrospective:
+        from .retrospective import forecast_chain
+        return forecast_chain(products, issue, policy, incumbent, on_stage)
     chain = products[0].chain_id
     start = min(min(item.observations) for item in products)
     months = month_distance(start, issue) + 1

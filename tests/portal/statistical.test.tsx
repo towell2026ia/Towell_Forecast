@@ -80,7 +80,7 @@ describe("S39–S49 routing, regression and isolation", () => {
     const view = render(harness(filters)); await screen.findByText("Forecast H1–H12"); expect(screen.getByText("Comparativa ejecutiva")).toBeTruthy();
     fireEvent.click(screen.getByRole("tab", { name: "Motor Estadístico" })); await screen.findByText("Real vs Forecast Estadístico"); fireEvent.click(screen.getByRole("checkbox", { name: "Comparar con Fcst Towell" })); expect(screen.getByTestId("line-towell")).toBeTruthy();
     fireEvent(window, new Event("focus")); fireEvent(document, new Event("visibilitychange")); view.rerender(harness({ ...filters, periodRange: ["2026-05", "2026-06"] })); expect(screen.getByRole("tab", { name: "Motor Estadístico" }).getAttribute("aria-selected")).toBe("true"); expect(screen.getByTestId("line-towell")).toBeTruthy();
-    fireEvent.click(screen.getByRole("tab", { name: "Machine Learning" })); expect(screen.getByText(/Detalle ML disponible en siguiente fase/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "Machine Learning" })); expect(screen.getByRole("heading", { name: "Machine Learning" })).toBeTruthy(); expect(screen.queryByText(/Detalle ML disponible en siguiente fase/)).toBeNull();
     fireEvent.click(screen.getByRole("tab", { name: "Resumen" })); expect(screen.getByText("Comparativa ejecutiva")).toBeTruthy(); expect(api.create).not.toHaveBeenCalled(); expect(api.latest).toHaveBeenCalledTimes(1);
   });
   it("S48/S49 production statistical route has no demo or pilot imports/hardcodes", () => {

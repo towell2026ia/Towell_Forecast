@@ -4,12 +4,18 @@ import type { Filters } from "./supabase/types";
 
 export const metricEvidence = "No existe evidencia retrospectiva suficiente para esta métrica.";
 export const finiteMetric = (value: number | null | undefined) => value != null && Number.isFinite(value) ? value : null;
+export const retrospectiveMetric = (candidate: PreviewCandidate | undefined, metric: "wape" | "bias") => {
+  if (!candidate) return null;
+  // Literal contracts: new rolling-origin, older renamed retrospective, legacy validation.
+  const value = `retrospective_${metric}` as const, old = `retrospective_validation_${metric}` as const;
+  return finiteMetric(value in candidate ? candidate[value] : old in candidate ? candidate[old] : candidate[`validation_${metric}`]);
+};
 const score = (value: number | null | undefined) => finiteMetric(value) ?? Infinity;
 // Same comparison criteria as the backend; missing scores are not interpreted as zero.
 export function compareStatisticalCandidates(a: PreviewCandidate, b: PreviewCandidate) {
-  const aw = score(a.validation_wape), bw = score(b.validation_wape);
+  const aw = score(retrospectiveMetric(a, "wape")), bw = score(retrospectiveMetric(b, "wape"));
   if (aw !== bw) return aw < bw ? -1 : 1;
-  const ab = Math.abs(score(a.validation_bias)), bb = Math.abs(score(b.validation_bias));
+  const ab = Math.abs(score(retrospectiveMetric(a, "bias"))), bb = Math.abs(score(retrospectiveMetric(b, "bias")));
   if (ab !== bb) return ab < bb ? -1 : 1;
   return (a.model ?? "") < (b.model ?? "") ? -1 : (a.model ?? "") > (b.model ?? "") ? 1 : 0;
 }
@@ -42,19 +48,19 @@ export function statisticalRanking(scope: PreviewScope | null, filters: Filters)
       const candidates = getStatisticalCandidates(scope, product.product_id);
       if (!candidates.length) return [];
       const selection = selectedStatisticalModel(product, scope.issue_period);
-      return [{ product, selection, candidate: candidates.find(c => c.model === selection.model) }];
+      return [{ product, selection, candidate: candidates.find(c => c.model === (selection.model ?? product.statistical_model)) }];
     });
 }
 export function selectionExplanation(candidates: PreviewCandidate[], selected?: PreviewCandidate) {
-  if (!selected?.model || finiteMetric(selected.validation_wape) === null || candidates.length === 0 || candidates[0] !== selected) return "El modelo seleccionado es el informado por E2. No hay evidencia comparable suficiente para explicar su selección.";
-  const tied = candidates.filter(c => c.validation_wape === selected.validation_wape);
+  if (!selected?.model || retrospectiveMetric(selected, "wape") === null || candidates.length === 0 || candidates[0] !== selected) return "El modelo seleccionado es el informado por E2. No hay evidencia comparable suficiente para explicar su selección.";
+  const tied = candidates.filter(c => retrospectiveMetric(c, "wape") === retrospectiveMetric(selected, "wape"));
   if (tied.length === 1) return `${selected.model} obtuvo el menor WAPE de validación retrospectiva entre los candidatos comparables devueltos por E2.`;
-  if (finiteMetric(selected.validation_bias) === null || tied.some(c => finiteMetric(c.validation_bias) === null)) return "E2 informa un empate en WAPE; no hay Bias suficiente para explicar el desempate.";
-  const sameBias = tied.filter(c => Math.abs(c.validation_bias!) === Math.abs(selected.validation_bias!));
+  if (retrospectiveMetric(selected, "bias") === null || tied.some(c => retrospectiveMetric(c, "bias") === null)) return "E2 informa un empate en WAPE; no hay Bias suficiente para explicar el desempate.";
+  const sameBias = tied.filter(c => Math.abs(retrospectiveMetric(c, "bias")!) === Math.abs(retrospectiveMetric(selected, "bias")!));
   return sameBias.length > 1 ? `${selected.model}: empate en WAPE y Bias absoluto; desempate por nombre según el orden del backend.` : `${selected.model}: empate en WAPE; seleccionado por menor Bias absoluto.`;
 }
 export function horizonAccuracy(candidate?: PreviewCandidate) {
-  const rows = candidate?.validation_by_horizon ?? [];
+  const rows = candidate?.by_horizon ?? candidate?.retrospective_validation_by_horizon ?? candidate?.validation_by_horizon ?? [];
   // Preserve only literal evidence. Duplicate/invalid horizon metadata fails closed.
   if (new Set(rows.map(r => r.horizon)).size !== rows.length || rows.some(r => !Number.isInteger(r.horizon) || r.horizon < 1 || r.horizon > 12)) return [];
   return [...rows].sort((a, b) => a.horizon - b.horizon).map(r => ({ ...r, wape: finiteMetric(r.wape) }));

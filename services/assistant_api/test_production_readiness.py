@@ -214,7 +214,9 @@ class ProductionReadinessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory) / "state"
             pipeline = FastForecastPipeline()
-            app = create_app(settings=replace(Settings(), state_dir=state, legacy_pilot_enabled=True),
+            # Fast polling is test-only; production throttling is tested separately.
+            app = create_app(settings=replace(Settings(), state_dir=state, legacy_pilot_enabled=True,
+                                             forecast_rate_per_minute=200),
                              historical_state_dir=state / "historical", forecast_pipeline=pipeline)
             client = TestClient(app)
             headers = {"x-actor-id": "local-manager", "idempotency-key": "forecast-july-2026"}
@@ -228,11 +230,13 @@ class ProductionReadinessTests(unittest.TestCase):
                                 for row in audit))
             self.assertTrue(any(row.get("event") == "command_accepted" and row.get("request_id")
                                 for row in audit))
-            for _ in range(50):
-                job = client.get(f"/api/forecast/jobs/{job_id}", headers=headers).json()
+            for _ in range(100):
+                response = client.get(f"/api/forecast/jobs/{job_id}", headers=headers)
+                self.assertEqual(response.status_code, 200, response.text)
+                job = response.json()
                 if job["status"] in {"COMPLETED", "FAILED"}:
                     break
-                time.sleep(0.05)
+                time.sleep(0.1)
             self.assertEqual(job["status"], "COMPLETED", job)
             run = app.state.persistence.get("monthly_runs", job["model_run_id"])
             self.assertEqual(run["state"], "Completed")

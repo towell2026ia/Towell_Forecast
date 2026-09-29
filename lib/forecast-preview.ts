@@ -1,15 +1,18 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 export type PreviewHorizon = { horizon: number; target_period: string; statistical_value: number; ml_value: number | null; forecast_towell: number; p10: number | null; p50: number; p90: number | null; p95: number | null;
   statistical_model?: string; ml_model?: string | null; model_strategy?: string; classification?: string; forecast_status?: string; certification_status?: string; confidence?: string; band_basis?: string; band_observations?: number };
-export type PreviewProduct = { product_id: string; product_code: string; description: string; category_id: string | null; forecast_status: string; horizons?: PreviewHorizon[] };
-export type PreviewCandidate = { family?: "statistical" | "ml"; product_id?: string; model?: string; strategy?: string;
+export type PreviewProduct = { product_id: string; product_code: string; description: string; category_id: string | null; forecast_status: string; horizons?: PreviewHorizon[]; statistical_model?: string | null; classification?: string | null };
+export type RetrospectiveMetrics = { retrospective_wape?: number | null; retrospective_bias?: number | null; retrospective_mae?: number | null; retrospective_rmse?: number | null; retrospective_stability?: number | null };
+export type PreviewCandidate = RetrospectiveMetrics & { family?: "statistical" | "ml"; product_id?: string; model?: string; strategy?: string;
   validation_wape?: number | null; validation_bias?: number | null; validation_stability?: number | null; observations?: number;
   validation_by_horizon?: { horizon: number; wape: number | null }[];
-  available?: boolean; status?: string; reason?: string; retrospective_validation_wape?: number | null; retrospective_validation_bias?: number | null };
-export type PreviewAggregate = { level: "category" | "chain"; key: string; horizon: number; target_period: string; forecast_towell: number };
+  available?: boolean; status?: string; reason?: string | null; retrospective_validation_wape?: number | null; retrospective_validation_bias?: number | null;
+  retrospective_validation_by_horizon?: { horizon: number; wape: number | null }[]; by_horizon?: { horizon: number; wape: number | null; bias?: number | null; observations?: number }[];
+  by_product?: PreviewCandidate[]; evaluation_mode?: string; classification?: string; origins?: number; training_samples?: number; validation_observations?: number; trainable?: boolean; validated?: boolean; selected?: boolean; operational_ready?: boolean };
+export type PreviewAggregate = { level: "category" | "chain"; key: string; horizon: number; target_period: string; forecast_towell: number; statistical_value?: number; ml_value?: number | null };
 export type PreviewScope = { chain_id: string; chain_name?: string; status: string; error_code?: string; issue_period?: string; latest_actual_period?: string; engine_version?: string; mode?: string;
-  eligibility?: Record<string, number>; statistical?: { status: string; models: Record<string, number>; candidates: PreviewCandidate[]; available_candidates?: string[]; retrospective_wape: number | null; retrospective_bias: number | null };
-  ml?: { status: string; training_samples: number; leader: string | null; candidates: PreviewCandidate[]; trained_candidates?: PreviewCandidate[]; available_candidates?: string[]; retrospective_wape: number | null; retrospective_bias: number | null };
+  eligibility?: Record<string, number>; evaluation_mode?: string; statistical?: { status: string; models: Record<string, number>; candidates: PreviewCandidate[]; scope_candidates?: PreviewCandidate[]; selected_metrics?: PreviewCandidate; available_candidates?: string[]; retrospective_wape: number | null; retrospective_bias: number | null };
+  ml?: { status: string; training_samples: number; training_products?: number; features?: string[]; leader: string | null; candidates: PreviewCandidate[]; trained_candidates?: PreviewCandidate[]; available_candidates?: string[]; retrospective_wape: number | null; retrospective_bias: number | null };
   selection?: { published_champion: { version: string } | null; preview_leader: PreviewCandidate | null; preview_challenger: PreviewCandidate | null; no_degradation: boolean | null; automatic_promotion: false }; products?: PreviewProduct[]; aggregates?: PreviewAggregate[]; certification_status?: string };
 export type PreviewJob = { job_id: string; status: string; mode: string; engine_version: string; created_at?: number; cuts_status?: string; scopes: PreviewScope[] };
 export interface PreviewClient {

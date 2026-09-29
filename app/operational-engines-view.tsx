@@ -8,6 +8,7 @@ import { EngineComparison } from "@/components/forecast/engine-comparison";
 import { ForecastGrid, ForecastHorizonTable, ExecutiveComparison } from "@/components/forecast/forecast-horizon-table";
 import { ForecastSummary, humanStatus } from "@/components/forecast/forecast-summary";
 import { ForecastEnginesTabs, type EngineTab } from "@/components/forecast/forecast-engines-tabs";
+import { MLEngineDetail } from "@/components/forecast/ml-engine-detail";
 import { StatisticalEngineDetail } from "@/components/forecast/statistical-engine-detail";
 import { useForecastFilters } from "./forecast-towell-app";
 
@@ -92,9 +93,10 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
     {current?.error && <p role="alert" className="text-sm text-rose-700">No fue posible completar la consulta operacional: {current.error}</p>}
     {current?.job && <div role="status" className="rounded-xl border bg-white p-3 text-sm"><span>{humanStatus(current.job.status)}</span>{busy && <ol className="mt-3 flex flex-wrap gap-3 text-xs">{labels.map((label, i) => <li key={label} className={i === stages.indexOf(current.job!.status) ? "font-semibold text-blue-700" : "text-slate-500"}>{i < stages.indexOf(current.job!.status) ? "✓" : i === stages.indexOf(current.job!.status) ? "●" : "○"} {label}</li>)}</ol>}</div>}
     {!current?.job && !current?.loading && !current?.error && <p className="text-sm text-slate-500">Sin vista previa calculada</p>}
+    {selected && selected.mode === "RETROSPECTIVE_TRAINING" && selected.evaluation_mode !== "RETROSPECTIVE_EVALUATION" && <p className="rounded-xl border bg-amber-50 p-3 text-xs text-amber-800">Preview anterior al cierre rolling-origin. Usa Calcular vista previa para actualizar sus métricas; no se recalcula automáticamente.</p>}
     <ForecastEnginesTabs value={tab} onChange={setTab}/>
     {tab === "statistical" && <div role="tabpanel" id="engine-panel-statistical" aria-labelledby="engine-tab-statistical"><StatisticalEngineDetail scope={selected} scopes={scopes} filters={filters} historical={actual?.rows ?? []} historyError={actual?.error} cutsStatus={current?.result?.cuts_status ?? current?.job?.cuts_status} compareTowell={compareTowell} onCompare={() => setCompareTowell(v => !v)}/></div>}
-    {tab === "ml" && <div role="tabpanel" id="engine-panel-ml" aria-labelledby="engine-tab-ml" className="rounded-xl border bg-white p-5 text-sm text-slate-500">Detalle ML disponible en siguiente fase. El resumen operacional permanece en Resumen.</div>}
+    {tab === "ml" && <div role="tabpanel" id="engine-panel-ml" aria-labelledby="engine-tab-ml"><MLEngineDetail scope={selected} scopes={scopes} filters={filters} historical={actual?.rows ?? []} horizons={horizons} historyError={actual?.error} cutsStatus={current?.result?.cuts_status ?? current?.job?.cuts_status}/></div>}
     {tab === "summary" && <div role="tabpanel" id="engine-panel-summary" aria-labelledby="engine-tab-summary" className="space-y-5">{filters.chainId ? <>
       <ForecastSummary scope={selected} horizons={horizons}/>
       {product && <p className="text-sm text-slate-500">{product.description} · {humanStatus(product.forecast_status)}{!horizons.length && ` · Sin forecast elegible: ${product.forecast_status}`}</p>}
@@ -103,8 +105,8 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
       {actual?.customerError && <p className="text-xs text-slate-500">Fcst Cliente: consulta no disponible. No se sustituyen datos ausentes.</p>}
       {filters.search && !filters.productId && <p className="text-xs text-slate-500">El histórico refleja la búsqueda. Selecciona un producto para comparar su forecast; E2 no entrega un agregado de la búsqueda.</p>}
       <ForecastTraderChart points={points} cutoff={cutoff} visible={visible} onChange={series => setVisible(v => ({ ...v, [series]: !v[series] }))} previous={previous}/>
-      {selected && <EngineComparison scope={selected}/>}
-      <ExecutiveComparison points={points}/>
+      {selected && <EngineComparison scope={selected} horizons={horizons} productId={filters.productId}/>}
+      <ExecutiveComparison points={points} cutoff={cutoff}/>
       <ForecastHorizonTable horizons={horizons} product={Boolean(filters.productId)}/>
     </> : <>
       <p className="rounded-xl border bg-white p-5 text-sm text-slate-500">Selecciona una cadena para visualizar la evolución temporal y el pronóstico.</p>
