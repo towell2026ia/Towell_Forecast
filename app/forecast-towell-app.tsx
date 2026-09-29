@@ -17,6 +17,11 @@ import ForecastAssistantErrorBoundary from "./forecast-assistant-error-boundary"
 import type { AssistantContext } from "./assistant/assistant-service";
 import { ForecastEnginesView } from "./operational-engines-view";
 import { defaultVisibility, type SeriesVisibility } from "@/lib/forecast-chart-data";
+import { PreviewReadError, type PreviewJob } from "@/lib/forecast-preview";
+import { ForecastTraderChart } from "@/components/forecast/forecast-trader-chart";
+import { scopeHorizons, traderPoints } from "@/lib/forecast-chart-data";
+import { currentRetrospectivePreview } from "@/lib/preview-presentation";
+import { PreviewPerformancePanel } from "@/components/forecast/preview-performance-panel";
 
 const modules = [
   ["inicio", "Inicio", Home], ["historico", "Histórico", History],
@@ -25,7 +30,8 @@ const modules = [
   ["usuarios", "Usuarios", Users], ["auditoria", "Auditoría", FileClock],
 ] as const;
 type ModuleId = typeof modules[number][0];
-type FilterState = { filters: Filters; setFilters: React.Dispatch<React.SetStateAction<Filters>>; repository: ForecastReadRepository; profile: Profile; seriesVisibility?: SeriesVisibility; setSeriesVisibility?: React.Dispatch<React.SetStateAction<SeriesVisibility>> };
+export type PreviewView = { key: string; result: PreviewJob | null; job: PreviewJob | null; error: string; loading: boolean };
+type FilterState = { filters: Filters; setFilters: React.Dispatch<React.SetStateAction<Filters>>; repository: ForecastReadRepository; profile: Profile; seriesVisibility?: SeriesVisibility; setSeriesVisibility?: React.Dispatch<React.SetStateAction<SeriesVisibility>>; preview?: PreviewView | null; setPreview?: React.Dispatch<React.SetStateAction<PreviewView | null>> };
 export const ForecastFiltersContext = createContext<FilterState | null>(null);
 export function useForecastFilters() {
   const state = useContext(ForecastFiltersContext);
@@ -60,7 +66,19 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
   const [motorVisited, setMotorVisited] = useState(false);
   const [seriesVisibility, setSeriesVisibility] = useState<SeriesVisibility>({ ...defaultVisibility });
   const [filters, setFilters] = useState<Filters>({ ...emptyFilters });
-  const state = useMemo(() => ({ filters, setFilters, repository, profile, seriesVisibility, setSeriesVisibility }), [filters, repository, profile, seriesVisibility]);
+  const [previewView, setPreview] = useState<PreviewView | null>(null);
+  const previewKey = `${filters.chainId}/${filters.productId}`;
+  useEffect(() => {
+    let alive = true;
+    const client = repository.previews;
+    if (client) void client.latest(filters.chainId, filters.productId).then(job => {
+      if (alive) setPreview(previous => previous?.key === previewKey && (previous.loading || previous.job) ? previous : { key: previewKey, result: job?.status === "READY_PREVIEW" ? job : null, job, error: "", loading: false });
+    }).catch(error => {
+      if (alive) setPreview(previous => previous?.key === previewKey && (previous.loading || previous.job) ? previous : { key: previewKey, result: null, job: null, error: error instanceof PreviewReadError ? error.code : "DATA_READ_FAILED", loading: false });
+    });
+    return () => { alive = false; };
+  }, [repository, filters.chainId, filters.productId, previewKey]);
+  const state = useMemo(() => ({ filters, setFilters, repository, profile, seriesVisibility, setSeriesVisibility, preview: previewView?.key === previewKey ? previewView : null, setPreview }), [filters, repository, profile, seriesVisibility, previewView, previewKey]);
   const chains = useRead(useCallback(() => repository.getVisibleChains(), [repository]));
   const subtitle = chains.data?.find(c => c.id === filters.chainId)?.name ?? (profile.global_role === "ADMIN" ? "Todas las cadenas" : "Todas las cadenas autorizadas");
   const title = modules.find(([id]) => id === active)?.[1] ?? "Inicio";
@@ -122,10 +140,22 @@ export function GlobalFilters() {
 }
 function Intro({ title, copy }: { title: string; copy: string }) { return <div className="mb-5"><h1 className="text-2xl font-semibold tracking-tight text-slate-950 sm:text-3xl">{title}</h1><p className="mt-2 text-sm leading-6 text-slate-500">{copy}</p></div>; }
 function Dashboard() {
-  const { repository, filters } = useForecastFilters();
+  const { repository, filters, preview, seriesVisibility, setSeriesVisibility } = useForecastFilters();
   const summary = useRead(useCallback(() => repository.getHistoricalSummary(filters), [repository, filters]));
+  const scope = filters.chainId ? preview?.result?.scopes.find(s => s.chain_id === filters.chainId) ?? null : null;
+  const validScope = currentRetrospectivePreview(preview?.result ?? null, scope) ? scope : null;
+  const cutoff = String(validScope?.issue_period ?? "");
+  const historical = useRead(useCallback(() => filters.chainId ? repository.getForecastHistory?.(filters) ?? Promise.resolve([]) : Promise.resolve([]), [repository, filters]));
+  const customer = useRead(useCallback(() => filters.chainId && cutoff ? repository.getCustomerForecast?.(filters, cutoff) ?? Promise.resolve([]) : Promise.resolve([]), [repository, filters, cutoff]));
+  const points = traderPoints(historical.data ?? [], customer.data ?? [], scopeHorizons(validScope, filters), cutoff, filters);
   return <div><Intro title="Dashboard ejecutivo" copy="Histórico publicado según tu acceso y los filtros seleccionados."/><ReadState loading={summary.loading} error={summary.error} empty={summary.data?.observationCount === 0}/>{summary.data && <>
     <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">{[["Scopes con histórico", number(summary.data.scopeCount)], ["Productos visibles", number(summary.data.productCount)], ["Observaciones", number(summary.data.observationCount)], ["Último periodo disponible", summary.data.latestPeriod ?? "Sin dato"]].map(([label, value]) => <Card key={label} className="border-slate-200 shadow-sm"><CardContent className="p-5"><p className="text-sm text-slate-500">{label}</p><p className="mt-4 text-3xl font-semibold tracking-tight text-slate-950">{value}</p></CardContent></Card>)}</div>
+    <div className="mt-5 space-y-5">{filters.chainId ? <>
+      <PreviewPerformancePanel job={preview?.result ?? null} scope={scope} productId={filters.productId}/>
+      {historical.error && <p role="alert" className="text-sm text-rose-700">No fue posible consultar la venta histórica para la gráfica.</p>}
+      {customer.error && <p className="text-sm text-slate-500">Fcst Cliente no disponible; no se sustituyen datos ausentes.</p>}
+      <ForecastTraderChart points={points} cutoff={cutoff} visible={seriesVisibility ?? defaultVisibility} onChange={key => setSeriesVisibility?.(v => ({ ...v, [key]: !v[key] }))}/>
+    </> : <p className="rounded-xl border bg-white p-5 text-sm text-slate-500">Selecciona una cadena para ver la gráfica y el desempeño. No se suman scopes padre e hijo en Todas las cadenas.</p>}</div>
     <Card className="mt-5 border-slate-200 shadow-sm"><CardContent className="p-5"><h2 className="font-semibold">Cobertura por scope</h2><p className="mt-2 text-sm text-slate-500">Los scopes padre e hijo se presentan por separado. El número de observaciones es un conteo de registros, no una suma de cantidades entre niveles.</p><div className="mt-4"><DataTable headers={["Cadena / unidad comercial", "Observaciones"]} rows={summary.data.byScope.map(s => [s.chain.name, number(s.observations)])}/></div></CardContent></Card>
   </>}</div>;
 }
@@ -135,11 +165,15 @@ export function HistoryView() {
   return <HistoricalPages key={JSON.stringify(filters)} repository={repository} filters={filters}/>;
 }
 function HistoricalPages({ repository, filters }: { repository: ForecastReadRepository; filters: Filters }) {
+  const { preview } = useForecastFilters();
+  const scope = filters.chainId ? preview?.result?.scopes.find(s => s.chain_id === filters.chainId) ?? null : null;
   const [size, setSize] = useState<50 | 100 | 250>(50);
   const [cursors, setCursors] = useState<(Cursor | null)[]>([null]);
   const cursor = cursors.at(-1) ?? null;
   const page = useRead(useCallback(() => repository.getHistoricalObservations(filters, { size, cursor }), [repository, filters, size, cursor]));
-  return <div><Intro title="Histórico operativo" copy="Pedido, venta y entrega por scope, producto y periodo. Vacío significa sin dato; cero es una cantidad observada."/><ReadState loading={page.loading} error={page.error} empty={page.data?.rows.length === 0}/>{page.data && page.data.rows.length > 0 && <DataTable headers={["Periodo", "Cadena", "Producto", "UPC", "ITEM", "Pedido", "Venta", "Entrega"]} rows={page.data.rows.map(r => [r.period.slice(0, 7), r.chain, r.product.description, [...new Set(r.product.identifiers.map(i => i[1]).filter(Boolean))].join(" / ") || "Sin dato", r.product.product_code, number(r.ORDER), number(r.SALES), number(r.DELIVERY)])}/>}
+  return <div><Intro title="Histórico operativo" copy="Pedido, venta y entrega por scope, producto y periodo. Vacío significa sin dato; cero es una cantidad observada."/>
+    {filters.chainId ? <div className="mb-5"><PreviewPerformancePanel job={preview?.result ?? null} scope={scope} productId={filters.productId} historical/></div> : <p className="mb-5 rounded-xl border bg-white p-4 text-sm text-slate-500">Selecciona una cadena para consultar WAPE y Bias sin mezclar scopes. Evaluación retrospectiva rolling-origin. No constituye certificación point-in-time.</p>}
+    <ReadState loading={page.loading} error={page.error} empty={page.data?.rows.length === 0}/>{page.data && page.data.rows.length > 0 && <DataTable headers={["Periodo", "Cadena", "Producto", "UPC", "ITEM", "Pedido", "Venta", "Entrega"]} rows={page.data.rows.map(r => [r.period.slice(0, 7), r.chain, r.product.description, [...new Set(r.product.identifiers.map(i => i[1]).filter(Boolean))].join(" / ") || "Sin dato", r.product.product_code, number(r.ORDER), number(r.SALES), number(r.DELIVERY)])}/>}
     <div className="mt-4 flex flex-wrap items-end justify-between gap-3"><Picker label="Filas por página" value={String(size)} onChange={v => { setSize(Number(v) as 50 | 100 | 250); setCursors([null]); }} options={[50, 100, 250].map(n => ({ id: String(n), name: String(n) }))} all="50"/><div className="flex items-center gap-3"><Button variant="outline" disabled={cursors.length === 1 || page.loading} onClick={() => setCursors(c => c.slice(0, -1))}>Anterior</Button><span className="text-sm text-slate-500">Página {cursors.length}</span><Button variant="outline" disabled={!page.data?.next || page.loading} onClick={() => setCursors(c => [...c, page.data!.next])}>Siguiente</Button></div></div>
   </div>;
 }

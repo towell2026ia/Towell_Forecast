@@ -4,6 +4,7 @@ export type PreviewHorizon = { horizon: number; target_period: string; statistic
 export type PreviewProduct = { product_id: string; product_code: string; description: string; category_id: string | null; forecast_status: string; horizons?: PreviewHorizon[]; statistical_model?: string | null; classification?: string | null };
 export type RetrospectiveMetrics = { retrospective_wape?: number | null; retrospective_bias?: number | null; retrospective_mae?: number | null; retrospective_rmse?: number | null; retrospective_stability?: number | null };
 export type PreviewCandidate = RetrospectiveMetrics & { family?: "statistical" | "ml"; product_id?: string; model?: string; strategy?: string;
+  statistical_weight?: number;
   validation_wape?: number | null; validation_bias?: number | null; validation_stability?: number | null; observations?: number;
   validation_by_horizon?: { horizon: number; wape: number | null }[];
   available?: boolean; status?: string; reason?: string | null; retrospective_validation_wape?: number | null; retrospective_validation_bias?: number | null;

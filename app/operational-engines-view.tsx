@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { PreviewReadError, type PreviewJob } from "@/lib/forecast-preview";
+import { PreviewReadError } from "@/lib/forecast-preview";
 import { defaultVisibility, quantity, scopeHorizons, traderPoints, type CustomerMonth, type HistoricalMonth, type SeriesVisibility } from "@/lib/forecast-chart-data";
 import { ForecastTraderChart } from "@/components/forecast/forecast-trader-chart";
 import { EngineComparison } from "@/components/forecast/engine-comparison";
@@ -10,36 +10,37 @@ import { ForecastSummary, humanStatus } from "@/components/forecast/forecast-sum
 import { ForecastEnginesTabs, type EngineTab } from "@/components/forecast/forecast-engines-tabs";
 import { MLEngineDetail } from "@/components/forecast/ml-engine-detail";
 import { StatisticalEngineDetail } from "@/components/forecast/statistical-engine-detail";
-import { useForecastFilters } from "./forecast-towell-app";
+import { useForecastFilters, type PreviewView } from "./forecast-towell-app";
+import { currentRetrospectivePreview } from "@/lib/preview-presentation";
 
-type View = { key: string; result: PreviewJob | null; job: PreviewJob | null; error: string; loading: boolean };
 const safeError = (error: unknown) => error instanceof PreviewReadError ? error.code : "DATA_READ_FAILED";
 const stages = ["QUEUED", "READING_DATA", "ELIGIBILITY", "STATISTICAL", "ML", "ENSEMBLE", "QUALITY_GATE"];
 const labels = ["En cola", "Datos", "Elegibilidad", "Estadístico", "Machine Learning", "Ensamble", "Quality Gate"];
 export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit?: () => void }) {
-  const { repository, filters, profile, seriesVisibility, setSeriesVisibility } = useForecastFilters();
+  const { repository, filters, profile, seriesVisibility, setSeriesVisibility, preview: sharedPreview, setPreview: sharedSetPreview } = useForecastFilters();
   const client = repository.previews;
   const [localVisibility, setLocalVisibility] = useState<SeriesVisibility>({ ...defaultVisibility });
   const [tab, setTab] = useState<EngineTab>("summary");
+  const [localPreview, setLocalPreview] = useState<PreviewView | null>(null);
+  const setPreview = sharedSetPreview ?? setLocalPreview;
   const [compareTowell, setCompareTowell] = useState(false);
   const visible = seriesVisibility ?? localVisibility, setVisible = setSeriesVisibility ?? setLocalVisibility;
-  const [view, setView] = useState<View | null>(null);
   const [history, setHistory] = useState<{ key: string; rows: HistoricalMonth[]; customer: CustomerMonth[]; categoryName: string | null; error: boolean; customerError: boolean } | null>(null);
   const key = `${filters.chainId}/${filters.productId}`;
+  const current = (sharedPreview === undefined ? localPreview : sharedPreview)?.key === key ? (sharedPreview === undefined ? localPreview : sharedPreview) : null;
   const revision = useRef(0), running = useRef(false);
   const visited = useRef(onVisit);
   useEffect(() => { visited.current?.(); return () => { revision.current += 1; }; }, []);
+  // Standalone component fixtures retain their read path; the application root owns the shared read.
   useEffect(() => {
+    if (sharedPreview !== undefined || !client) return;
     let alive = true;
-    const version = ++revision.current;
-    running.current = false;
-    if (!client) return;
-    void client.latest(filters.chainId, filters.productId).then(result => {
-      if (alive && revision.current === version) setView({ key, result: result?.status === "READY_PREVIEW" ? result : null, job: result, error: "", loading: false });
-    }).catch(error => { if (alive && revision.current === version) setView({ key, result: null, job: null, error: safeError(error), loading: false }); });
+    void client.latest(filters.chainId, filters.productId).then(job => {
+      if (alive) setLocalPreview({ key, result: job?.status === "READY_PREVIEW" ? job : null, job, error: "", loading: false });
+    }).catch(error => { if (alive) setLocalPreview({ key, result: null, job: null, error: safeError(error), loading: false }); });
     return () => { alive = false; };
-  }, [client, filters.chainId, filters.productId, key]);
-  const current = view?.key === key ? view : null;
+  }, [sharedPreview, client, filters.chainId, filters.productId, key]);
+  useEffect(() => { revision.current += 1; running.current = false; }, [key]);
   const jobId = current?.job?.job_id, status = current?.job?.status;
   useEffect(() => {
     if (!client || !jobId || !status || ["READY_PREVIEW", "FAILED"].includes(status)) return;
@@ -50,25 +51,26 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
         const job = await client!.status(id);
         const result = job.status === "READY_PREVIEW" ? await client!.result(id, filters.productId) : null;
         if (!alive || version !== revision.current) return;
-        setView(previous => previous?.key === key ? { ...previous, job, result: result ?? previous.result, error: "", loading: false } : previous);
+        setPreview(previous => previous?.key === key ? { ...previous, job, result: result ?? previous.result, error: "", loading: false } : previous);
         if (!["READY_PREVIEW", "FAILED"].includes(job.status)) timer = setTimeout(poll, 2500);
-      } catch (error) { if (alive && version === revision.current) setView(previous => previous?.key === key ? { ...previous, error: safeError(error) } : previous); }
+      } catch (error) { if (alive && version === revision.current) setPreview(previous => previous?.key === key ? { ...previous, error: safeError(error) } : previous); }
     }
     timer = setTimeout(poll, 1500);
     return () => { alive = false; clearTimeout(timer); };
-  }, [client, jobId, status, key, filters.productId]);
+  }, [client, jobId, status, key, filters.productId, setPreview]);
   async function run() {
     if (!client || running.current) return;
     running.current = true;
     const version = ++revision.current;
-    setView(previous => ({ key, job: null, result: previous?.key === key ? previous.result : null, error: "", loading: true }));
-    try { const job = await client.create(filters.chainId, filters.productId); if (revision.current === version) setView(previous => ({ key, job, result: previous?.key === key ? previous.result : null, error: "", loading: false })); }
-    catch (error) { if (revision.current === version) setView(previous => ({ key, job: null, result: previous?.key === key ? previous.result : null, error: safeError(error), loading: false })); }
+    setPreview(previous => ({ key, job: null, result: previous?.key === key ? previous.result : null, error: "", loading: true }));
+    try { const job = await client.create(filters.chainId, filters.productId); if (revision.current === version) setPreview(previous => ({ key, job, result: previous?.key === key ? previous.result : null, error: "", loading: false })); }
+    catch (error) { if (revision.current === version) setPreview(previous => ({ key, job: null, result: previous?.key === key ? previous.result : null, error: safeError(error), loading: false })); }
     finally { if (revision.current === version) running.current = false; }
   }
   const busy = current?.loading || Boolean(current?.job && !["READY_PREVIEW", "FAILED"].includes(current.job.status));
   const scopes = current?.result?.scopes ?? current?.job?.scopes ?? [];
   const selected = filters.chainId ? scopes.find(s => s.chain_id === filters.chainId) ?? null : null;
+  const stale = Boolean(current?.result && selected && !currentRetrospectivePreview(current.result, selected));
   const cutoff = selected?.issue_period;
   const historyKey = `${JSON.stringify(filters)}/${cutoff ?? ""}`;
   useEffect(() => {
@@ -81,7 +83,7 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
     return () => { alive = false; };
   }, [repository, filters, cutoff, historyKey]);
   const actual = history?.key === historyKey ? history : null;
-  const horizons = scopeHorizons(selected, filters);
+  const horizons = scopeHorizons(stale ? null : selected, filters);
   const points = traderPoints(actual?.rows ?? [], actual?.customer ?? [], horizons, cutoff, filters);
   const product = selected?.products?.find(p => p.product_id === filters.productId);
   const previous = Boolean(busy && current?.result || current?.result && current.job?.status === "FAILED");
@@ -93,10 +95,10 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
     {current?.error && <p role="alert" className="text-sm text-rose-700">No fue posible completar la consulta operacional: {current.error}</p>}
     {current?.job && <div role="status" className="rounded-xl border bg-white p-3 text-sm"><span>{humanStatus(current.job.status)}</span>{busy && <ol className="mt-3 flex flex-wrap gap-3 text-xs">{labels.map((label, i) => <li key={label} className={i === stages.indexOf(current.job!.status) ? "font-semibold text-blue-700" : "text-slate-500"}>{i < stages.indexOf(current.job!.status) ? "✓" : i === stages.indexOf(current.job!.status) ? "●" : "○"} {label}</li>)}</ol>}</div>}
     {!current?.job && !current?.loading && !current?.error && <p className="text-sm text-slate-500">Sin vista previa calculada</p>}
-    {selected && selected.mode === "RETROSPECTIVE_TRAINING" && selected.evaluation_mode !== "RETROSPECTIVE_EVALUATION" && <p className="rounded-xl border bg-amber-50 p-3 text-xs text-amber-800">Preview anterior al cierre rolling-origin. Usa Calcular vista previa para actualizar sus métricas; no se recalcula automáticamente.</p>}
+    {stale && <p className="rounded-xl border bg-amber-50 p-3 text-xs text-amber-800">Vista previa desactualizada. Sus métricas retrospectivas no se muestran; el cálculo no se ejecuta automáticamente.</p>}
     <ForecastEnginesTabs value={tab} onChange={setTab}/>
-    {tab === "statistical" && <div role="tabpanel" id="engine-panel-statistical" aria-labelledby="engine-tab-statistical"><StatisticalEngineDetail scope={selected} scopes={scopes} filters={filters} historical={actual?.rows ?? []} historyError={actual?.error} cutsStatus={current?.result?.cuts_status ?? current?.job?.cuts_status} compareTowell={compareTowell} onCompare={() => setCompareTowell(v => !v)}/></div>}
-    {tab === "ml" && <div role="tabpanel" id="engine-panel-ml" aria-labelledby="engine-tab-ml"><MLEngineDetail scope={selected} scopes={scopes} filters={filters} historical={actual?.rows ?? []} horizons={horizons} historyError={actual?.error} cutsStatus={current?.result?.cuts_status ?? current?.job?.cuts_status}/></div>}
+    {tab === "statistical" && <div role="tabpanel" id="engine-panel-statistical" aria-labelledby="engine-tab-statistical"><StatisticalEngineDetail scope={stale ? null : selected} scopes={stale ? [] : scopes} filters={filters} historical={actual?.rows ?? []} historyError={actual?.error} cutsStatus={current?.result?.cuts_status ?? current?.job?.cuts_status} compareTowell={compareTowell} onCompare={() => setCompareTowell(v => !v)}/></div>}
+    {tab === "ml" && <div role="tabpanel" id="engine-panel-ml" aria-labelledby="engine-tab-ml"><MLEngineDetail scope={stale ? null : selected} scopes={stale ? [] : scopes} filters={filters} historical={actual?.rows ?? []} horizons={horizons} historyError={actual?.error} cutsStatus={current?.result?.cuts_status ?? current?.job?.cuts_status}/></div>}
     {tab === "summary" && <div role="tabpanel" id="engine-panel-summary" aria-labelledby="engine-tab-summary" className="space-y-5">{filters.chainId ? <>
       <ForecastSummary scope={selected} horizons={horizons}/>
       {product && <p className="text-sm text-slate-500">{product.description} · {humanStatus(product.forecast_status)}{!horizons.length && ` · Sin forecast elegible: ${product.forecast_status}`}</p>}
@@ -105,7 +107,7 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
       {actual?.customerError && <p className="text-xs text-slate-500">Fcst Cliente: consulta no disponible. No se sustituyen datos ausentes.</p>}
       {filters.search && !filters.productId && <p className="text-xs text-slate-500">El histórico refleja la búsqueda. Selecciona un producto para comparar su forecast; E2 no entrega un agregado de la búsqueda.</p>}
       <ForecastTraderChart points={points} cutoff={cutoff} visible={visible} onChange={series => setVisible(v => ({ ...v, [series]: !v[series] }))} previous={previous}/>
-      {selected && <EngineComparison scope={selected} horizons={horizons} productId={filters.productId}/>}
+      {selected && !stale && <EngineComparison scope={selected} horizons={horizons} productId={filters.productId}/>}
       <ExecutiveComparison points={points} cutoff={cutoff}/>
       <ForecastHorizonTable horizons={horizons} product={Boolean(filters.productId)}/>
     </> : <>

@@ -8,8 +8,8 @@ import { ForecastEnginesView } from "../../app/operational-engines-view";
 import { RailwayPreviewClient, PreviewReadError, type PreviewClient, type PreviewJob } from "../../lib/forecast-preview";
 import { emptyFilters, type Filters, type ForecastReadRepository, type Role } from "../../lib/supabase/types";
 
-const job: PreviewJob = { job_id: "OPJ-test", status: "READY_PREVIEW", mode: "RETROSPECTIVE_TRAINING", engine_version: "actual-engine-version", created_at: 1,
-  scopes: [{ chain_id: "a", chain_name: "Scope autorizado", status: "PREVIEW", issue_period: "2026-07", eligibility: { evaluated: 7, visible_products: 7, stat_eligible: 2, ml_eligible: 0, INSUFFICIENT: 5 },
+const job: PreviewJob = { job_id: "OPJ-test", status: "READY_PREVIEW", mode: "RETROSPECTIVE_TRAINING", engine_version: "fixture-operational-preview-2-retrospective", created_at: 1,
+  scopes: [{ chain_id: "a", chain_name: "Scope autorizado", status: "PREVIEW", issue_period: "2026-07", engine_version: "fixture-operational-preview-2-retrospective", evaluation_mode: "RETROSPECTIVE_EVALUATION", eligibility: { evaluated: 7, visible_products: 7, stat_eligible: 2, ml_eligible: 0, INSUFFICIENT: 5 },
     statistical: { status: "COMPLETED", models: { Croston: 1, Holt: 1 }, candidates: [{ model: "Croston" }, { model: "Holt" }], retrospective_wape: 12.5, retrospective_bias: -2 },
     ml: { status: "NOT_ELIGIBLE", training_samples: 0, leader: null, candidates: [], retrospective_wape: null, retrospective_bias: null },
     selection: { published_champion: null, preview_leader: { strategy: "statistical" }, preview_challenger: null, no_degradation: null, automatic_promotion: false },

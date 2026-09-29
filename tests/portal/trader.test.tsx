@@ -20,14 +20,14 @@ vi.mock("recharts", () => {
 });
 const filters: Filters = { ...emptyFilters, chainId: "chain", productId: "product" };
 const horizons = Array.from({ length: 12 }, (_, i) => ({ horizon: i + 1, target_period: addMonth("2026-07", i + 1), statistical_value: 12 + i, ml_value: 13 + i, forecast_towell: 14 + i, p10: 10 + i, p50: 14 + i, p90: 18 + i, p95: 20 + i }));
-const scope: PreviewScope = { chain_id: "chain", chain_name: "Scope real", issue_period: "2026-07", latest_actual_period: "2026-07", status: "PREVIEW", certification_status: "PROVISIONAL_TEMPORAL_UNKNOWN",
+const scope: PreviewScope = { chain_id: "chain", chain_name: "Scope real", issue_period: "2026-07", latest_actual_period: "2026-07", status: "PREVIEW", certification_status: "PROVISIONAL_TEMPORAL_UNKNOWN", engine_version: "fixture-operational-preview-2-retrospective", evaluation_mode: "RETROSPECTIVE_EVALUATION",
   eligibility: { evaluated: 45, visible_products: 45, stat_eligible: 20, ml_eligible: 0 },
   statistical: { status: "COMPLETED", models: { Naive: 12, Holt: 8 }, available_candidates: ["Naive", "Holt"], candidates: [{ model: "Naive", available: true }], retrospective_wape: null, retrospective_bias: null },
   ml: { status: "NOT_ELIGIBLE", training_samples: 832, leader: null, available_candidates: ["Linear Global", "Random Forest Global", "Gradient Boosting Global"], candidates: [], trained_candidates: [{ model: "Linear Global", available: true }], retrospective_wape: null, retrospective_bias: null },
   selection: { published_champion: null, preview_leader: { strategy: "statistical" }, preview_challenger: null, no_degradation: null, automatic_promotion: false },
   products: [{ product_id: "product", product_code: "code", description: "Producto", category_id: "cat", forecast_status: "ACTIVE", horizons }],
   aggregates: horizons.flatMap(h => [{ level: "chain" as const, key: "chain", horizon: h.horizon, target_period: h.target_period, forecast_towell: 150 + h.horizon }, { level: "category" as const, key: "cat", horizon: h.horizon, target_period: h.target_period, forecast_towell: 100 + h.horizon }]) };
-const job: PreviewJob = { job_id: "job", status: "READY_PREVIEW", engine_version: "engine", mode: "RETROSPECTIVE_TRAINING", scopes: [scope] };
+const job: PreviewJob = { job_id: "job", status: "READY_PREVIEW", engine_version: "fixture-operational-preview-2-retrospective", mode: "RETROSPECTIVE_TRAINING", scopes: [scope] };
 const history = [{ period: "2026-05", sale: 0, order: 5, delivery: 4 }, { period: "2026-07", sale: 10, order: null, delivery: null }];
 const points = () => traderPoints(history, [], horizons, scope.issue_period, filters);
 function client(): PreviewClient { return { latest: vi.fn(async () => job), create: vi.fn(async () => ({ ...job, status: "QUEUED", scopes: [] })), status: vi.fn(async () => job), result: vi.fn(async () => job), dispose: vi.fn() }; }
