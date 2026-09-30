@@ -239,10 +239,11 @@ class HierarchicalContracts(unittest.TestCase):
         self.assertEqual(future["selected"][0]["key"][2],"2030-01")
 
     def test_CP34_no_schema_or_runtime_import(self):
-        # The two authorized read-only portal views are independent of frozen grain.
+        # Later portal views and E3 vintage migration are independent of frozen grain.
         self.assertEqual(len([p for p in (ROOT/"supabase/migrations").glob("*.sql")
                               if p.name not in {"202609280001_portal_published_history.sql",
-                                                "202609280002_portal_history_periods.sql"}]),7)
+                                                "202609280002_portal_history_periods.sql",
+                                                "202609290010_e3_vintage_transaction.sql"}]),7)
         self.assertNotIn("hierarchical_grain",(ROOT/"services/assistant_api/api.py").read_text())
 
     def test_CP35_runtime_off(self):

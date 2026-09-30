@@ -88,6 +88,7 @@ jobs:
       - run: node scripts/test_certified_bootstrap_sql.mjs
       - run: npm run test:supabase-baseline
       - run: npm run test:supabase-security
+      - run: node scripts/test_e3_schema.mjs
       - run: npm run test:portal
       - run: npm run lint
       - run: npx tsc --noEmit

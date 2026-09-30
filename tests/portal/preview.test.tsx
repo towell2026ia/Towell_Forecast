@@ -101,3 +101,56 @@ describe("E2 Railway browser boundary", () => {
     await expect(new RailwayPreviewClient(auth(), "https://backend.example").status("job")).rejects.toBeInstanceOf(PreviewReadError);
   });
 });
+describe("E3 vintages and quality boundary", () => {
+  function auth() { return { auth: { getSession: vi.fn(async () => ({ data: { session: { access_token: "synthetic-access-token" } } })) } } as unknown as SupabaseClient; }
+  it("keeps the Vintages tab read only while all E3 flags are off", async () => {
+    const client = api({ vintages: vi.fn(async () => []), vintageCapabilities: vi.fn(async () => ({ vintage_persistence: false, official_publication: false, champion_publication: false })) });
+    harness(client);
+    await userEvent.click(screen.getByRole("tab", { name: "Vintages" }));
+    await screen.findByText("Todavía no hay vintages en este scope.");
+    expect(client.vintages).toHaveBeenCalledWith("a");
+    expect(screen.queryByRole("button", { name: "Crear candidato de vintage" })).toBeNull();
+  });
+  it("viewer never sees candidate or freeze actions even if backend capability is on", async () => {
+    const client = api({ vintages: vi.fn(async () => []), vintageCapabilities: vi.fn(async () => ({ vintage_persistence: true, official_publication: false, champion_publication: false })) });
+    harness(client, { ...emptyFilters, chainId: "a" }, "VIEWER");
+    await userEvent.click(screen.getByRole("tab", { name: "Vintages" }));
+    await screen.findByText(/Tu acceso es de consulta/);
+    expect(screen.queryByRole("button", { name: "Crear candidato de vintage" })).toBeNull();
+  });
+  it("shows immutable vintage lineage and H1 without creating a new preview", async () => {
+    const vintage = { id: "v1", run_id: "r1", chain_id: "a", objective: "Venta", issue_period: "2026-07-01", cutoff_at: "2026-07-31T23:59:59Z", forecast_version: "v1", certification_status: "PROVISIONAL", frozen_at: "2026-07-31T23:59:59Z", created_at: "2026-07-31T23:59:59Z" };
+    const client = api({ vintages: vi.fn(async () => [vintage]), vintageCapabilities: vi.fn(async () => ({ vintage_persistence: false, official_publication: false, champion_publication: false })),
+      vintageDetail: vi.fn(async () => ({ vintage, run: { id: "r1", chain_id: "a", actor_id: "admin-1", data_snapshot_hash: "sha-synthetic", engine_version: "e3", git_sha: "commit-synthetic", status: "COMPLETED" },
+        horizons: [{ id: "h1", product_id: "p", horizon: 1, target_period: "2026-08-01", statistical_value: 10, ml_value: 9, forecast_towell: 8, p10: null, p50: null, p90: null, p95: null, model_strategy: "ensemble" }],
+        aggregates: [], metrics: [{ id: "m1", metric: "WAPE", phase: "VALIDATION", value: 12, period: "2026-07-01" }],
+        models: [{ id: "model-1", model_family: "STATISTICAL", algorithm: "Croston", validation_wape: 12, certification_status: "PROVISIONAL" }],
+        inputs: [{ id: "input-1", monthly_observation_id: "observation-1", evidence_mode: "RETROSPECTIVE_TRAINING" }],
+        gates: [{ id: "gate-1", gate_type: "DATA_QUALITY", status: "DATA_QUALITY_WARNING", policy_version: "E3-GATES-1.0.0", observed: null, target: null }] })) });
+    harness(client);
+    await userEvent.click(screen.getByRole("tab", { name: "Vintages" }));
+    await screen.findByText("v1");
+    await userEvent.click(screen.getByRole("button", { name: "Ver detalle" }));
+    await screen.findByText(/sha-synthetic/);
+    expect(screen.getByText(/commit-synthetic/)).toBeTruthy();
+    expect(screen.getByText(/DATA_QUALITY_WARNING/)).toBeTruthy();
+    expect(screen.getByText(/Croston \(PROVISIONAL\)/)).toBeTruthy();
+    expect(client.create).not.toHaveBeenCalled();
+  });
+  it("quality and candidate requests use user JWT, never service role", async () => {
+    const quality = { chain_id: "a", preview_id: "pid", dataset_hash: "digest", policy_version: "E3-GATES-1.0.0",
+      data_quality: { status: "DATA_QUALITY_WARNING" }, forecast_quality: { status: "FORECAST_QUALITY_READY" },
+      service_level: { status: "NOT_MEASURABLE" }, publication: "PROVISIONAL" };
+    const fetcher = vi.fn(async (url: string) => new Response(JSON.stringify(url.includes("quality-gates") ? quality : { vintage_id: "v1" }), { status: 200 }));
+    vi.stubGlobal("fetch", fetcher);
+    const client = new RailwayPreviewClient(auth(), "https://backend.example");
+    expect((await client.qualityGates("a")).publication).toBe("PROVISIONAL");
+    expect(await client.createCandidate("a", "pid")).toBe("v1");
+    const [url, options] = fetcher.mock.calls[1] as unknown as [string, RequestInit];
+    expect(url).toBe("https://backend.example/api/forecast/vintages/candidates");
+    expect(options.credentials).toBe("omit");
+    expect(options.headers).toHaveProperty("Authorization", "Bearer synthetic-access-token");
+    expect(JSON.stringify(options)).not.toMatch(/service.role|sb_secret/i);
+    expect(JSON.parse(String(options.body))).toEqual({ chain_id: "a", preview_id: "pid" });
+  });
+});

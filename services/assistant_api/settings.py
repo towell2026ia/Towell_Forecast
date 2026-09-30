@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
@@ -24,6 +25,16 @@ def _integer(value: str, name: str, *, minimum: int = 1, maximum: int = 65535) -
         raise ValueError(f"invalid_integer:{name}") from None
     if not minimum <= result <= maximum:
         raise ValueError(f"invalid_integer:{name}")
+    return result
+
+
+def _float(value: str, name: str) -> float:
+    try:
+        result = float(value)
+    except ValueError:
+        raise ValueError(f"invalid_float:{name}") from None
+    if not math.isfinite(result):
+        raise ValueError(f"invalid_float:{name}")
     return result
 
 
@@ -51,8 +62,20 @@ class Settings:
     openai_enabled: bool = False
     supabase_enabled: bool = False
     operational_preview_enabled: bool = False
+    vintage_persistence_enabled: bool = False
+    official_publication_enabled: bool = False
+    champion_publication_enabled: bool = False
+    service_target_fill_rate: float = 95.0
+    quality_policy_version: str = "E3-GATES-1.0.0"
+    minimum_history_months: int = 18
+    warning_continuity_rate: float = 0.85
+    ready_continuity_rate: float = 0.95
+    minimum_improvement_points: float = 0.0
+    maximum_bias_deterioration: float = 5.0
+    critical_horizon_degradation: float = 10.0
     supabase_url: str = ""
     supabase_publishable_key: str = field(default="", repr=False)
+    supabase_service_role_key: str = field(default="", repr=False)
     voice_enabled: bool = False
     deep_research_enabled: bool = False
     assistant_token: str = field(default="", repr=False)
@@ -95,6 +118,25 @@ class Settings:
             raise ValueError("invalid_persistence_mode")
         if any((self.openai_enabled, self.voice_enabled, self.deep_research_enabled)):
             raise ValueError("future_provider_disabled")
+        if self.official_publication_enabled and not self.vintage_persistence_enabled:
+            raise ValueError("official_requires_vintage_persistence")
+        if self.champion_publication_enabled and not self.vintage_persistence_enabled:
+            raise ValueError("champion_requires_vintage_persistence")
+        if self.vintage_persistence_enabled and not self.operational_preview_enabled:
+            raise ValueError("vintage_requires_operational_preview")
+        if not 0 < self.service_target_fill_rate <= 100:
+            raise ValueError("invalid_service_target_fill_rate")
+        if self.quality_policy_version != "E3-GATES-1.0.0" or self.minimum_history_months < 1 or not (
+                0 < self.warning_continuity_rate <= self.ready_continuity_rate <= 1) or any(
+                value < 0 or not math.isfinite(value) for value in (self.minimum_improvement_points,
+                self.maximum_bias_deterioration, self.critical_horizon_degradation)):
+            raise ValueError("invalid_quality_policy")
+        if self.vintage_persistence_enabled and (
+                self.minimum_history_months, self.warning_continuity_rate,
+                self.ready_continuity_rate, self.minimum_improvement_points,
+                self.maximum_bias_deterioration, self.critical_horizon_degradation,
+                self.service_target_fill_rate) != (18, 0.85, 0.95, 0.0, 5.0, 10.0, 95.0):
+            raise ValueError("policy_version_change_requires_review")
         if self.data_provider == "supabase" or self.supabase_enabled or self.operational_preview_enabled:
             if not (self.data_provider == "supabase" and self.supabase_enabled and self.operational_preview_enabled):
                 raise ValueError("operational_preview_configuration_missing")
@@ -173,8 +215,20 @@ class Settings:
             openai_enabled=flag("OPENAI_ENABLED", False),
             supabase_enabled=flag("SUPABASE_ENABLED", False),
             operational_preview_enabled=flag("OPERATIONAL_PREVIEW_ENABLED", False),
+            vintage_persistence_enabled=flag("VINTAGE_PERSISTENCE_ENABLED", False),
+            official_publication_enabled=flag("OFFICIAL_PUBLICATION_ENABLED", False),
+            champion_publication_enabled=flag("CHAMPION_PUBLICATION_ENABLED", False),
+            service_target_fill_rate=_float(env.get("SERVICE_TARGET_FILL_RATE", "95.0"), "SERVICE_TARGET_FILL_RATE"),
+            quality_policy_version=env.get("QUALITY_POLICY_VERSION", "E3-GATES-1.0.0"),
+            minimum_history_months=number("MINIMUM_HISTORY_MONTHS", 18, 120),
+            warning_continuity_rate=_float(env.get("WARNING_CONTINUITY_RATE", "0.85"), "WARNING_CONTINUITY_RATE"),
+            ready_continuity_rate=_float(env.get("READY_CONTINUITY_RATE", "0.95"), "READY_CONTINUITY_RATE"),
+            minimum_improvement_points=_float(env.get("MINIMUM_IMPROVEMENT_POINTS", "0"), "MINIMUM_IMPROVEMENT_POINTS"),
+            maximum_bias_deterioration=_float(env.get("MAXIMUM_BIAS_DETERIORATION", "5"), "MAXIMUM_BIAS_DETERIORATION"),
+            critical_horizon_degradation=_float(env.get("CRITICAL_HORIZON_DEGRADATION", "10"), "CRITICAL_HORIZON_DEGRADATION"),
             supabase_url=env.get("SUPABASE_URL", ""),
             supabase_publishable_key=env.get("SUPABASE_PUBLISHABLE_KEY", ""),
+            supabase_service_role_key=env.get("SUPABASE_SERVICE_ROLE_KEY", ""),
             voice_enabled=flag("VOICE_ENABLED", False),
             deep_research_enabled=flag("DEEP_RESEARCH_ENABLED", False),
             assistant_token=env.get("ASSISTANT_API_TOKEN", ""),

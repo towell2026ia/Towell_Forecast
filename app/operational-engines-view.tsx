@@ -12,6 +12,7 @@ import { MLEngineDetail } from "@/components/forecast/ml-engine-detail";
 import { StatisticalEngineDetail } from "@/components/forecast/statistical-engine-detail";
 import { useForecastFilters, type PreviewView } from "./forecast-towell-app";
 import { currentRetrospectivePreview } from "@/lib/preview-presentation";
+import type { VintageDetail, VintageSummary } from "@/lib/forecast-preview";
 
 const safeError = (error: unknown) => error instanceof PreviewReadError ? error.code : "DATA_READ_FAILED";
 const stages = ["QUEUED", "READING_DATA", "ELIGIBILITY", "STATISTICAL", "ML", "ENSEMBLE", "QUALITY_GATE"];
@@ -97,6 +98,7 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
     {!current?.job && !current?.loading && !current?.error && <p className="text-sm text-slate-500">Sin vista previa calculada</p>}
     {stale && <p className="rounded-xl border bg-amber-50 p-3 text-xs text-amber-800">Vista previa desactualizada. Sus métricas retrospectivas no se muestran; el cálculo no se ejecuta automáticamente.</p>}
     <ForecastEnginesTabs value={tab} onChange={setTab}/>
+    {tab === "vintages" && <div role="tabpanel" id="engine-panel-vintages" aria-labelledby="engine-tab-vintages"><VintagesPanel chainId={filters.chainId}/></div>}
     {tab === "statistical" && <div role="tabpanel" id="engine-panel-statistical" aria-labelledby="engine-tab-statistical"><StatisticalEngineDetail scope={stale ? null : selected} scopes={stale ? [] : scopes} filters={filters} historical={actual?.rows ?? []} historyError={actual?.error} cutsStatus={current?.result?.cuts_status ?? current?.job?.cuts_status} compareTowell={compareTowell} onCompare={() => setCompareTowell(v => !v)}/></div>}
     {tab === "ml" && <div role="tabpanel" id="engine-panel-ml" aria-labelledby="engine-tab-ml"><MLEngineDetail scope={stale ? null : selected} scopes={stale ? [] : scopes} filters={filters} historical={actual?.rows ?? []} horizons={horizons} historyError={actual?.error} cutsStatus={current?.result?.cuts_status ?? current?.job?.cuts_status}/></div>}
     {tab === "summary" && <div role="tabpanel" id="engine-panel-summary" aria-labelledby="engine-tab-summary" className="space-y-5">{filters.chainId ? <>
@@ -116,4 +118,57 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
       {scopes.length > 0 && <ForecastGrid headers={["Cadena", "Corte", "Evaluados", "Stat", "ML", "Preview Leader", "Estado"]} rows={scopes.map(s => [s.chain_name ?? s.chain_id, s.issue_period ?? "—", quantity(s.eligibility?.evaluated), quantity(s.eligibility?.stat_eligible), quantity(s.eligibility?.ml_eligible), s.selection?.preview_leader?.model ?? s.selection?.preview_leader?.strategy ?? "—", s.error_code ?? humanStatus(s.status)])}/>}
     </>}</div>}
   </section>;
+}
+
+function VintagesPanel({ chainId }: { chainId: string | null }) {
+  const { repository, profile, preview } = useForecastFilters();
+  const [state, setState] = useState<{ chainId: string; rows: VintageSummary[]; flags: { vintage_persistence: boolean; official_publication: boolean; champion_publication: boolean }; error: boolean } | null>(null);
+  const [revision, setRevision] = useState(0);
+  const [actionError, setActionError] = useState("");
+  const [actionBusy, setActionBusy] = useState(false);
+  const [selectedVintage, setSelectedVintage] = useState<string | null>(null);
+  const [detail, setDetail] = useState<VintageDetail | null>(null);
+  const [detailError, setDetailError] = useState(false);
+  const selected = chainId ? preview?.result?.scopes.find(scope => scope.chain_id === chainId) ?? null : null;
+  const readyPreview = currentRetrospectivePreview(preview?.result ?? null, selected) ? selected : null;
+  useEffect(() => {
+    let alive = true;
+    if (chainId && repository.previews?.vintages && repository.previews.vintageCapabilities) void Promise.all([
+      repository.previews.vintages(chainId), repository.previews.vintageCapabilities(),
+    ]).then(([rows, flags]) => { if (alive) setState({ chainId, rows, flags, error: false }); })
+      .catch(() => { if (alive) setState({ chainId, rows: [], flags: { vintage_persistence: false, official_publication: false, champion_publication: false }, error: true }); });
+    return () => { alive = false; };
+  }, [repository, chainId, revision]);
+  useEffect(() => {
+    let alive = true;
+    setDetail(null); setDetailError(false);
+    if (selectedVintage && repository.previews?.vintageDetail) void repository.previews.vintageDetail(selectedVintage)
+      .then(value => { if (alive && value.vintage.chain_id === chainId) setDetail(value); else if (alive) setDetailError(true); })
+      .catch(() => { if (alive) setDetailError(true); });
+    return () => { alive = false; };
+  }, [repository, selectedVintage, chainId, revision]);
+  async function act(operation: () => Promise<string>) {
+    if (actionBusy) return;
+    setActionBusy(true); setActionError("");
+    try { await operation(); setRevision(value => value + 1); }
+    catch (error) { setActionError(error instanceof PreviewReadError ? error.code : "VINTAGE_WRITE_FAILED"); }
+    finally { setActionBusy(false); }
+  }
+  if (!chainId) return <p className="rounded-xl border bg-white p-5 text-sm text-slate-500">Selecciona una cadena para consultar sus vintages. No se mezclan scopes padre e hijo.</p>;
+  if (!state || state.chainId !== chainId) return <p role="status" className="rounded-xl border bg-white p-5 text-sm text-slate-500">Consultando vintages…</p>;
+  if (state.error) return <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">No fue posible consultar los vintages.</p>;
+  return <div className="rounded-xl border bg-white p-5"><div className="flex flex-wrap items-center justify-between gap-3"><h2 className="font-semibold">Vintages del scope</h2>{profile.global_role === "ADMIN" && state.flags.vintage_persistence && readyPreview?.preview_id && repository.previews?.createCandidate && <Button disabled={actionBusy} onClick={() => { if (window.confirm("¿Crear candidato provisional a partir del preview actual? No publica forecast oficial.")) void act(() => repository.previews!.createCandidate!(chainId, readyPreview.preview_id!)); }}>Crear candidato de vintage</Button>}</div><p className="mt-2 text-sm text-slate-500">Snapshots reales en Supabase. Las acciones sólo aparecen después del cutover aprobado; publicación oficial y Champion tienen controles separados.</p>{profile.global_role !== "ADMIN" && <p className="mt-2 text-xs text-slate-500">Tu acceso es de consulta; las acciones gerenciales requieren autorización del backend.</p>}{actionError && <p role="alert" className="mt-3 text-sm text-rose-700">La acción no se completó: {actionError}</p>}{state.rows.length ? <div className="mt-4 overflow-x-auto"><table className="min-w-full text-left text-sm"><thead><tr className="border-b text-slate-500"><th className="p-2">Vintage</th><th className="p-2">Periodo</th><th className="p-2">Corte</th><th className="p-2">Estado</th><th className="p-2">Frozen</th><th className="p-2">Creado</th><th className="p-2">Acciones</th></tr></thead><tbody>{state.rows.map(row => <tr key={row.id} className="border-b"><td className="p-2 font-mono text-xs">{row.id}</td><td className="p-2">{row.issue_period.slice(0, 7)}</td><td className="p-2">{row.cutoff_at.slice(0, 10)}</td><td className="p-2">{row.certification_status}</td><td className="p-2">{row.frozen_at ? "Sí" : "No"}</td><td className="p-2">{row.created_at.slice(0, 10)}</td><td className="p-2 whitespace-nowrap"><Button size="sm" variant="outline" onClick={() => setSelectedVintage(value => value === row.id ? null : row.id)}>{selectedVintage === row.id ? "Cerrar detalle" : "Ver detalle"}</Button>{profile.global_role === "ADMIN" && state.flags.vintage_persistence && !row.frozen_at && repository.previews?.freezeVintage && <Button size="sm" variant="outline" disabled={actionBusy} onClick={() => { if (window.confirm("¿Congelar este vintage? Después no podrá modificarse.")) void act(() => repository.previews!.freezeVintage!(row.id)); }}>Congelar</Button>}{profile.global_role === "ADMIN" && state.flags.official_publication && row.frozen_at && row.certification_status === "CERTIFIED" && repository.previews?.publishVintage && <Button size="sm" variant="outline" disabled={actionBusy} onClick={() => { const comment = window.prompt("Justificación para publicar forecast oficial (mínimo 5 caracteres)"); if (comment && comment.trim().length >= 5 && window.confirm("¿Confirmas la publicación oficial?")) void act(() => repository.previews!.publishVintage!(row.id, comment)); }}>Publicar oficial</Button>}</td></tr>)}</tbody></table></div> : <p className="mt-4 text-sm text-slate-500">Todavía no hay vintages en este scope.</p>}{selectedVintage && !detail && !detailError && <p role="status" className="mt-4 text-sm text-slate-500">Consultando detalle del vintage…</p>}{selectedVintage && detailError && <p role="alert" className="mt-4 text-sm text-rose-700">No fue posible consultar el detalle del vintage.</p>}{detail && detail.vintage.id === selectedVintage && <VintageDetailView detail={detail}/>}</div>;
+}
+
+function VintageDetailView({ detail }: { detail: VintageDetail }) {
+  const validation = detail.metrics.filter(row => row.phase === "VALIDATION");
+  const metric = (name: string) => validation.find(row => row.metric === name)?.value;
+  const gate = (name: string) => detail.gates.find(row => row.gate_type === name)?.status ?? "—";
+  return <div className="mt-5 space-y-4 rounded-xl border bg-slate-50 p-4 text-sm">
+    <h3 className="font-semibold">Lineage y desempeño del vintage</h3>
+    <dl className="grid gap-2 md:grid-cols-2"><div>Run: <span className="font-mono text-xs">{detail.run.id}</span></div><div>Actor: <span className="font-mono text-xs">{detail.run.actor_id ?? "—"}</span></div><div>Dataset SHA: <span className="break-all font-mono text-xs">{detail.run.data_snapshot_hash}</span></div><div>Git SHA: <span className="font-mono text-xs">{detail.run.git_sha}</span></div><div>Motor: {detail.run.engine_version}</div><div>Inputs: {detail.inputs.length} · Agregados: {detail.aggregates.length}</div><div>WAPE retrospectivo: {metric("WAPE") ?? "—"}</div><div>Bias retrospectivo: {metric("BIAS") ?? "—"}</div><div>Datos: {gate("DATA_QUALITY")}</div><div>Forecast: {gate("FORECAST_QUALITY")}</div><div>Servicio: {gate("SERVICE_LEVEL")}</div></dl>
+    <p className="text-xs text-slate-500">Evaluación retrospectiva rolling-origin. No constituye certificación point-in-time.</p>
+    <div className="overflow-x-auto"><table className="min-w-full text-left text-xs"><thead><tr className="border-b"><th className="p-2">Producto</th><th className="p-2">H</th><th className="p-2">Mes</th><th className="p-2">Stat</th><th className="p-2">ML</th><th className="p-2">Fcst Towell</th><th className="p-2">P10 / P50 / P90 / P95</th></tr></thead><tbody>{detail.horizons.map(row => <tr key={row.id} className="border-b"><td className="p-2 font-mono">{row.product_id}</td><td className="p-2">{row.horizon}</td><td className="p-2">{row.target_period.slice(0, 7)}</td><td className="p-2">{row.statistical_value ?? "—"}</td><td className="p-2">{row.ml_value ?? "—"}</td><td className="p-2">{row.forecast_towell}</td><td className="p-2">{[row.p10, row.p50, row.p90, row.p95].map(value => value ?? "—").join(" / ")}</td></tr>)}</tbody></table></div>
+    <div>Modelos: {detail.models.map(row => `${row.model_family} · ${row.algorithm} (${row.certification_status})`).join("; ") || "—"}</div>
+  </div>;
 }

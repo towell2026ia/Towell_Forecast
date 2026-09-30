@@ -29,8 +29,19 @@ def main() -> None:
         content = path.read_text(encoding="utf-8", errors="replace")
         if any(prefix in content for prefix in SECRET_PREFIXES):
             problems.append(f"possible_secret_prefix:{name}")
-        if path.name != ".env.example" and ASSIGNMENT.search(content):
-            problems.append(f"possible_secret_assignment:{name}")
+        if path.name != ".env.example":
+            for match in ASSIGNMENT.finditer(content):
+                line_end = content.find("\n", match.start())
+                line = content[match.start():line_end if line_end >= 0 else len(content)]
+                key = match.group(1)
+                # A direct read of the same environment variable with an empty
+                # fallback is configuration, not a credential embedded in Git.
+                safe_read = re.fullmatch(
+                    rf'\s*{re.escape(key)}\s*=\s*env\.get\("{key.upper()}",\s*""\),?\s*',
+                    line, re.IGNORECASE,
+                )
+                if not safe_read:
+                    problems.append(f"possible_secret_assignment:{name}")
     if problems:
         raise SystemExit("\n".join(problems))
     print(f"public_repo_check_ok: {len(tracked) - 1} tracked paths scanned")

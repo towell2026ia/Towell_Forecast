@@ -88,6 +88,7 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
     from .supabase_access import PreviewError, SupabaseReadClient
     from .operational_preview import OperationalMultiChainForecastRunner
     from .preview_api import mount_preview_routes
+    from .vintage_service import SupabaseForecastWriteRepository
     supabase_client = SupabaseReadClient(config.supabase_url, config.supabase_publishable_key,
         timeout=config.external_timeout_seconds) if config.operational_preview_enabled else None
     data = provider or (SupabaseDataProvider(supabase_client) if supabase_client else
@@ -140,7 +141,9 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
         environment=config.app_env) if config.operational_preview_enabled else None
     app.state.preview_runner = preview_runner
     if preview_runner:
-        mount_preview_routes(app, config, identity, data, preview_runner, rate_limiter)
+        write_repository = SupabaseForecastWriteRepository(config.supabase_url, config.supabase_service_role_key,
+            timeout=config.external_timeout_seconds) if config.vintage_persistence_enabled else None
+        mount_preview_routes(app, config, identity, data, preview_runner, rate_limiter, write_repository)
 
     @app.exception_handler(PreviewError)
     async def preview_exception(request: Request, exc: PreviewError):
@@ -253,10 +256,18 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
     def ready():
         if config.operational_preview_enabled:
             providers = {"data": data.health(), "persistence": storage.health(), "auth": identity.health()}
+            if config.vintage_persistence_enabled:
+                providers["vintage_write"] = {"status": "healthy" if config.supabase_service_role_key else "not_ready",
+                    "provider": "SupabaseForecastWriteRepository",
+                    **({} if config.supabase_service_role_key else {"error_code": "REQUIRED_SECRET_MISSING"})}
             healthy = all(item["status"] == "healthy" for item in providers.values())
             return JSONResponse(status_code=200 if healthy else 503, content={"status": "ok" if healthy else "not_ready",
                 "version": config.app_version, "environment": config.app_env, "providers": providers,
-                "operational_preview": True, "official_publication": False})
+                "operational_preview": True,
+                "vintage_persistence": config.vintage_persistence_enabled,
+                "official_publication": config.official_publication_enabled,
+                "champion_publication": config.champion_publication_enabled,
+                "service_target_fill_rate": config.service_target_fill_rate})
         providers = {"data": data.health(), "persistence": storage.health(),
                      "assistant": orchestrator.assistant_provider.health(),
                      "research": historical.research.health(), "auth": identity.health()}

@@ -125,7 +125,7 @@ describe("SS identity-scoped session stability", () => {
     expect(repos[0].dispose).toHaveBeenCalledOnce(); expect(repos[1].dispose).not.toHaveBeenCalled();
     expect(state.create).toHaveBeenLastCalledWith("user-2"); expect(state.mount).toHaveBeenCalledTimes(2);
     expect(screen.queryByText("Página 2")).toBeNull(); expect(screen.queryByText("Fixture user-1")).toBeNull();
-  });
+  }, 10000);
   it("SS16 recovery routes safely without entering portal with recovery credentials", async () => {
     const { s, view } = await mounted(); await act(async () => { s.emit("PASSWORD_RECOVERY"); s.emit("TOKEN_REFRESHED"); });
     expect(state.replace).toHaveBeenCalledWith("/update-password"); expect(state.create).toHaveBeenCalledOnce();

@@ -385,16 +385,76 @@ class JobTests(unittest.TestCase):
             self.assertEqual(client.post("/api/forecast/preview-runs", json={"chain_id": A}, headers=editor).status_code, 202)
             self.assertEqual(client.post("/api/forecast/preview-runs", json={"chain_id": A}, headers={"Authorization": "Bearer " + jwt()}).status_code, 202)
             self.assertEqual(client.get("/api/ready").status_code, 200)
+            ready = client.get("/api/ready").json()
+            self.assertFalse(ready["vintage_persistence"])
+            self.assertFalse(ready["official_publication"])
+            self.assertFalse(ready["champion_publication"])
+            self.assertEqual(ready["service_target_fill_rate"], 95.0)
+            candidate = "/api/forecast/vintages/candidates"
+            self.assertEqual(client.post(candidate).status_code, 401)
+            self.assertEqual(client.post(candidate, headers=viewer).status_code, 403)
+            self.assertEqual(client.post(candidate, headers=editor).status_code, 403)
+            self.assertEqual(client.post(candidate, headers={"Authorization": "Bearer " + jwt()}).json()["error_code"], "VINTAGE_PERSISTENCE_DISABLED")
+            self.assertEqual(client.post(f"/api/forecast/vintages/{A}/publish", headers={"Authorization": "Bearer " + jwt()}).json()["error_code"], "OFFICIAL_PUBLICATION_DISABLED")
+            close = f"/api/forecast/vintages/{A}/close"
+            close_body = {"target_period": "2026-08-01", "confirm": True}
+            self.assertEqual(client.post(close, json=close_body).status_code, 401)
+            self.assertEqual(client.post(close, json=close_body, headers=viewer).status_code, 403)
+            self.assertEqual(client.post(close, json=close_body, headers={"Authorization": "Bearer " + jwt()}).json()["error_code"], "VINTAGE_PERSISTENCE_DISABLED")
+            self.assertEqual(client.post("/api/forecast/champion/promote", headers={"Authorization": "Bearer " + jwt()}).json()["error_code"], "CHAMPION_PUBLICATION_DISABLED")
             self.assertEqual(client.post("/api/forecast/run", json={"period": "2026-07"}, headers=editor).status_code, 503)
 
     def test_settings_only_allow_e2_not_future_or_bypass(self):
         valid = replace(Settings(), data_provider="supabase", supabase_enabled=True, operational_preview_enabled=True,
             supabase_url=URL, supabase_publishable_key=KEY, ai_assistant_api_enabled=False)
         valid.validate()
+        self.assertFalse(valid.vintage_persistence_enabled)
+        self.assertFalse(valid.official_publication_enabled)
+        self.assertFalse(valid.champion_publication_enabled)
+        replace(valid, vintage_persistence_enabled=True).validate()
+        for invalid in (replace(valid, official_publication_enabled=True),
+                        replace(valid, champion_publication_enabled=True)):
+            with self.assertRaises(ValueError):
+                invalid.validate()
         for settings in (replace(valid, openai_enabled=True), replace(valid, supabase_publishable_key="service-secret"),
                          replace(valid, ai_assistant_api_enabled=True), replace(valid, max_forecast_runs=3), replace(Settings(), supabase_enabled=True)):
             with self.assertRaises(ValueError):
                 settings.validate()
+
+    def test_E3_quality_read_is_scoped_and_missing_write_secret_fails_closed(self):
+        config = replace(Settings(), data_provider="supabase", supabase_enabled=True,
+            operational_preview_enabled=True, vintage_persistence_enabled=True,
+            supabase_url=URL, supabase_publishable_key=KEY, ai_assistant_api_enabled=False,
+            state_dir=Path(self.temp.name))
+        case = ProviderTests(); case.setUp()
+        data = SupabaseDataProvider(case.client)
+        sales = data.bind(jwt()).records(chain_id=A)
+        digest = snapshot_hash(sales)
+        preview = {"status": "PREVIEW", "chain_id": A, "objective": "Venta", "issue_period": "2026-07",
+            "mode": "RETROSPECTIVE_TRAINING", "dataset_hash": digest,
+            "products": [], "eligibility": {"visible_products": 0, "stat_eligible": 0, "ml_eligible": 0},
+            "statistical": {}, "ml": {}, "selection": {}}
+        self.storage.put("forecast_previews", "fixture-preview", preview)
+        self.storage.put("forecast_jobs", "OPJ-fixture", {"job_id": "OPJ-fixture", "kind": "OPERATIONAL_PREVIEW",
+            "status": "READY_PREVIEW", "creator_id": USER, "chain_ids": [A], "product_id": None,
+            "mode": "RETROSPECTIVE_TRAINING", "created_at": time.time(),
+            "scopes": [{"chain_id": A, "preview_id": "fixture-preview", "status": "READY_PREVIEW"}]})
+        app = create_app(settings=config, persistence=self.storage, provider=data,
+            auth_provider=SupabaseAuthProvider(case.client))
+        with TestClient(app) as client:
+            admin = {"Authorization": "Bearer " + jwt()}
+            viewer = {"Authorization": "Bearer " + jwt("VIEWER")}
+            self.assertEqual(client.get(f"/api/forecast/quality-gates?chain_id={A}").status_code, 401)
+            self.assertEqual(client.get(f"/api/forecast/quality-gates?chain_id={B}", headers=viewer).status_code, 403)
+            quality = client.get(f"/api/forecast/quality-gates?chain_id={A}", headers=viewer)
+            self.assertEqual(quality.status_code, 200)
+            self.assertEqual(quality.json()["dataset_hash"], digest)
+            self.assertEqual(quality.json()["service_level"]["status"], "NOT_MEASURABLE")
+            self.assertEqual(client.get("/api/ready").json()["providers"]["vintage_write"]["error_code"], "REQUIRED_SECRET_MISSING")
+            candidate = client.post("/api/forecast/vintages/candidates", json={"chain_id": A,
+                "preview_id": "fixture-preview"}, headers={**admin, "Idempotency-Key": "key-1"})
+            self.assertEqual(candidate.status_code, 503)
+            self.assertEqual(candidate.json()["error_code"], "REQUIRED_SECRET_MISSING")
 
     def test_API_ready_preview_viewer_result_product_filter_and_rate_limit(self):
         config = replace(Settings(), data_provider="supabase", supabase_enabled=True, operational_preview_enabled=True,

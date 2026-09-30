@@ -114,6 +114,7 @@ class OperationalMultiChainForecastRunner:
                             state = "INSUFFICIENT"
                         counts[state] += 1
                         states.append({"product_id": item.product_id, "product_code": item.product_code,
+                            "variant_code": item.variant,
                             "description": item.description, "category_id": None if item.category == "UNCLASSIFIED" else item.category,
                             "forecast_status": state})
                         if state in {"ACTIVE", "COLD_START"}:
@@ -125,6 +126,7 @@ class OperationalMultiChainForecastRunner:
                             state = "PRE-LAUNCH" if product.get("first_seen_period", "")[:7] > issue else "INSUFFICIENT"
                             counts[state] += 1
                             states.append({"product_id": product["id"], "product_code": product["product_code"],
+                                "variant_code": product.get("variant_code") or "",
                                 "description": product["description"], "category_id": product.get("category_id"), "forecast_status": state})
                     if not eligible:
                         job["scopes"].append({"chain_id": chain, "issue_period": issue, "status": "FAILED",
@@ -256,7 +258,7 @@ class OperationalMultiChainForecastRunner:
         return self._render_result(job, job["scopes"], product_id)
 
     def _render_result(self, job, references, product_id):
-        scopes = [self.persistence.get("forecast_previews", scope["preview_id"])
+        scopes = [{**self.persistence.get("forecast_previews", scope["preview_id"]), "preview_id": scope["preview_id"]}
                   if scope.get("preview_id") else dict(scope) for scope in references]
         for scope in scopes:
             scope["products"] = [{**product, "horizons": product.get("horizons", []) if product_id else []}
