@@ -11,7 +11,7 @@ import PortalAuth from "../../app/portal-auth";
 import UpdatePassword from "../../app/update-password/update-password";
 
 const config = { url: "https://example.supabase.co", key: "sb_publishable_synthetic_test_key" };
-const session = { user: { id: "user-1" } };
+const session = { user: { id: "user-1" }, access_token: "synthetic" };
 function sdk() {
   let callback: (event: string, value: typeof session | null) => void = () => {};
   const auth = {
@@ -23,7 +23,7 @@ function sdk() {
     signOut: vi.fn().mockResolvedValue({ error: null }),
   };
   const query = { select: () => query, eq: () => query, abortSignal: () => query, maybeSingle: async () => ({ data: { id: "user-1", full_name: "Fixture", global_role: "ADMIN", status: "ACTIVE" }, error: null }) };
-  return { client: { auth, from: () => query } as unknown as SupabaseClient, auth, emit: (event: string) => callback(event, event === "SIGNED_OUT" ? null : session) };
+  return { client: { auth, from: () => query } as unknown as SupabaseClient, auth, emit: (event: string, accessToken = session.access_token) => callback(event, event === "SIGNED_OUT" ? null : { ...session, access_token: accessToken }) };
 }
 beforeEach(() => { vi.stubEnv("NODE_ENV", "development"); });
 afterEach(() => { clearRecoverySession(); window.history.replaceState(null, "", "/"); vi.clearAllMocks(); vi.unstubAllEnvs(); });
@@ -66,8 +66,35 @@ describe("Password recovery", () => {
   }
   it("SDK callback detection is restricted to recovery on /update-password", () => {
     expect(isRecoveryCallback(new URL("https://example.test/update-password"), { type: "recovery" })).toBe(true);
+    expect(isRecoveryCallback(new URL("https://example.test/update-password"), { type: "invite" })).toBe(true);
     expect(isRecoveryCallback(new URL("https://example.test/login"), { type: "recovery" })).toBe(false);
+    expect(isRecoveryCallback(new URL("https://example.test/login"), { type: "invite" })).toBe(false);
     expect(isRecoveryCallback(new URL("https://example.test/update-password"), { type: "signup" })).toBe(false);
+  });
+  it("a verified invitation opens password setup and then returns to login", async () => {
+    const s = sdk();
+    window.history.replaceState(null, "", "/update-password#access_token=synthetic&refresh_token=synthetic&type=invite");
+    render(<UpdatePassword config={config} providedClient={s.client}/>);
+    await screen.findByLabelText("Nueva contraseña");
+    await submitPassword();
+    await waitFor(() => expect(replace).toHaveBeenCalledWith("/login"));
+    expect(s.auth.updateUser).toHaveBeenCalledWith({ password: "Synthetic-password-456" });
+    expect(window.location.hash).toBe("");
+  });
+  it("an older session is not accepted as the invitation until the SDK signs in", async () => {
+    const s = sdk();
+    s.auth.getSession.mockResolvedValue({ data: { session: { ...session, access_token: "older-session" } }, error: null });
+    window.history.replaceState(null, "", "/update-password#access_token=invitation-token&refresh_token=synthetic&type=invite");
+    render(<UpdatePassword config={config} providedClient={s.client}/>);
+    expect(screen.queryByLabelText("Nueva contraseña")).toBeNull();
+    await act(async () => { s.emit("SIGNED_IN", "invitation-token"); });
+    expect(await screen.findByLabelText("Nueva contraseña")).toBeTruthy();
+  });
+  it("a forged invitation type without callback credentials cannot open password setup", async () => {
+    window.history.replaceState(null, "", "/update-password#type=invite");
+    const s = sdk(); render(<UpdatePassword config={config} providedClient={s.client}/>);
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(s.auth.updateUser).not.toHaveBeenCalled();
   });
   it("portal recovery event discards portal access and routes to update-password", async () => {
     const s = sdk(); render(<PortalAuth config={config} providedClient={s.client}/>);

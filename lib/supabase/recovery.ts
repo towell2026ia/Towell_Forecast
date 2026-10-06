@@ -6,7 +6,7 @@ const recoveryWindowMs = 20 * 60 * 1000;
 // Let the official SDK verify credentials. Never accept an arbitrary URL as
 // identity, and never process callback credentials on the normal portal/login.
 export function isRecoveryCallback(url: URL, params: Record<string, string>): boolean {
-  return url.pathname === "/update-password" && (params.type === "recovery" || Boolean(params.error || params.error_code));
+  return url.pathname === "/update-password" && (["recovery", "invite"].includes(params.type) || Boolean(params.error || params.error_code));
 }
 export function passwordRecoveryRedirect(origin: string): string {
   return new URL("/update-password", normalizeSiteUrl(origin, true)).href;

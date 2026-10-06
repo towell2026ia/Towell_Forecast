@@ -22,5 +22,6 @@ export interface ForecastReadRepository {
   getHistoricalObservations(filters: Filters, pagination: { size: 50 | 100 | 250; cursor?: Cursor | null }): Promise<HistoricalPage>;
   getHistoricalSummary(filters: Filters): Promise<Summary>;
   getProfiles(): Promise<Profile[]>;
+  userAdmin?: import("./user-admin").UserAdminClient;
   dispose(): void;
 }

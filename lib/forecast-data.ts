@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Category, Chain, Cursor, Filters, ForecastReadRepository, HistoricalPage, HistoricalRow, Product, Profile, Summary } from "./supabase/types";
 import { controlledReadCode, logReadDiagnostic, PortalReadError, type PortalReadDiagnostic } from "./portal-read-diagnostic";
 import { RailwayPreviewClient } from "./forecast-preview";
+import { SupabaseUserAdminClient } from "./supabase/user-admin";
 import type { HistoricalMonth, CustomerMonth } from "./forecast-chart-data";
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -48,7 +49,8 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
   private catalogTask: Promise<Product[]> | null = null;
   private readDiagnostics = new Map<PortalReadDiagnostic["endpoint"], PortalReadDiagnostic>();
   readonly previews: RailwayPreviewClient;
-  constructor(private client: SupabaseClient, private userId: string, private onReadFailure?: (diagnostic: PortalReadDiagnostic) => void) { this.previews = new RailwayPreviewClient(client); }
+  readonly userAdmin: SupabaseUserAdminClient;
+  constructor(private client: SupabaseClient, private userId: string, private onReadFailure?: (diagnostic: PortalReadDiagnostic) => void) { this.previews = new RailwayPreviewClient(client); this.userAdmin = new SupabaseUserAdminClient(client); }
   dispose() { this.controller.abort(); this.previews.dispose(); this.catalog = null; this.chains = null; this.metadata = null; this.chainTask = null; this.mappingTask = null; this.catalogTask = null; this.readDiagnostics.clear(); }
   getReadDiagnostic(endpoint: PortalReadDiagnostic["endpoint"]) { return this.readDiagnostics.get(endpoint) ?? null; }
   private ensureOpen() { if (this.controller.signal.aborted) throw new Error("session_disposed"); }

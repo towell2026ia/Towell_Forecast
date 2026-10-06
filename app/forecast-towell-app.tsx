@@ -22,6 +22,7 @@ import { ForecastTraderChart } from "@/components/forecast/forecast-trader-chart
 import { scopeHorizons, traderPoints } from "@/lib/forecast-chart-data";
 import { currentRetrospectivePreview } from "@/lib/preview-presentation";
 import { PreviewPerformancePanel } from "@/components/forecast/preview-performance-panel";
+import { UserAdministrationView } from "./user-administration-view";
 
 const modules = [
   ["inicio", "Inicio", Home], ["historico", "Histórico", History],
@@ -190,9 +191,8 @@ function PeriodsView() {
 }
 export function UsersView() {
   const { repository, profile } = useForecastFilters();
-  const users = useRead(useCallback(() => profile.global_role === "ADMIN" ? repository.getProfiles() : Promise.reject(new Error("admin_required")), [repository, profile.global_role]));
   if (profile.global_role !== "ADMIN") return null;
-  return <div><Intro title="Usuarios y permisos" copy="Perfiles reales autorizados. La creación y modificación de usuarios se habilitarán en una fase posterior."/><ReadState loading={users.loading} error={users.error} empty={users.data?.length === 0}/>{users.data && <DataTable headers={["Nombre", "Rol", "Estado"]} rows={users.data.map(u => [u.full_name || "Sin nombre", u.global_role, u.status])}/>}</div>;
+  return <UserAdministrationView repository={repository} profile={profile}/>;
 }
 function Unavailable({ title, copy }: { title: string; copy: string }) { return <div><Intro title={title} copy={copy}/><Card className="border-slate-200 shadow-sm"><CardContent className="p-6 text-sm text-slate-500">Módulo no habilitado para operaciones en esta fase.</CardContent></Card></div>; }
 function DataTable({ headers, rows }: { headers: string[]; rows: string[][] }) { return <div className="overflow-hidden rounded-xl border border-slate-200 bg-white"><div className="overflow-x-auto"><Table><TableHeader><TableRow className="bg-slate-50">{headers.map(h => <TableHead className="whitespace-nowrap font-semibold text-slate-700" key={h}>{h}</TableHead>)}</TableRow></TableHeader><TableBody>{rows.map((row, i) => <TableRow key={i}>{row.map((cell, j) => <TableCell key={j} className={j < 3 ? "min-w-24 text-slate-700" : "whitespace-nowrap text-slate-600"}>{cell}</TableCell>)}</TableRow>)}</TableBody></Table></div></div>; }

@@ -23,10 +23,16 @@ export default function UpdatePassword({ config, providedClient }: { config: Pub
 
   useEffect(() => {
     if (!configured) return;
-    let alive = true, receivedRecovery = false;
+    let alive = true, receivedPasswordLink = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     // Only note the presence of callback parameters; never retain credentials.
     const incomingCallback = Boolean(window.location.hash || window.location.search);
+    const hashParams = new URLSearchParams(window.location.hash.slice(1));
+    const searchParams = new URLSearchParams(window.location.search);
+    const callbackType = hashParams.get("type") ?? searchParams.get("type");
+    const incomingInvite = callbackType === "invite" &&
+      ((hashParams.has("access_token") && hashParams.has("refresh_token")) || searchParams.has("code"));
+    const invitationAccessToken = hashParams.get("access_token");
     const sdk = providedClient ?? getBrowserClient({ url, key }); client.current = sdk;
     const scrubCallback = () => window.history.replaceState(null, "", "/update-password");
     const deny = () => { if (!alive) return; generation.current += 1; verifiedUser.current = null; clearRecoverySession(); setState("denied"); scrubCallback(); };
@@ -41,15 +47,25 @@ export default function UpdatePassword({ config, providedClient }: { config: Pub
     }
     const { data } = sdk.auth.onAuthStateChange((event, session) => {
       if (!alive) return;
-      if (event === "PASSWORD_RECOVERY" && session?.user.id) {
-        receivedRecovery = true; clearTimeout(timer);
+      if ((event === "PASSWORD_RECOVERY" || (incomingInvite && event === "SIGNED_IN" &&
+        (!invitationAccessToken || session?.access_token === invitationAccessToken))) && session?.user.id) {
+        receivedPasswordLink = true; clearTimeout(timer);
         queueMicrotask(() => { if (alive) void verify(session.user.id); });
       } else if (event === "SIGNED_OUT") deny();
     });
     // Wait for SDK callback initialization. A stored normal login is not enough.
     void sdk.auth.getSession().then(({ data: sessionData, error: sessionError }) => {
-      if (!alive || receivedRecovery) return;
+      if (!alive || receivedPasswordLink) return;
       if (sessionError || !sessionData.session) { deny(); return; }
+      if (callbackType === "invite" && !incomingInvite) { deny(); return; }
+      // An older login session must not be mistaken for the invited identity.
+      // With implicit flow, only the SDK session for this exact callback token
+      // may use this fallback; PKCE waits for the SDK SIGNED_IN event.
+      if (incomingInvite) {
+        if (invitationAccessToken && sessionData.session.access_token === invitationAccessToken) void verify(sessionData.session.user.id);
+        else timer = setTimeout(deny, 3000);
+        return;
+      }
       if (incomingCallback) { timer = setTimeout(deny, 3000); return; }
       const marker = recoveryUserId();
       if (!marker || marker !== sessionData.session.user.id) { deny(); return; }
@@ -82,8 +98,8 @@ export default function UpdatePassword({ config, providedClient }: { config: Pub
   }
   return <main className="grid min-h-svh place-items-center bg-[#f7f9fc] p-5"><section className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-9">
     <div className="mb-8 flex items-center gap-3"><div className="grid size-11 place-items-center rounded-xl bg-blue-700 font-black text-white">FT</div><h1 className="text-xl font-semibold text-slate-950">FORECAST Towell</h1></div>
-    <h2 className="mb-5 text-lg font-semibold">Restablecer contraseña</h2>
-    {state === "checking" && configured && <p role="status" className="text-sm text-slate-600">Verificando enlace de recuperación…</p>}
+    <h2 className="mb-5 text-lg font-semibold">Establecer contraseña</h2>
+    {state === "checking" && configured && <p role="status" className="text-sm text-slate-600">Verificando enlace de acceso…</p>}
     {(state === "denied" || !configured) && <><p role="alert" className="mb-5 rounded-lg bg-amber-50 p-3 text-sm text-amber-900">El enlace no es válido o ha expirado. Solicita un nuevo enlace desde el inicio de sesión.</p><a href="/login" className="text-sm text-blue-700 underline">Volver a iniciar sesión</a></>}
     {state === "ready" && <form aria-label="Actualizar contraseña" onSubmit={update} className="space-y-5">
       <p className="text-sm text-slate-600">Elige una contraseña nueva de al menos 12 caracteres.</p>
