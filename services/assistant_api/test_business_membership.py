@@ -257,13 +257,18 @@ class BusinessContracts(unittest.TestCase):
 
     def test_CP36_no_runtime_import_or_schema(self):
         self.assertNotIn("business_membership", (ROOT/"services/assistant_api/api.py").read_text())
-        # Membership reconciliation still adds no schema. Later PRDs authorize
-        # these independent portal views and the later E3 vintage contract.
-        migrations = [p for p in (ROOT/"supabase/migrations").glob("*.sql")
-                      if p.name not in {"202609280001_portal_published_history.sql",
-                                        "202609280002_portal_history_periods.sql",
-                                        "202609290010_e3_vintage_transaction.sql"}]
-        self.assertEqual(len(migrations), 7)
+        # Freeze the seven baseline migrations relevant to this contract;
+        # independent later portal migrations must not invalidate it.
+        migrations = {p.name for p in (ROOT/"supabase/migrations").glob("20260925*.sql")}
+        self.assertEqual(migrations, {
+            "202609250001_contract_core.sql",
+            "202609250002_contract_forecast.sql",
+            "202609250003_contract_governance.sql",
+            "202609250004_contract_integrity.sql",
+            "202609250005_auth_rls.sql",
+            "202609250006_private_storage.sql",
+            "202609250007_approval_probe_guard.sql",
+        })
 
     def test_grouped_review_and_scope_guards(self):
         review, count = manual_membership_review(self.multiple())

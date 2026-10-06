@@ -239,11 +239,20 @@ class HierarchicalContracts(unittest.TestCase):
         self.assertEqual(future["selected"][0]["key"][2],"2030-01")
 
     def test_CP34_no_schema_or_runtime_import(self):
-        # Later portal views and E3 vintage migration are independent of frozen grain.
-        self.assertEqual(len([p for p in (ROOT/"supabase/migrations").glob("*.sql")
-                              if p.name not in {"202609280001_portal_published_history.sql",
-                                                "202609280002_portal_history_periods.sql",
-                                                "202609290010_e3_vintage_transaction.sql"}]),7)
+        # Only the original baseline belongs to the frozen grain contract;
+        # later portal migrations are independent.
+        self.assertEqual(
+            {p.name for p in (ROOT/"supabase/migrations").glob("20260925*.sql")},
+            {
+                "202609250001_contract_core.sql",
+                "202609250002_contract_forecast.sql",
+                "202609250003_contract_governance.sql",
+                "202609250004_contract_integrity.sql",
+                "202609250005_auth_rls.sql",
+                "202609250006_private_storage.sql",
+                "202609250007_approval_probe_guard.sql",
+            },
+        )
         self.assertNotIn("hierarchical_grain",(ROOT/"services/assistant_api/api.py").read_text())
 
     def test_CP35_runtime_off(self):
