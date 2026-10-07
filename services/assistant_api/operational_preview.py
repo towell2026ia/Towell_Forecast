@@ -116,7 +116,8 @@ class OperationalMultiChainForecastRunner:
                         states.append({"product_id": item.product_id, "product_code": item.product_code,
                             "variant_code": item.variant,
                             "description": item.description, "category_id": None if item.category == "UNCLASSIFIED" else item.category,
-                            "forecast_status": state})
+                            "forecast_status": state, "history_months": len(item.history(issue)),
+                            "minimum_history_months": self.policy.min_product_observations})
                         if state in {"ACTIVE", "COLD_START"}:
                             eligible.add(item.product_id)
                     if hasattr(provider, "product_catalog"):
@@ -127,7 +128,9 @@ class OperationalMultiChainForecastRunner:
                             counts[state] += 1
                             states.append({"product_id": product["id"], "product_code": product["product_code"],
                                 "variant_code": product.get("variant_code") or "",
-                                "description": product["description"], "category_id": product.get("category_id"), "forecast_status": state})
+                                "description": product["description"], "category_id": product.get("category_id"),
+                                "forecast_status": state, "history_months": 0,
+                                "minimum_history_months": self.policy.min_product_observations})
                     if not eligible:
                         job["scopes"].append({"chain_id": chain, "issue_period": issue, "status": "FAILED",
                             "error_code": "NO_ELIGIBLE_PRODUCTS", "products": states, "eligibility": counts})

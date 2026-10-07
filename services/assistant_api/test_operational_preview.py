@@ -286,6 +286,19 @@ class JobTests(unittest.TestCase):
         job = self.wait(self.runner.submit(Short(), self.actor, chain_ids=[A]))
         self.assertEqual(job["status"], "FAILED")
         self.assertEqual(job["scopes"][0]["error_code"], "NO_ELIGIBLE_PRODUCTS")
+        self.assertEqual(job["scopes"][0]["products"][0]["history_months"], 3)
+        self.assertEqual(job["scopes"][0]["products"][0]["minimum_history_months"], 6)
+        self.assertEqual(self.storage.list("forecast_previews"), [])
+
+    def test_two_prelaunch_zero_months_do_not_make_five_sales_months_eligible(self):
+        class ShortLaunch:
+            def records(inner, **kwargs):
+                return [{**row, "period": add_month("2026-01", index), "value": 0 if index < 2 else 2500 + index}
+                        for index, row in enumerate(fixture(7)[:7])]
+        job = self.wait(self.runner.submit(ShortLaunch(), self.actor, chain_ids=[A], product_id=PRODUCT))
+        self.assertEqual(job["status"], "FAILED")
+        self.assertEqual(job["scopes"][0]["error_code"], "NO_ELIGIBLE_PRODUCTS")
+        self.assertEqual(job["scopes"][0]["products"][0]["history_months"], 5)
         self.assertEqual(self.storage.list("forecast_previews"), [])
 
     def test_hash_literal_deterministic_and_context_sensitive(self):

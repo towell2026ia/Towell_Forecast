@@ -59,8 +59,8 @@ describe("E2 operational UI", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Calculando vista previa…" }).hasAttribute("disabled")).toBe(true));
   });
   it("safe failed state with insufficient product does not display fake forecast zero", async () => {
-    harness(api({ latest: vi.fn(async () => ({ ...job, status: "FAILED", scopes: [{ chain_id: "a", status: "FAILED", error_code: "NO_ELIGIBLE_PRODUCTS", products: [{ product_id: "p", product_code: "code", description: "Producto corto", category_id: "cat", forecast_status: "INSUFFICIENT" }] }] })) }), { ...emptyFilters, chainId: "a", productId: "p" });
-    await screen.findByText(/Sin forecast elegible: INSUFFICIENT/); expect(screen.getByText("Error de cálculo")).toBeTruthy(); expect(screen.queryByText("H1")).toBeNull();
+    harness(api({ latest: vi.fn(async () => ({ ...job, status: "FAILED", scopes: [{ chain_id: "a", status: "FAILED", error_code: "NO_ELIGIBLE_PRODUCTS", products: [{ product_id: "p", product_code: "code", description: "Producto corto", category_id: "cat", forecast_status: "INSUFFICIENT", history_months: 5, minimum_history_months: 6 }] }] })) }), { ...emptyFilters, chainId: "a", productId: "p" });
+    await screen.findByText(/Sin forecast elegible: INSUFFICIENT/); expect(screen.getByText("Error de cálculo")).toBeTruthy(); expect(screen.getByText(/5 meses de historial consecutivo/)).toBeTruthy(); expect(screen.queryByText("H1")).toBeNull();
   });
   it("errors expose fixed safe codes, not upstream messages", async () => {
     harness(api({ latest: vi.fn(async () => { throw new Error("private upstream message"); }) }));
@@ -93,6 +93,11 @@ describe("E2 Railway browser boundary", () => {
     const client = new RailwayPreviewClient(auth(), "https://backend.example"); expect(await client.latest(null, null)).toBeNull();
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error_code: "SCOPE_FORBIDDEN" }), { status: 403 })));
     await expect(client.result("job", "foreign")).rejects.toThrow("SCOPE_FORBIDDEN");
+  });
+  it("surfaces the backend's safe scope-validation code for a rejected preview", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error_code: "REQUEST_001" }), { status: 400 })));
+    await expect(new RailwayPreviewClient(auth(), "https://backend.example").create(null, "product"))
+      .rejects.toThrow("REQUEST_001");
   });
   it("invalid/upstream response never leaks unrecognized error bodies", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error_code: "private database message" }), { status: 500 })));

@@ -95,6 +95,10 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
     {!client && <p className="text-sm text-slate-500">Conexión operacional pendiente de configuración.</p>}
     {current?.error && <p role="alert" className="text-sm text-rose-700">No fue posible completar la consulta operacional: {current.error}</p>}
     {current?.job && <div role="status" className="rounded-xl border bg-white p-3 text-sm"><span>{humanStatus(current.job.status)}</span>{busy && <ol className="mt-3 flex flex-wrap gap-3 text-xs">{labels.map((label, i) => <li key={label} className={i === stages.indexOf(current.job!.status) ? "font-semibold text-blue-700" : "text-slate-500"}>{i < stages.indexOf(current.job!.status) ? "✓" : i === stages.indexOf(current.job!.status) ? "●" : "○"} {label}</li>)}</ol>}</div>}
+    {current?.job?.status === "FAILED" && selected?.error_code === "NO_ELIGIBLE_PRODUCTS" && <p role="alert" className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">{product?.forecast_status === "INSUFFICIENT" && product.history_months !== undefined
+      ? `${product.description}: ${product.history_months} meses de historial consecutivo después de su primera venta; se requieren ${product.minimum_history_months ?? 6}. Todavía no hay evidencia suficiente para calcular un pronóstico de producto validado.`
+      : "Ningún producto de este alcance cumple todavía los mínimos de historial para un pronóstico validado."}</p>}
+    {current?.job?.status === "FAILED" && selected?.error_code && selected.error_code !== "NO_ELIGIBLE_PRODUCTS" && <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">El cálculo no se completó. Código: {selected.error_code}. No se publicó ningún pronóstico.</p>}
     {!current?.job && !current?.loading && !current?.error && <p className="text-sm text-slate-500">Sin vista previa calculada</p>}
     {stale && <p className="rounded-xl border bg-amber-50 p-3 text-xs text-amber-800">Vista previa desactualizada. Sus métricas retrospectivas no se muestran; el cálculo no se ejecuta automáticamente.</p>}
     <ForecastEnginesTabs value={tab} onChange={setTab}/>

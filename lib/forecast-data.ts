@@ -174,7 +174,26 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
   async getPeriods(chainId?: string | null) {
     let query = this.client.from(publishedPeriodsView).select("period");
     if (chainId) query = query.eq("chain_id", chainId);
-    const result = await query.order("period", { ascending: true }).abortSignal(this.controller.signal);
+    let result = await query.order("period", { ascending: true }).abortSignal(this.controller.signal);
+    if (result.error && !chainId) {
+      // Some hosted PostgREST plans time out on the all-scope DISTINCT view.
+      // Retry the same certified view per authorized scope; never infer gaps.
+      try {
+        const visible = (await this.getVisibleChains()).filter(chain => chain.has_history);
+        if (!visible.length) throw new Error("no_authorized_period_scopes");
+        const scoped: { period: string }[] = [];
+        for (let offset = 0; offset < visible.length; offset += 4) {
+          const pages = await Promise.all(visible.slice(offset, offset + 4).map(chain => this.client
+            .from(publishedPeriodsView).select("period").eq("chain_id", chain.id)
+            .order("period", { ascending: true }).abortSignal(this.controller.signal)));
+          for (const page of pages) {
+            if (page.error || !Array.isArray(page.data)) throw new Error("scoped_period_read_failed");
+            scoped.push(...page.data as { period: string }[]);
+          }
+        }
+        result = { data: scoped, error: null, status: 200, statusText: "OK", success: true, count: null };
+      } catch { /* Preserve the original controlled diagnostic. */ }
+    }
     this.check(result, "getPeriods", publishedPeriodsView, "period_catalog");
     // Never infer months from bounds: a gap remains a gap. The compact view is
     // scope x month; union duplicate months only within this user's RLS read.

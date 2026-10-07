@@ -1,7 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 export type PreviewHorizon = { horizon: number; target_period: string; statistical_value: number; ml_value: number | null; forecast_towell: number; p10: number | null; p50: number; p90: number | null; p95: number | null;
   statistical_model?: string; ml_model?: string | null; model_strategy?: string; classification?: string; forecast_status?: string; certification_status?: string; confidence?: string; band_basis?: string; band_observations?: number };
-export type PreviewProduct = { product_id: string; product_code: string; description: string; category_id: string | null; forecast_status: string; horizons?: PreviewHorizon[]; statistical_model?: string | null; classification?: string | null };
+export type PreviewProduct = { product_id: string; product_code: string; description: string; category_id: string | null; forecast_status: string; history_months?: number; minimum_history_months?: number; horizons?: PreviewHorizon[]; statistical_model?: string | null; classification?: string | null };
 export type RetrospectiveMetrics = { retrospective_wape?: number | null; retrospective_bias?: number | null; retrospective_mae?: number | null; retrospective_rmse?: number | null; retrospective_stability?: number | null };
 export type PreviewCandidate = RetrospectiveMetrics & { family?: "statistical" | "ml"; product_id?: string; model?: string; strategy?: string;
   statistical_weight?: number;
@@ -45,7 +45,7 @@ export interface PreviewClient {
   dispose(): void;
 }
 export class PreviewReadError extends Error { constructor(public code: string) { super(code); } }
-const safeCodes = new Set(["AUTH_REQUIRED", "SCOPE_FORBIDDEN", "NO_ELIGIBLE_PRODUCTS", "INSUFFICIENT_HISTORY", "DATA_READ_FAILED", "TEMPORAL_METADATA_MISSING", "DATA_LEAKAGE_DETECTED", "STATISTICAL_FAILED", "ML_FAILED", "ENSEMBLE_FAILED", "PREVIEW_NOT_FOUND", "PREVIEW_NOT_READY", "RATE_001", "VINTAGE_PERSISTENCE_DISABLED", "OFFICIAL_PUBLICATION_DISABLED", "CHAMPION_PUBLICATION_DISABLED", "REQUIRED_SECRET_MISSING", "VINTAGE_WRITE_FAILED", "DATA_QUALITY_BLOCKED", "LINEAGE_MISMATCH", "HASH_MISMATCH"]);
+const safeCodes = new Set(["AUTH_REQUIRED", "SCOPE_FORBIDDEN", "REQUEST_001", "PREVIEW_DISABLED", "DUPLICATE_OBSERVATION_CONFLICT", "NO_ELIGIBLE_PRODUCTS", "INSUFFICIENT_HISTORY", "DATA_READ_FAILED", "TEMPORAL_METADATA_MISSING", "DATA_LEAKAGE_DETECTED", "STATISTICAL_FAILED", "ML_FAILED", "ENSEMBLE_FAILED", "PREVIEW_NOT_FOUND", "PREVIEW_NOT_READY", "RATE_001", "VINTAGE_PERSISTENCE_DISABLED", "OFFICIAL_PUBLICATION_DISABLED", "CHAMPION_PUBLICATION_DISABLED", "REQUIRED_SECRET_MISSING", "VINTAGE_WRITE_FAILED", "DATA_QUALITY_BLOCKED", "LINEAGE_MISMATCH", "HASH_MISMATCH"]);
 export class RailwayPreviewClient implements PreviewClient {
   private controller = new AbortController();
   constructor(private auth: SupabaseClient, private origin = process.env.NEXT_PUBLIC_FORECAST_API_URL ?? "") {}

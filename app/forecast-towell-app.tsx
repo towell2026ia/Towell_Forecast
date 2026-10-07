@@ -127,7 +127,14 @@ export function GlobalFilters() {
     <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
       <Picker label="Cadena / unidad comercial" value={filters.chainId} onChange={id => setFilters(f => resetForChain(f, id))} options={options} disabled={chains.loading || chains.error} all={profile.global_role === "ADMIN" ? "Todas las cadenas" : "Todas las autorizadas"}/>
       <Picker label="Categoría" value={filters.categoryId} onChange={id => setFilters(f => ({ ...f, categoryId: id, productId: null }))} options={(categories.data ?? []).map(c => ({ id: c.id, name: !filters.chainId && chainMap.has(c.chain_id) ? `${c.name} · ${chainMap.get(c.chain_id)}` : c.name }))} disabled={categories.loading || categories.error}/>
-      <Picker label="Producto" value={filters.productId} onChange={id => setFilters(f => ({ ...f, productId: id }))} options={(products.data ?? []).slice(0, 100).map(p => ({ id: p.id, name: `${p.description} · ${p.product_code}${p.variant_code ? " · " + p.variant_code : ""}` }))} disabled={products.loading || products.error} all="Todos los productos"/>
+      <Picker label="Producto" value={filters.productId} onChange={id => setFilters(f => {
+        if (!id) return { ...f, productId: null };
+        const selected = products.data?.find(p => p.id === id);
+        // Product identity includes its chain. A product picked from "Todas"
+        // must never be sent to Railway without that exact scope.
+        if (selected && f.chainId !== selected.chain_id) return { ...resetForChain(f, selected.chain_id), productId: id };
+        return { ...f, productId: id };
+      })} options={(products.data ?? []).slice(0, 100).map(p => ({ id: p.id, name: `${p.description} · ${p.product_code}${p.variant_code ? " · " + p.variant_code : ""}` }))} disabled={products.loading || products.error} all="Todos los productos"/>
       <div className="space-y-2"><Label htmlFor="product-search">Buscar producto, ITEM, UPC o variante</Label><Input id="product-search" type="search" maxLength={100} value={filters.search} onChange={e => setFilters(f => ({ ...f, search: e.target.value, productId: null }))} placeholder="Buscar en catálogo autorizado"/></div>
     </div>
     <div className="mt-4 grid gap-4 sm:grid-cols-3">
@@ -136,7 +143,7 @@ export function GlobalFilters() {
       <div className="flex items-end gap-4 pb-1"><label className="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" checked={showEmpty} onChange={e => setShowEmpty(e.target.checked)}/>Mostrar scopes sin histórico</label><Button variant="ghost" size="sm" onClick={() => setFilters({ ...emptyFilters })}>Limpiar</Button></div>
     </div>
     {(products.data?.length ?? 0) > 100 && <p className="mt-3 text-sm text-slate-500">{number(products.data!.length)} productos coinciden. Usa la búsqueda para encontrar un producto específico.</p>}
-    {[[chains.error, "las cadenas"], [categories.error, "las categorías"], [products.error, "los productos"], [periods.error, "los periodos"]].map(([failed, control]) => failed && <p key={String(control)} role="alert" className="mt-3 text-sm text-rose-700">No fue posible cargar {control}.</p>)}
+    {[[chains.error, "las cadenas"], [categories.error, "las categorías"], [products.error, "los productos"], [periods.error, "los periodos"]].map(([failed, control]) => failed && <p key={String(control)} role="alert" className="mt-3 text-sm text-rose-700">No fue posible cargar {control}.{control === "los periodos" && repository.getReadDiagnostic?.("getPeriods")?.code ? ` Código ${repository.getReadDiagnostic?.("getPeriods")?.code}.` : ""}</p>)}
   </section>;
 }
 function Intro({ title, copy }: { title: string; copy: string }) { return <div className="mb-5"><h1 className="text-2xl font-semibold tracking-tight text-slate-950 sm:text-3xl">{title}</h1><p className="mt-2 text-sm leading-6 text-slate-500">{copy}</p></div>; }
@@ -160,10 +167,33 @@ function Dashboard() {
       <Card className="border-slate-200 shadow-sm"><CardContent className="p-5"><h2 className="font-semibold">Calidad y nivel de servicio</h2>{quality ? <div className="mt-3 grid gap-3 text-sm sm:grid-cols-2 xl:grid-cols-4"><div><p className="text-slate-500">Calidad de datos</p><p className="font-medium">{quality.data_quality.status}</p></div><div><p className="text-slate-500">Calidad del forecast</p><p className="font-medium">{quality.forecast_quality.status}</p></div><div><p className="text-slate-500">Fill Rate observado</p><p className="font-medium">{quality.service_level.observed_fill_rate === null ? "—" : `${quality.service_level.observed_fill_rate.toFixed(2)}%`}</p><p className="text-xs text-slate-500">Objetivo {quality.service_level.target_fill_rate}% · Brecha {quality.service_level.gap_pp === null ? "—" : `${quality.service_level.gap_pp.toFixed(2)} pp`}</p></div><div><p className="text-slate-500">Publicación</p><p className="font-medium">{quality.publication}</p><p className="text-xs text-slate-500">Simulación logística pendiente</p></div></div> : <p className="mt-2 text-sm text-slate-500">{gates.loading ? "Evaluando calidad…" : gates.error ? "Calidad no disponible para este preview." : "Sin evaluación de calidad para este preview."}</p>}</CardContent></Card>
       {historical.error && <p role="alert" className="text-sm text-rose-700">No fue posible consultar la venta histórica para la gráfica.</p>}
       {customer.error && <p className="text-sm text-slate-500">Fcst Cliente no disponible; no se sustituyen datos ausentes.</p>}
-      <ForecastTraderChart points={points} cutoff={cutoff} visible={seriesVisibility ?? defaultVisibility} onChange={key => setSeriesVisibility?.(v => ({ ...v, [key]: !v[key] }))}/>
-    </> : <p className="rounded-xl border bg-white p-5 text-sm text-slate-500">Selecciona una cadena para ver la gráfica y el desempeño. No se suman scopes padre e hijo en Todas las cadenas.</p>}</div>
+      {historical.loading ? <p role="status" className="rounded-xl border bg-white p-5 text-sm text-slate-500">Preparando gráfica histórica…</p> : points.length ? <ForecastTraderChart points={points} cutoff={cutoff} visible={seriesVisibility ?? defaultVisibility} onChange={key => setSeriesVisibility?.(v => ({ ...v, [key]: !v[key] }))}/> : <p className="rounded-xl border bg-white p-5 text-sm text-slate-500">No hay meses publicados para graficar en este filtro.</p>}
+    </> : <DashboardAllScopesChart scopes={summary.data.byScope} />}</div>
     <Card className="mt-5 border-slate-200 shadow-sm"><CardContent className="p-5"><h2 className="font-semibold">Cobertura por scope</h2><p className="mt-2 text-sm text-slate-500">Los scopes padre e hijo se presentan por separado. El número de observaciones es un conteo de registros, no una suma de cantidades entre niveles.</p><div className="mt-4"><DataTable headers={["Cadena / unidad comercial", "Observaciones"]} rows={summary.data.byScope.map(s => [s.chain.name, number(s.observations)])}/></div></CardContent></Card>
   </>}</div>;
+}
+function DashboardAllScopesChart({ scopes }: { scopes: import("@/lib/supabase/types").Summary["byScope"] }) {
+  const { repository, filters, seriesVisibility, setSeriesVisibility } = useForecastFilters();
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selected = scopes.find(row => row.chain.id === selectedId) ?? scopes[0];
+  const chainId = selected?.chain.id ?? null;
+  const chartFilters = useMemo<Filters>(() => ({ ...filters, chainId, productId: null }), [filters, chainId]);
+  const history = useRead(useCallback(() => chainId ? repository.getForecastHistory?.(chartFilters) ?? Promise.resolve([]) : Promise.resolve([]), [repository, chainId, chartFilters]));
+  const preview = useRead(useCallback(() => chainId ? repository.previews?.latest(chainId, null) ?? Promise.resolve(null) : Promise.resolve(null), [repository, chainId]));
+  const scope = preview.data?.status === "READY_PREVIEW" ? preview.data.scopes.find(row => row.chain_id === chainId) ?? null : null;
+  const validScope = currentRetrospectivePreview(preview.data ?? null, scope) ? scope : null;
+  const cutoff = String(validScope?.issue_period ?? history.data?.at(-1)?.period ?? "");
+  const customer = useRead(useCallback(() => chainId && cutoff ? repository.getCustomerForecast?.(chartFilters, cutoff) ?? Promise.resolve([]) : Promise.resolve([]), [repository, chainId, chartFilters, cutoff]));
+  if (!selected) return <p className="rounded-xl border bg-white p-5 text-sm text-slate-500">No hay un scope con histórico visible para graficar.</p>;
+  const points = traderPoints(history.data ?? [], customer.data ?? [], scopeHorizons(validScope, chartFilters), cutoff, chartFilters);
+  if (!repository.getForecastHistory) return <p className="rounded-xl border bg-white p-5 text-sm text-slate-500">La lectura histórica para la gráfica no está disponible.</p>;
+  return <div className="space-y-3">
+    <div className="rounded-xl border border-slate-200 bg-white p-4"><Picker label="Cadena mostrada en la gráfica" value={chainId} onChange={setSelectedId} options={scopes.map(row => ({ id: row.chain.id, name: row.chain.name }))} all={selected.chain.name}/><p className="mt-2 text-xs text-slate-500">Vista de una cadena a la vez; no se suman scopes padre e hijo. Cambiar la gráfica no ejecuta modelos.</p></div>
+    {history.error && <p role="alert" className="text-sm text-rose-700">No fue posible consultar el histórico de esta gráfica.</p>}
+    {preview.error && <p className="text-xs text-slate-500">La vista previa operacional no está disponible; se conserva el histórico.</p>}
+    {customer.error && <p className="text-xs text-slate-500">Fcst Cliente no disponible; no se sustituyen datos ausentes.</p>}
+    {history.loading ? <p role="status" className="rounded-xl border bg-white p-5 text-sm text-slate-500">Preparando gráfica histórica…</p> : points.length ? <ForecastTraderChart points={points} cutoff={cutoff} visible={seriesVisibility ?? defaultVisibility} onChange={key => setSeriesVisibility?.(value => ({ ...value, [key]: !value[key] }))}/> : <p className="rounded-xl border bg-white p-5 text-sm text-slate-500">No hay meses publicados para graficar en esta cadena.</p>}
+  </div>;
 }
 export function HistoryView() {
   const { repository, filters } = useForecastFilters();

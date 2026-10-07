@@ -11,6 +11,7 @@ export type HistoricalRow = Cursor & { product: Product; chain: string; SALES: n
 export type HistoricalPage = { rows: HistoricalRow[]; next: Cursor | null; observationCount: number };
 export type Summary = { scopeCount: number; productCount: number; observationCount: number; latestPeriod: string | null; byScope: { chain: Chain; observations: number }[] };
 export interface ForecastReadRepository {
+  getReadDiagnostic?(endpoint: "getPeriods"): { code: string; http_status: number } | null;
   getForecastHistory?(filters: Filters): Promise<import("../forecast-chart-data").HistoricalMonth[]>;
   getCustomerForecast?(filters: Filters, issuePeriod: string): Promise<import("../forecast-chart-data").CustomerMonth[]>;
   previews?: import("../forecast-preview").PreviewClient;

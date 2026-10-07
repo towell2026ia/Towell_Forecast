@@ -17,6 +17,7 @@ function fixture(role: Role = "ADMIN"): ForecastReadRepository {
     getCategories: vi.fn(async () => [{ id: "cat-a", chain_id: chain1.id, name: "Categoría desde RLS" }]),
     getProducts: vi.fn(async () => [product]), getPeriods: vi.fn(async () => ["2025-02", "2026-03"]),
     getHistoricalSummary: vi.fn(async () => ({ scopeCount: chains.length, productCount: 1, observationCount: 3, latestPeriod: "2026-03", byScope: chains.map(chain => ({ chain, observations: 3 })) })),
+    getForecastHistory: vi.fn(async () => [{ period: "2026-03", sale: 1, order: 2, delivery: 3 }]),
     getHistoricalObservations: vi.fn(async (_filters, page) => ({ rows: [{ chain_id: chain1.id, product_id: product.id, period: "2026-03-01", chain: chain1.name, product, SALES: 0, ORDER: 12, DELIVERY: null, availability: "UNKNOWN" }], next: page.cursor ? null : { chain_id: chain1.id, product_id: product.id, period: "2026-03-01" }, observationCount: 3 })),
     getProfiles: vi.fn(async () => [profile]), dispose: vi.fn(),
   };
@@ -101,6 +102,14 @@ describe("Multi-chain read-only UI", () => {
     await pick("Producto", "Producto desde RLS · ITEM-ABC");
     expect(screen.getByTestId("filters").textContent).toContain("product-a");
   });
+  it("selecting a product from Todas attaches its authoritative chain before a preview request", async () => {
+    filterHarness(fixture(), <GlobalFilters/>);
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Producto" }).hasAttribute("disabled")).toBe(false));
+    await pick("Producto", "Producto desde RLS · ITEM-ABC");
+    const selected = JSON.parse(screen.getByTestId("filters").textContent ?? "{}") as Filters;
+    expect(selected.chainId).toBe(chain1.id);
+    expect(selected.productId).toBe(product.id);
+  });
   it("UI10 changing chain resets stale product and category", async () => {
     const repo = fixture(); filterHarness(repo, <GlobalFilters/>, { ...emptyFilters, productId: "old", categoryId: "old" });
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Cadena / unidad comercial" }).hasAttribute("disabled")).toBe(false));
@@ -146,6 +155,8 @@ describe("Multi-chain read-only UI", () => {
     render(<ForecastTowellApp profile={{ id: "u", full_name: "Usuario", global_role: "ADMIN", status: "ACTIVE" }} repository={fixture()} onLogout={vi.fn()}/>);
     expect(screen.getByText("Usuarios")).toBeTruthy();
     await screen.findByText(chain2.name);
+    expect(await screen.findByRole("combobox", { name: "Cadena mostrada en la gráfica" })).toBeTruthy();
+    expect(screen.getByRole("img", { name: /Evolución temporal/ })).toBeTruthy();
   });
   it("UI19 users read real profiles; no simulated create button", async () => {
     filterHarness(fixture(), <UsersView/>);

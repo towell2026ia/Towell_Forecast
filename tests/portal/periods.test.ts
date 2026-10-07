@@ -41,6 +41,30 @@ describe("PF compact published period read", () => {
   it("no visible facts returns an empty catalog, not inferred dates", async () => {
     expect(await new SupabaseForecastReadRepository(client([]).sdk, "fixture").getPeriods()).toEqual([]);
   });
+  it("retries a failed all-scope period read by authorized scope without inventing months", async () => {
+    const requests: (string | null)[] = [];
+    const sdk = { from: vi.fn(() => {
+      let chain: string | null = null;
+      const query = {
+        select: () => query, eq: (_field: string, value: string) => { chain = value; return query; },
+        order: () => query, abortSignal: () => query,
+        then: (accept: (value: unknown) => unknown) => {
+          requests.push(chain);
+          return Promise.resolve(chain ? { data: rows.filter(row => row.chain_id === chain), error: null, status: 200 }
+            : { data: null, error: { code: "57014" }, status: 504 }).then(accept);
+        },
+      };
+      return query;
+    }) } as unknown as SupabaseClient;
+    const repo = new SupabaseForecastReadRepository(sdk, "fixture");
+    repo.getVisibleChains = vi.fn(async () => [
+      { id: "a", code: "A", name: "A", status: "ACTIVE", has_history: true, parentId: null, scopeType: null },
+      { id: "b", code: "B", name: "B", status: "ACTIVE", has_history: true, parentId: null, scopeType: null },
+    ]);
+    expect(await repo.getPeriods()).toEqual(["2026-01", "2026-03"]);
+    expect(requests).toEqual([null, "a", "b"]);
+    expect(repo.getReadDiagnostic("getPeriods")?.code).toBe("OK");
+  });
   it("a missing view/permission fails with only the new safe diagnostic", async () => {
     const log = vi.spyOn(console, "info").mockImplementation(() => {}), report = vi.fn();
     const repo = new SupabaseForecastReadRepository(client([], { code: "42501", message: "private upstream bearer" }).sdk, "fixture", report);
