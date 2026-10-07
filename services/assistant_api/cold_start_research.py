@@ -6,6 +6,30 @@ from urllib.parse import urlparse
 import httpx
 
 
+def _failure_reason(exc: Exception) -> str:
+    """Return only a stable category; never echo provider text or credentials."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        try:
+            code = (exc.response.json().get("error") or {}).get("code")
+        except (ValueError, TypeError, AttributeError):
+            code = None
+        if status == 401 or code == "invalid_api_key":
+            return "AUTHENTICATION"
+        if code == "insufficient_quota":
+            return "QUOTA"
+        if status == 429:
+            return "RATE_LIMIT"
+        if status in {403, 404} or code == "model_not_found":
+            return "MODEL_ACCESS"
+        return "REQUEST_REJECTED" if status < 500 else "PROVIDER_ERROR"
+    if isinstance(exc, httpx.TimeoutException):
+        return "TIMEOUT"
+    if isinstance(exc, httpx.HTTPError):
+        return "NETWORK"
+    return "INVALID_RESPONSE"
+
+
 class ColdStartResearch:
     def __init__(self, api_key: str, *, model: str = "gpt-5.5", timeout: float = 15):
         if not api_key.startswith("sk-"):
@@ -31,26 +55,26 @@ class ColdStartResearch:
             result = self._request("POST", "/responses", {"model": self.model,
                 "reasoning": {"effort": "high"}, "background": True,
                 "tools": [{"type": "web_search"}], "max_tool_calls": 3,
-                "max_output_tokens": 900, "input": prompt})
+                "max_output_tokens": 3000, "input": prompt})
             response_id = result.get("id")
             if not isinstance(response_id, str) or not response_id.startswith("resp_"):
-                return {"status": "UNAVAILABLE"}
+                return {"status": "UNAVAILABLE", "reason": "INVALID_RESPONSE"}
             return {"status": "PENDING", "response_id": response_id, "model": self.model}
-        except (httpx.HTTPError, ValueError):
-            return {"status": "UNAVAILABLE"}
+        except (httpx.HTTPError, ValueError) as exc:
+            return {"status": "UNAVAILABLE", "reason": _failure_reason(exc)}
 
     def poll(self, response_id: str) -> dict:
         if not response_id.startswith("resp_") or len(response_id) > 100:
-            return {"status": "UNAVAILABLE"}
+            return {"status": "UNAVAILABLE", "reason": "INVALID_RESPONSE"}
         try:
             result = self._request("GET", "/responses/" + response_id)
-        except (httpx.HTTPError, ValueError):
-            return {"status": "UNAVAILABLE"}
+        except (httpx.HTTPError, ValueError) as exc:
+            return {"status": "UNAVAILABLE", "reason": _failure_reason(exc)}
         status = result.get("status")
         if status in {"queued", "in_progress"}:
             return {"status": "PENDING", "response_id": response_id, "model": self.model}
         if status != "completed":
-            return {"status": "UNAVAILABLE"}
+            return {"status": "UNAVAILABLE", "reason": "INCOMPLETE" if status == "incomplete" else "RESPONSE_FAILED"}
         text, sources = [], []
         for item in result.get("output") or []:
             if item.get("type") != "message":
@@ -67,5 +91,5 @@ class ColdStartResearch:
                         sources.append({"title": str(annotation.get("title") or "Fuente")[:120], "url": url})
         summary = "\n".join(text).strip()
         if not summary:
-            return {"status": "UNAVAILABLE"}
+            return {"status": "UNAVAILABLE", "reason": "EMPTY_RESPONSE"}
         return {"status": "COMPLETED", "summary": summary, "sources": sources[:12], "model": self.model}

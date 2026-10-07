@@ -1,6 +1,6 @@
 export type EngineTab = "summary" | "statistical" | "ml" | "vintages";
 export function ForecastEnginesTabs({ value, onChange }: { value: EngineTab; onChange: (tab: EngineTab) => void }) {
-  const tabs = [["summary", "Resumen"], ["statistical", "Motor Estadístico"], ["ml", "Machine Learning"], ["vintages", "Vintages"]] as const;
+  const tabs = [["summary", "Resumen"], ["statistical", "Motor Estadístico"], ["ml", "Machine Learning"], ["vintages", "Versiones"]] as const;
   return <div role="tablist" aria-label="Detalle de motores" className="flex flex-wrap gap-2 border-b border-slate-200 pb-3">{tabs.map(([id, label], index) => <button type="button" key={id} id={`engine-tab-${id}`} role="tab" tabIndex={value === id ? 0 : -1} aria-selected={value === id} aria-controls={`engine-panel-${id}`} onClick={() => onChange(id)} onKeyDown={event => {
     if (!["ArrowRight", "ArrowLeft", "Home", "End"].includes(event.key)) return;
     event.preventDefault();

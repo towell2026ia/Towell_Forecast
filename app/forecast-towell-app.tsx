@@ -16,7 +16,7 @@ import ForecastAssistant from "./forecast-assistant";
 import ForecastAssistantErrorBoundary from "./forecast-assistant-error-boundary";
 import type { AssistantContext } from "./assistant/assistant-service";
 import { ForecastEnginesView } from "./operational-engines-view";
-import { defaultVisibility, type SeriesVisibility } from "@/lib/forecast-chart-data";
+import { defaultVisibility, scopeProvisionalHorizons, type SeriesVisibility } from "@/lib/forecast-chart-data";
 import { PreviewReadError, type PreviewJob } from "@/lib/forecast-preview";
 import { ForecastTraderChart } from "@/components/forecast/forecast-trader-chart";
 import { scopeHorizons, traderPoints } from "@/lib/forecast-chart-data";
@@ -147,19 +147,20 @@ export function GlobalFilters() {
   </section>;
 }
 function Intro({ title, copy }: { title: string; copy: string }) { return <div className="mb-5"><h1 className="text-2xl font-semibold tracking-tight text-slate-950 sm:text-3xl">{title}</h1><p className="mt-2 text-sm leading-6 text-slate-500">{copy}</p></div>; }
-function Dashboard() {
+export function Dashboard() {
   const { repository, filters, preview, seriesVisibility, setSeriesVisibility } = useForecastFilters();
   const summary = useRead(useCallback(() => repository.getHistoricalSummary(filters), [repository, filters]));
   const scope = filters.chainId ? preview?.result?.scopes.find(s => s.chain_id === filters.chainId) ?? null : null;
   const validScope = currentRetrospectivePreview(preview?.result ?? null, scope) ? scope : null;
-  const cutoff = String(validScope?.issue_period ?? "");
+  const chartScope = validScope ?? (scope?.provisional_cold_start ? scope : null);
+  const cutoff = String(chartScope?.issue_period ?? "");
   const historical = useRead(useCallback(() => filters.chainId ? repository.getForecastHistory?.(filters) ?? Promise.resolve([]) : Promise.resolve([]), [repository, filters]));
   const customer = useRead(useCallback(() => filters.chainId && cutoff ? repository.getCustomerForecast?.(filters, cutoff) ?? Promise.resolve([]) : Promise.resolve([]), [repository, filters, cutoff]));
   const gates = useRead(useCallback(() => filters.chainId && validScope && repository.previews?.qualityGates
     ? repository.previews.qualityGates(filters.chainId) : Promise.resolve(null),
     [repository, filters.chainId, validScope]));
   const quality = gates.data?.dataset_hash === validScope?.dataset_hash ? gates.data : null;
-  const points = traderPoints(historical.data ?? [], customer.data ?? [], scopeHorizons(validScope, filters), cutoff, filters);
+  const points = traderPoints(historical.data ?? [], customer.data ?? [], scopeHorizons(validScope, filters), cutoff, filters, scopeProvisionalHorizons(chartScope, filters));
   return <div><Intro title="Dashboard ejecutivo" copy="Histórico publicado según tu acceso y los filtros seleccionados."/><ReadState loading={summary.loading} error={summary.error} empty={summary.data?.observationCount === 0}/>{summary.data && <>
     <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">{[["Scopes con histórico", number(summary.data.scopeCount)], ["Productos visibles", number(summary.data.productCount)], ["Observaciones", number(summary.data.observationCount)], ["Último periodo disponible", summary.data.latestPeriod ?? "Sin dato"]].map(([label, value]) => <Card key={label} className="border-slate-200 shadow-sm"><CardContent className="p-5"><p className="text-sm text-slate-500">{label}</p><p className="mt-4 text-3xl font-semibold tracking-tight text-slate-950">{value}</p></CardContent></Card>)}</div>
     <div className="mt-5 space-y-5">{filters.chainId ? <>

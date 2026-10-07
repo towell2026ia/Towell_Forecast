@@ -86,6 +86,11 @@ describe("E2 operational UI", () => {
     expect(document.body.textContent).toContain("no a Oxford");
     expect(document.body.textContent).not.toContain("Fcst Towell H1");
     expect(screen.queryByText("Historial insuficiente")).toBeNull();
+    expect(screen.getByRole("button", { name: "Estimación provisional" }).hasAttribute("disabled")).toBe(false);
+    await userEvent.click(screen.getByRole("tab", { name: "Motor Estadístico" }));
+    expect(screen.getByRole("button", { name: "Estimación provisional" })).toBeTruthy();
+    await userEvent.click(screen.getByRole("tab", { name: "Machine Learning" }));
+    expect(screen.getByRole("button", { name: "Estimación provisional" })).toBeTruthy();
   });
   it("does not attribute scope-level models to an ineligible selected product", async () => {
     const scope = { ...job.scopes[0], products: [{ product_id: "p", product_code: "code", description: "Producto corto", category_id: "cat", forecast_status: "INSUFFICIENT", history_months: 5, minimum_history_months: 6, horizons: [] }] };
@@ -143,15 +148,15 @@ describe("E3 vintages and quality boundary", () => {
   it("keeps the Vintages tab read only while all E3 flags are off", async () => {
     const client = api({ vintages: vi.fn(async () => []), vintageCapabilities: vi.fn(async () => ({ vintage_persistence: false, official_publication: false, champion_publication: false })) });
     harness(client);
-    await userEvent.click(screen.getByRole("tab", { name: "Vintages" }));
-    await screen.findByText("Todavía no hay vintages en este scope.");
+    await userEvent.click(screen.getByRole("tab", { name: "Versiones" }));
+    await screen.findByText("Todavía no hay versiones guardadas para este scope.");
     expect(client.vintages).toHaveBeenCalledWith("a");
     expect(screen.queryByRole("button", { name: "Crear candidato de vintage" })).toBeNull();
   });
   it("viewer never sees candidate or freeze actions even if backend capability is on", async () => {
     const client = api({ vintages: vi.fn(async () => []), vintageCapabilities: vi.fn(async () => ({ vintage_persistence: true, official_publication: false, champion_publication: false })) });
     harness(client, { ...emptyFilters, chainId: "a" }, "VIEWER");
-    await userEvent.click(screen.getByRole("tab", { name: "Vintages" }));
+    await userEvent.click(screen.getByRole("tab", { name: "Versiones" }));
     await screen.findByText(/Tu acceso es de consulta/);
     expect(screen.queryByRole("button", { name: "Crear candidato de vintage" })).toBeNull();
   });
@@ -165,7 +170,7 @@ describe("E3 vintages and quality boundary", () => {
         inputs: [{ id: "input-1", monthly_observation_id: "observation-1", evidence_mode: "RETROSPECTIVE_TRAINING" }],
         gates: [{ id: "gate-1", gate_type: "DATA_QUALITY", status: "DATA_QUALITY_WARNING", policy_version: "E3-GATES-1.0.0", observed: null, target: null }] })) });
     harness(client);
-    await userEvent.click(screen.getByRole("tab", { name: "Vintages" }));
+    await userEvent.click(screen.getByRole("tab", { name: "Versiones" }));
     await screen.findByText("v1");
     await userEvent.click(screen.getByRole("button", { name: "Ver detalle" }));
     await screen.findByText(/sha-synthetic/);

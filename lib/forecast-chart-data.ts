@@ -3,7 +3,7 @@ import type { PreviewAggregate, PreviewHorizon, PreviewScope } from "./forecast-
 
 export type HistoricalMonth = { period: string; sale: number | null; order: number | null; delivery: number | null };
 export type CustomerMonth = { period: string; value: number };
-export type TraderPoint = HistoricalMonth & { client: number | null; towell: number | null; statistical: number | null; ml: number | null; p10: number | null; p50: number | null; p90: number | null; p95: number | null; band90: [number, number] | null; band95: [number, number] | null };
+export type TraderPoint = HistoricalMonth & { client: number | null; towell: number | null; statistical: number | null; ml: number | null; provisional: number | null; p10: number | null; p50: number | null; p90: number | null; p95: number | null; band90: [number, number] | null; band95: [number, number] | null };
 export type Horizon = PreviewHorizon | PreviewAggregate;
 export const series = [
   { key: "sale", label: "Venta", color: "#175cd3" },
@@ -13,10 +13,11 @@ export const series = [
   { key: "towell", label: "Fcst Towell", color: "#0f172a" },
   { key: "statistical", label: "Estadístico", color: "#64748b", dash: "7 5" },
   { key: "ml", label: "Machine Learning", color: "#c026d3", dash: "2 4" },
+  { key: "provisional", label: "Estimación provisional", color: "#ea580c", dash: "6 4" },
 ] as const;
 export type SeriesKey = typeof series[number]["key"];
 export type SeriesVisibility = Record<SeriesKey, boolean>;
-export const defaultVisibility: SeriesVisibility = { sale: true, order: true, delivery: true, client: false, towell: true, statistical: false, ml: false };
+export const defaultVisibility: SeriesVisibility = { sale: true, order: true, delivery: true, client: false, towell: true, statistical: false, ml: false, provisional: true };
 export const quantity = (value: number | null | undefined) => value == null || !Number.isFinite(value) ? "—" : value.toLocaleString("es-MX", { maximumFractionDigits: 2 });
 export const percent = (value: number | null | undefined) => value == null || !Number.isFinite(value) ? "—" : `${quantity(value)}%`;
 export function periodLabel(period: string | null | undefined) {
@@ -40,13 +41,24 @@ export function scopeHorizons(scope: PreviewScope | null, filters: Filters): Hor
   if (rows.length !== 12 || new Set(rows.map(r => r.horizon)).size !== 12 || rows.some(r => r.horizon < 1 || r.horizon > 12 || r.target_period !== addMonth(scope.issue_period!, r.horizon) || !Number.isFinite(r.forecast_towell))) return [];
   return [...rows].sort((a, b) => a.horizon - b.horizon);
 }
-export function traderPoints(history: HistoricalMonth[], customer: CustomerMonth[], horizons: Horizon[], cutoff: string | undefined, filters: Filters): TraderPoint[] {
+export type ProvisionalHorizon = { horizon: number; target_period: string; value: number };
+export function scopeProvisionalHorizons(scope: PreviewScope | null, filters: Filters): ProvisionalHorizon[] {
+  if (!scope || !filters.chainId || !filters.productId || scope.chain_id !== filters.chainId || !scope.issue_period ||
+      !scope.products?.some(product => product.product_id === filters.productId && (!filters.categoryId || product.category_id === filters.categoryId))) return [];
+  const rows = scope.provisional_cold_start?.horizons ?? [];
+  if (rows.length !== 12 || new Set(rows.map(row => row.horizon)).size !== 12 || rows.some(row =>
+    row.horizon < 1 || row.horizon > 12 || row.target_period !== addMonth(scope.issue_period!, row.horizon) ||
+    !Number.isFinite(row.value) || row.value < 0)) return [];
+  return [...rows].sort((a, b) => a.horizon - b.horizon);
+}
+export function traderPoints(history: HistoricalMonth[], customer: CustomerMonth[], horizons: Horizon[], cutoff: string | undefined, filters: Filters, provisional: ProvisionalHorizon[] = []): TraderPoint[] {
   if (!filters.chainId) return [];
   const historical = history.filter(r => (!cutoff || r.period <= cutoff) && (!filters.periodRange[0] || r.period >= filters.periodRange[0]) && (!filters.periodRange[1] || r.period <= filters.periodRange[1]));
   const byPeriod = new Map(historical.map(r => [r.period, r]));
   const fcst = new Map(horizons.map(r => [r.target_period, r]));
+  const provisionalByPeriod = new Map(provisional.map(r => [r.target_period, r.value]));
   const client = new Map(customer.filter(r => cutoff && (r.period > cutoff || (!filters.periodRange[0] || r.period >= filters.periodRange[0]) && (!filters.periodRange[1] || r.period <= filters.periodRange[1]))).map(r => [r.period, r.value]));
-  const dates = [...byPeriod.keys(), ...fcst.keys(), ...client.keys(), ...(cutoff ? [cutoff] : [])].sort();
+  const dates = [...byPeriod.keys(), ...fcst.keys(), ...provisionalByPeriod.keys(), ...client.keys(), ...(cutoff ? [cutoff] : [])].sort();
   if (!dates.length) return [];
   const points: TraderPoint[] = [];
   for (let period = dates[0], count = 0; period <= dates.at(-1)! && count < 2400; period = addMonth(period, 1), count++) {
@@ -55,6 +67,7 @@ export function traderPoints(history: HistoricalMonth[], customer: CustomerMonth
     const bands = product && [product.p10, product.p50, product.p90, product.p95].every(v => v !== null && Number.isFinite(v)) && product.p10! <= product.p50 && product.p50 <= product.p90! && product.p90! <= product.p95!;
     points.push({ period, sale: actual?.sale ?? null, order: actual?.order ?? null, delivery: actual?.delivery ?? null,
       client: client.get(period) ?? null, towell: future?.forecast_towell ?? null, statistical: future && "statistical_value" in future ? future.statistical_value ?? null : null, ml: future && "ml_value" in future ? future.ml_value ?? null : null,
+      provisional: provisionalByPeriod.get(period) ?? null,
       p10: product?.p10 ?? null, p50: product?.p50 ?? null, p90: product?.p90 ?? null, p95: product?.p95 ?? null,
       band90: bands ? [product.p10!, product.p90!] : null, band95: bands ? [product.p10!, product.p95!] : null });
   }

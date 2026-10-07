@@ -2,12 +2,12 @@ import React, { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import ForecastTowellApp, { ForecastFiltersContext } from "../../app/forecast-towell-app";
+import ForecastTowellApp, { Dashboard, ForecastFiltersContext } from "../../app/forecast-towell-app";
 import { ForecastEnginesView } from "../../app/operational-engines-view";
 import { EngineComparison } from "../../components/forecast/engine-comparison";
 import { ForecastTraderChart, TraderTooltip } from "../../components/forecast/forecast-trader-chart";
 import { ForecastHorizonTable } from "../../components/forecast/forecast-horizon-table";
-import { addMonth, defaultVisibility, scopeHorizons, traderPoints, type SeriesVisibility } from "../../lib/forecast-chart-data";
+import { addMonth, defaultVisibility, scopeHorizons, scopeProvisionalHorizons, traderPoints, type SeriesVisibility } from "../../lib/forecast-chart-data";
 import { emptyFilters, type Filters, type ForecastReadRepository } from "../../lib/supabase/types";
 import type { PreviewClient, PreviewJob, PreviewScope } from "../../lib/forecast-preview";
 import { readFileSync } from "node:fs";
@@ -37,6 +37,42 @@ function Harness({ api, f = filters }: { api: PreviewClient; f?: Filters }) {
   return <ForecastFiltersContext.Provider value={{ repository: repo, profile: { id: "user", full_name: "Test", status: "ACTIVE", global_role: "ADMIN" }, filters: f, setFilters: vi.fn(), seriesVisibility: visibility, setSeriesVisibility: setVisibility }}><ForecastEnginesView scope="Scope real"/></ForecastFiltersContext.Provider>;
 }
 describe("Trader chart V01–V16", () => {
+  it("cold-start H1–H12 draws a distinct provisional line without inventing official, Stat or ML forecasts", () => {
+    const provisionalScope: PreviewScope = { chain_id: "chain", issue_period: "2026-07", status: "PROVISIONAL_COLD_START",
+      products: [{ product_id: "product", product_code: "code", description: "Oxford", category_id: "cat", forecast_status: "INSUFFICIENT" }],
+      provisional_cold_start: { status: "PROVISIONAL_COLD_START", observed_months: 5, model: "analog", confidence: "LIMITED", comparables: [],
+        target_wape: null, point_in_time_certified: false, official_publication: false, champion_eligible: false, retrospective_peer_metrics: {},
+        horizons: Array.from({ length: 12 }, (_, i) => ({ horizon: i + 1, target_period: addMonth("2026-07", i + 1), value: 100 + i })) } };
+    const provisional = scopeProvisionalHorizons(provisionalScope, filters);
+    const chart = traderPoints(history, [], [], provisionalScope.issue_period, filters, provisional);
+    expect(provisional).toHaveLength(12);
+    expect(chart.find(point => point.period === "2026-08")).toMatchObject({ provisional: 100, towell: null, statistical: null, ml: null });
+    expect(chart.at(-1)?.period).toBe("2027-07");
+    render(<ForecastTraderChart points={chart} cutoff={provisionalScope.issue_period} visible={defaultVisibility} onChange={vi.fn()}/>);
+    expect(screen.getByTestId("line-provisional")).toBeTruthy();
+    expect(screen.queryByTestId("line-towell")).toBeNull();
+    expect(screen.getByText(/no es Fcst Towell oficial/)).toBeTruthy();
+    expect(scopeProvisionalHorizons(provisionalScope, { ...filters, productId: "foreign" })).toEqual([]);
+    expect(scopeProvisionalHorizons(provisionalScope, { ...filters, chainId: "foreign" })).toEqual([]);
+    expect(scopeProvisionalHorizons({ ...provisionalScope, provisional_cold_start: { ...provisionalScope.provisional_cold_start!, horizons: provisional.slice(1) } }, filters)).toEqual([]);
+  });
+  it("Inicio reuses the selected product's provisional preview and graphs it without running models", async () => {
+    const provisionalScope: PreviewScope = { chain_id: "chain", issue_period: "2026-07", status: "PROVISIONAL_COLD_START",
+      products: [{ product_id: "product", product_code: "code", description: "Oxford", category_id: "cat", forecast_status: "INSUFFICIENT" }],
+      provisional_cold_start: { status: "PROVISIONAL_COLD_START", observed_months: 5, model: "analog", confidence: "LIMITED", comparables: [],
+        target_wape: null, point_in_time_certified: false, official_publication: false, champion_eligible: false, retrospective_peer_metrics: {},
+        horizons: Array.from({ length: 12 }, (_, i) => ({ horizon: i + 1, target_period: addMonth("2026-07", i + 1), value: 100 + i })) } };
+    const provisionalJob: PreviewJob = { ...job, status: "READY_PROVISIONAL", scopes: [provisionalScope] };
+    const api = client();
+    const repo = { previews: api, getHistoricalSummary: vi.fn(async () => ({ scopeCount: 1, productCount: 1, observationCount: 2,
+      latestPeriod: "2026-07", byScope: [{ chain: { id: "chain", name: "Cadena", code: "chain", status: "ACTIVE", has_history: true, parentId: null, scopeType: "PARENT_CHAIN" }, observations: 2 }] })),
+      getForecastHistory: vi.fn(async () => history), getCustomerForecast: vi.fn(async () => []) } as unknown as ForecastReadRepository;
+    render(<ForecastFiltersContext.Provider value={{ repository: repo, profile: { id: "user", full_name: "Test", status: "ACTIVE", global_role: "ADMIN" },
+      filters, setFilters: vi.fn(), seriesVisibility: defaultVisibility, preview: { key: "chain/product", result: provisionalJob, job: provisionalJob, error: "", loading: false } }}><Dashboard/></ForecastFiltersContext.Provider>);
+    await waitFor(() => expect(screen.getByTestId("line-provisional")).toBeTruthy());
+    expect(screen.queryByTestId("line-towell")).toBeNull();
+    expect(api.create).not.toHaveBeenCalled();
+  });
   it.each([["sale", 0], ["order", 5], ["delivery", 4]])("V01/V02/V03/V05 observed %s and literal zero", (key, value) => { expect(points()[0][key as "sale"]).toBe(value); });
   it("V04 absent month and absent metric stay null", () => { expect(points().find(p => p.period === "2026-06")?.sale).toBeNull(); expect(points().find(p => p.period === "2026-07")?.order).toBeNull(); });
   it("V06/V07/V08 cutoff and H1/H12 derive from E2", () => { expect(points().find(p => p.period === "2026-08")?.towell).toBe(14); expect(points().at(-1)?.period).toBe("2027-07"); render(<ForecastTraderChart points={points()} cutoff={scope.issue_period} visible={defaultVisibility} onChange={vi.fn()}/>); expect(screen.getByTestId("cutoff").getAttribute("data-cutoff")).toBe("2026-07"); });

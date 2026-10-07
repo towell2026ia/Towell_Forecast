@@ -15,7 +15,7 @@ export type ProvisionalColdStart = { status: "PROVISIONAL_COLD_START"; observed_
   comparables: { product_id: string; description: string }[]; target_wape: null; point_in_time_certified: false; official_publication: false; champion_eligible: false;
   retrospective_peer_metrics: Record<string, { wape: number; bias: number; observations: number; products: number }>;
   horizons: { horizon: number; target_period: string; value: number }[];
-  research?: { status: "DISABLED" | "PENDING" | "COMPLETED" | "UNAVAILABLE"; summary?: string; sources?: { title: string; url: string }[] } };
+  research?: { status: "DISABLED" | "PENDING" | "COMPLETED" | "UNAVAILABLE"; reason?: string; summary?: string; sources?: { title: string; url: string }[] } };
 export type PreviewScope = { chain_id: string; chain_name?: string; status: string; error_code?: string; issue_period?: string; latest_actual_period?: string; engine_version?: string; mode?: string; preview_id?: string;
   dataset_hash?: string;
   provisional_cold_start?: ProvisionalColdStart;
