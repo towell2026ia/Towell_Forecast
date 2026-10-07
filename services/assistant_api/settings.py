@@ -60,6 +60,7 @@ class Settings:
     local_research_enabled: bool = True
     local_intent_router_enabled: bool = True
     openai_enabled: bool = False
+    openai_api_key: str = field(default="", repr=False)
     supabase_enabled: bool = False
     operational_preview_enabled: bool = False
     vintage_persistence_enabled: bool = False
@@ -116,8 +117,13 @@ class Settings:
             raise ValueError("provider_disabled")
         if self.persistence_mode not in {"local", "hosted-volume"}:
             raise ValueError("invalid_persistence_mode")
-        if any((self.openai_enabled, self.voice_enabled, self.deep_research_enabled)):
+        if self.voice_enabled:
             raise ValueError("future_provider_disabled")
+        if self.openai_enabled != self.deep_research_enabled:
+            raise ValueError("future_provider_disabled")
+        if self.deep_research_enabled and (not self.operational_preview_enabled or
+                                           not self.openai_api_key.startswith("sk-")):
+            raise ValueError("cold_start_research_configuration_missing")
         if self.official_publication_enabled and not self.vintage_persistence_enabled:
             raise ValueError("official_requires_vintage_persistence")
         if self.champion_publication_enabled and not self.vintage_persistence_enabled:
@@ -213,6 +219,7 @@ class Settings:
             local_research_enabled=flag("LOCAL_RESEARCH_ENABLED", True),
             local_intent_router_enabled=flag("LOCAL_INTENT_ROUTER_ENABLED", True),
             openai_enabled=flag("OPENAI_ENABLED", False),
+            openai_api_key=env.get("OPENAI_API_KEY", ""),
             supabase_enabled=flag("SUPABASE_ENABLED", False),
             operational_preview_enabled=flag("OPERATIONAL_PREVIEW_ENABLED", False),
             vintage_persistence_enabled=flag("VINTAGE_PERSISTENCE_ENABLED", False),

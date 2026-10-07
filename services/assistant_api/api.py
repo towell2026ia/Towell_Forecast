@@ -87,6 +87,7 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
     config = (settings or Settings.from_env()).validate()
     from .supabase_access import PreviewError, SupabaseReadClient
     from .operational_preview import OperationalMultiChainForecastRunner
+    from .cold_start_research import ColdStartResearch
     from .preview_api import mount_preview_routes
     from .vintage_service import SupabaseForecastWriteRepository
     supabase_client = SupabaseReadClient(config.supabase_url, config.supabase_publishable_key,
@@ -137,8 +138,10 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
     app.state.persistence = storage
     app.state.telemetry = metrics
     app.state.auth = identity
+    researcher = ColdStartResearch(config.openai_api_key, timeout=config.external_timeout_seconds) \
+        if config.deep_research_enabled else None
     preview_runner = OperationalMultiChainForecastRunner(storage, concurrency=config.max_forecast_runs,
-        environment=config.app_env) if config.operational_preview_enabled else None
+        environment=config.app_env, researcher=researcher) if config.operational_preview_enabled else None
     app.state.preview_runner = preview_runner
     if preview_runner:
         write_repository = SupabaseForecastWriteRepository(config.supabase_url, config.supabase_service_role_key,

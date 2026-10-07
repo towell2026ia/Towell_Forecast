@@ -2,7 +2,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { periodLabel, quantity, type Horizon } from "@/lib/forecast-chart-data";
 import type { PreviewScope } from "@/lib/forecast-preview";
 
-export const humanStatus = (status?: string) => ({ COMPLETED: "Disponible", NOT_ELIGIBLE: "No elegible", READY_PREVIEW: "Vista previa lista", PREVIEW: "Vista previa lista", FAILED: "Error de cálculo", PROVISIONAL_TEMPORAL_UNKNOWN: "Evidencia temporal no certificada", ACTIVE: "Activo", COLD_START: "Arranque reciente", INSUFFICIENT: "Histórico insuficiente", INACTIVE: "Inactivo", "PRE-LAUNCH": "Prelanzamiento" }[status ?? ""] ?? status ?? "Sin vista previa calculada");
+export const humanStatus = (status?: string) => ({ COMPLETED: "Disponible", NOT_ELIGIBLE: "No elegible", READY_PREVIEW: "Vista previa lista", READY_PROVISIONAL: "Estimación provisional lista", PROVISIONAL_COLD_START: "Estimación provisional", PREVIEW: "Vista previa lista", FAILED: "Error de cálculo", PROVISIONAL_TEMPORAL_UNKNOWN: "Evidencia temporal no certificada", ACTIVE: "Activo", COLD_START: "Arranque reciente", INSUFFICIENT: "Histórico insuficiente", INACTIVE: "Inactivo", "PRE-LAUNCH": "Prelanzamiento" }[status ?? ""] ?? status ?? "Sin vista previa calculada");
 export function coverage(count?: number, total?: number) { return total == null || count == null ? "—" : `${count} de ${total}${total > 0 ? ` · ${(100 * count / total).toFixed(1)}%` : ""}`; }
 export function ForecastSummary({ scope, horizons }: { scope: PreviewScope | null; horizons: Horizon[] }) {
   const first = horizons.find(h => h.horizon === 1);

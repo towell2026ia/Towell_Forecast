@@ -106,6 +106,13 @@ def mount_preview_routes(app, config, identity, data, runner, limiter, write_rep
             uuid_value(product_id)
         return runner.result(job_id, principal, product_id)
 
+    @router.get("/preview-runs/{job_id}/research")
+    def research(job_id: str, request: Request, authorization: str | None = Header(default=None)):
+        principal, _ = actor(request, authorization)
+        if not limiter.allow("research-poll:" + principal.user_id, config.forecast_rate_per_minute):
+            raise PreviewError("RATE_001", 429)
+        return runner.poll_research(job_id, principal)
+
     @router.get("/preview-latest")
     def latest(request: Request, chain_id: str | None = None, product_id: str | None = None,
                mode: str = "RETROSPECTIVE_TRAINING", authorization: str | None = Header(default=None)):

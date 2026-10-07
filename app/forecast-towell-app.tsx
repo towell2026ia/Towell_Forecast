@@ -73,7 +73,7 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
     let alive = true;
     const client = repository.previews;
     if (client) void client.latest(filters.chainId, filters.productId).then(job => {
-      if (alive) setPreview(previous => previous?.key === previewKey && (previous.loading || previous.job) ? previous : { key: previewKey, result: job?.status === "READY_PREVIEW" ? job : null, job, error: "", loading: false });
+      if (alive) setPreview(previous => previous?.key === previewKey && (previous.loading || previous.job) ? previous : { key: previewKey, result: ["READY_PREVIEW", "READY_PROVISIONAL"].includes(job?.status ?? "") ? job : null, job, error: "", loading: false });
     }).catch(error => {
       if (alive) setPreview(previous => previous?.key === previewKey && (previous.loading || previous.job) ? previous : { key: previewKey, result: null, job: null, error: error instanceof PreviewReadError ? error.code : "DATA_READ_FAILED", loading: false });
     });

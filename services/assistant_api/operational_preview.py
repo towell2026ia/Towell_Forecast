@@ -14,11 +14,12 @@ from services.forecast_engine.engine import (
     normalize_dataset, normalize_retrospective_dataset,
 )
 from .persistence import content_hash
+from .cold_start import launch_forecast
 from .supabase_access import PreviewError
 from services.forecast_engine.registry import ChampionRegistry
 
 PREVIEW_ENGINE_VERSION = ENGINE_VERSION + "-operational-preview-2-retrospective"
-STAGES = ("QUEUED", "READING_DATA", "ELIGIBILITY", "STATISTICAL", "ML", "ENSEMBLE", "QUALITY_GATE", "READY_PREVIEW", "NOT_ELIGIBLE", "FAILED")
+STAGES = ("QUEUED", "READING_DATA", "ELIGIBILITY", "STATISTICAL", "ML", "ENSEMBLE", "QUALITY_GATE", "READY_PREVIEW", "READY_PROVISIONAL", "NOT_ELIGIBLE", "FAILED")
 
 
 def snapshot_hash(rows: list[dict[str, Any]]) -> str:
@@ -31,11 +32,12 @@ def snapshot_hash(rows: list[dict[str, Any]]) -> str:
 
 class OperationalMultiChainForecastRunner:
     def __init__(self, persistence, *, concurrency: int = 2, environment: str = "production",
-                 policy: ForecastPolicy | None = None, compute=forecast_dataset):
+                 policy: ForecastPolicy | None = None, compute=forecast_dataset, researcher=None):
         if not 1 <= concurrency <= 2:
             raise ValueError("operational_concurrency_maximum_two")
         self.persistence, self.environment = persistence, environment
         self.policy, self.compute = policy or ForecastPolicy(), compute
+        self.researcher = researcher
         self.champions = ChampionRegistry(persistence)
         self._executor = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="preview")
         self._lock = threading.Lock()
@@ -43,7 +45,7 @@ class OperationalMultiChainForecastRunner:
         self._child_locks: dict[str, threading.Lock] = {}
         # Tokens are deliberately not recoverable from SQLite. Interrupted jobs fail safely.
         for job in persistence.list("forecast_jobs"):
-            if job.get("kind") == "OPERATIONAL_PREVIEW" and job.get("status") not in {"READY_PREVIEW", "NOT_ELIGIBLE", "FAILED"}:
+            if job.get("kind") == "OPERATIONAL_PREVIEW" and job.get("status") not in {"READY_PREVIEW", "READY_PROVISIONAL", "NOT_ELIGIBLE", "FAILED"}:
                 job.update(status="FAILED", error_code="PREVIEW_INTERRUPTED")
                 persistence.put("forecast_jobs", job["job_id"], job)
 
@@ -90,9 +92,14 @@ class OperationalMultiChainForecastRunner:
                     if issue > latest:
                         raise PreviewError("DATA_LEAKAGE_DETECTED")
                     rows = [row for row in rows if row["period"] <= issue]
+                    chain_rows = rows
                     if job["product_id"]:
                         rows = [row for row in rows if row["product_id"] == job["product_id"]]
                     if not rows:
+                        provisional = self._cold_start_scope(provider, job, chain, issue, chain_rows)
+                        if provisional:
+                            job["scopes"].append(provisional)
+                            continue
                         raise PreviewError("INSUFFICIENT_HISTORY")
                     digest = snapshot_hash(rows)
                     key = content_hash({"dataset_hash": digest, "chain": chain, "product": job["product_id"],
@@ -132,6 +139,10 @@ class OperationalMultiChainForecastRunner:
                                 "forecast_status": state, "history_months": 0,
                                 "minimum_history_months": self.policy.min_product_observations})
                     if not eligible:
+                        provisional = self._cold_start_scope(provider, job, chain, issue, chain_rows, states, counts)
+                        if provisional:
+                            job["scopes"].append(provisional)
+                            continue
                         job["scopes"].append({"chain_id": chain, "issue_period": issue, "status": "NOT_ELIGIBLE",
                             "error_code": "NO_ELIGIBLE_PRODUCTS", "products": states, "eligibility": counts})
                         continue
@@ -165,12 +176,44 @@ class OperationalMultiChainForecastRunner:
             job["cuts_status"] = "CUTS_NOT_ALIGNED" if len(cuts) > 1 else "ALIGNED"
             job["finished_at"] = time.time()
             final = ("READY_PREVIEW" if any(scope["status"] == "READY_PREVIEW" for scope in job["scopes"])
+                     else "READY_PROVISIONAL" if any(scope["status"] == "PROVISIONAL_COLD_START" for scope in job["scopes"])
                      else "NOT_ELIGIBLE" if job["scopes"] and all(scope["status"] == "NOT_ELIGIBLE" for scope in job["scopes"])
                      else "FAILED")
             self._stage(job, final)
         finally:
             with self._lock:
                 self._active.pop(signature, None)
+
+    def _cold_start_scope(self, provider, job, chain, issue, chain_rows, states=None, counts=None):
+        if not job["product_id"] or job["mode"] != "RETROSPECTIVE_TRAINING" or not hasattr(provider, "product_catalog"):
+            return None
+        target = next((item for item in provider.product_catalog(chain)
+                       if item.get("id") == job["product_id"] and item.get("chain_id") == chain), None)
+        if target is None:
+            return None
+        proposal = launch_forecast(chain_rows, issue, target)
+        if proposal is None:
+            return None
+        category_name = next((row.get("category_name") for row in chain_rows
+                              if row.get("category_id") == target.get("category_id") and row.get("category_name")), "")
+        proposal["research"] = {"status": "DISABLED"}
+        if self.researcher:
+            try:
+                proposal["research"] = self.researcher.start(description=target.get("description") or "",
+                    category=category_name, chain_name=chain_rows[0].get("chain_name", ""))
+            except Exception:
+                proposal["research"] = {"status": "UNAVAILABLE"}
+        product = next((item for item in states or [] if item["product_id"] == job["product_id"]), None)
+        if product is None:
+            product = {"product_id": target["id"], "product_code": target["product_code"],
+                       "variant_code": target.get("variant_code") or "", "description": target["description"],
+                       "category_id": target.get("category_id"), "forecast_status": "INSUFFICIENT",
+                       "history_months": 0, "minimum_history_months": self.policy.min_product_observations}
+        return {"chain_id": chain, "chain_name": chain_rows[0].get("chain_name", chain),
+                "issue_period": issue, "latest_actual_period": issue, "status": "PROVISIONAL_COLD_START",
+                "dataset_hash": snapshot_hash(chain_rows), "products": [product],
+                "eligibility": counts or {"evaluated": 1, "visible_products": 1, "stat_eligible": 0, "ml_eligible": 0},
+                "provisional_cold_start": proposal}
 
     def _result(self, chain, issue, latest, digest, job, states, counts, result):
         audit = result["model_audit"] if result else {}
@@ -257,9 +300,28 @@ class OperationalMultiChainForecastRunner:
             raise PreviewError("SCOPE_FORBIDDEN", 403)
         return job
 
+    def poll_research(self, job_id, principal):
+        job = self.get_job(job_id, principal)
+        if job["status"] != "READY_PROVISIONAL":
+            raise PreviewError("PREVIEW_NOT_READY", 409)
+        with self._lock:
+            job = self.get_job(job_id, principal)
+            for scope in job["scopes"]:
+                proposal = scope.get("provisional_cold_start") or {}
+                current = proposal.get("research") or {}
+                if not self.researcher and current.get("status") == "PENDING":
+                    proposal["research"] = {"status": "UNAVAILABLE"}
+                if self.researcher and current.get("status") == "PENDING":
+                    try:
+                        proposal["research"] = self.researcher.poll(current.get("response_id", ""))
+                    except Exception:
+                        proposal["research"] = {"status": "UNAVAILABLE"}
+            self.persistence.put("forecast_jobs", job_id, job)
+        return self.result(job_id, principal, job.get("product_id"))
+
     def result(self, job_id, principal, product_id=None):
         job = self.get_job(job_id, principal)
-        if job["status"] not in {"READY_PREVIEW", "NOT_ELIGIBLE"}:
+        if job["status"] not in {"READY_PREVIEW", "READY_PROVISIONAL", "NOT_ELIGIBLE"}:
             raise PreviewError("PREVIEW_NOT_READY", 409)
         return self._render_result(job, job["scopes"], product_id)
 
@@ -277,15 +339,15 @@ class OperationalMultiChainForecastRunner:
             raise PreviewError("SCOPE_FORBIDDEN", 403)
         jobs = [job for job in self.persistence.list("forecast_jobs") if job.get("kind") == "OPERATIONAL_PREVIEW"
                 and job["mode"] == mode
-                and (job.get("creator_id") == principal.user_id or job["status"] == "READY_PREVIEW")
+                and (job.get("creator_id") == principal.user_id or job["status"] in {"READY_PREVIEW", "READY_PROVISIONAL"})
                 and job.get("product_id") in {None, product_id}
-                and (chain_id in job["chain_ids"] and (job["status"] == "READY_PREVIEW" or
+                and (chain_id in job["chain_ids"] and (job["status"] in {"READY_PREVIEW", "READY_PROVISIONAL"} or
                     set(job["chain_ids"]).issubset(principal.chain_ids)) if chain_id else
                     job.get("all_scopes", False) and set(job["chain_ids"]).issubset(principal.chain_ids))]
         if not jobs:
             raise PreviewError("PREVIEW_NOT_FOUND", 404)
         newest = max(jobs, key=lambda job: job["created_at"])
-        if newest["status"] in {"READY_PREVIEW", "NOT_ELIGIBLE"}:
+        if newest["status"] in {"READY_PREVIEW", "READY_PROVISIONAL", "NOT_ELIGIBLE"}:
             references = [scope for scope in newest["scopes"] if not chain_id or scope["chain_id"] == chain_id]
             return self._render_result(newest, references, product_id)
         return newest

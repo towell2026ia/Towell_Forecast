@@ -11,8 +11,14 @@ export type PreviewCandidate = RetrospectiveMetrics & { family?: "statistical" |
   retrospective_validation_by_horizon?: { horizon: number; wape: number | null }[]; by_horizon?: { horizon: number; wape: number | null; bias?: number | null; observations?: number }[];
   by_product?: PreviewCandidate[]; evaluation_mode?: string; classification?: string; origins?: number; training_samples?: number; validation_observations?: number; trainable?: boolean; validated?: boolean; selected?: boolean; operational_ready?: boolean };
 export type PreviewAggregate = { level: "category" | "chain"; key: string; horizon: number; target_period: string; forecast_towell: number; statistical_value?: number; ml_value?: number | null };
+export type ProvisionalColdStart = { status: "PROVISIONAL_COLD_START"; observed_months: number; model: string; confidence: "LOW" | "LIMITED";
+  comparables: { product_id: string; description: string }[]; target_wape: null; point_in_time_certified: false; official_publication: false; champion_eligible: false;
+  retrospective_peer_metrics: Record<string, { wape: number; bias: number; observations: number; products: number }>;
+  horizons: { horizon: number; target_period: string; value: number }[];
+  research?: { status: "DISABLED" | "PENDING" | "COMPLETED" | "UNAVAILABLE"; summary?: string; sources?: { title: string; url: string }[] } };
 export type PreviewScope = { chain_id: string; chain_name?: string; status: string; error_code?: string; issue_period?: string; latest_actual_period?: string; engine_version?: string; mode?: string; preview_id?: string;
   dataset_hash?: string;
+  provisional_cold_start?: ProvisionalColdStart;
   eligibility?: Record<string, number>; evaluation_mode?: string; statistical?: { status: string; models: Record<string, number>; candidates: PreviewCandidate[]; scope_candidates?: PreviewCandidate[]; selected_metrics?: PreviewCandidate; available_candidates?: string[]; retrospective_wape: number | null; retrospective_bias: number | null };
   ml?: { status: string; training_samples: number; training_products?: number; features?: string[]; leader: string | null; candidates: PreviewCandidate[]; trained_candidates?: PreviewCandidate[]; available_candidates?: string[]; retrospective_wape: number | null; retrospective_bias: number | null };
   selection?: { published_champion: { version: string } | null; preview_leader: PreviewCandidate | null; preview_challenger: PreviewCandidate | null; no_degradation: boolean | null; automatic_promotion: false }; products?: PreviewProduct[]; aggregates?: PreviewAggregate[]; certification_status?: string };
@@ -34,6 +40,7 @@ export interface PreviewClient {
   create(chainId: string | null, productId: string | null): Promise<PreviewJob>;
   status(jobId: string): Promise<PreviewJob>;
   result(jobId: string, productId?: string | null): Promise<PreviewJob>;
+  research?(jobId: string): Promise<PreviewJob>;
   latest(chainId: string | null, productId: string | null): Promise<PreviewJob | null>;
   qualityGates?(chainId: string): Promise<QualityGates>;
   vintages?(chainId: string): Promise<VintageSummary[]>;
@@ -66,6 +73,7 @@ export class RailwayPreviewClient implements PreviewClient {
   create(chainId: string | null, productId: string | null) { return this.request("/api/forecast/preview-runs", { chain_id: chainId, product_id: productId, objective: "Venta", issue_period: null, mode: "RETROSPECTIVE_TRAINING" }); }
   status(jobId: string) { return this.request(`/api/forecast/preview-runs/${encodeURIComponent(jobId)}`); }
   result(jobId: string, productId?: string | null) { return this.request(`/api/forecast/preview-runs/${encodeURIComponent(jobId)}/result${productId ? `?product_id=${encodeURIComponent(productId)}` : ""}`); }
+  research(jobId: string) { return this.request(`/api/forecast/preview-runs/${encodeURIComponent(jobId)}/research`); }
   async latest(chainId: string | null, productId: string | null) {
     const params = new URLSearchParams(); if (chainId) params.set("chain_id", chainId); if (productId) params.set("product_id", productId);
     try { return await this.request(`/api/forecast/preview-latest?${params}`); }

@@ -257,7 +257,7 @@ class JobTests(unittest.TestCase):
     def wait(self, job):
         for _ in range(1600):
             result = self.runner.get_job(job["job_id"], self.actor)
-            if result["status"] in {"READY_PREVIEW", "NOT_ELIGIBLE", "FAILED"}:
+            if result["status"] in {"READY_PREVIEW", "READY_PROVISIONAL", "NOT_ELIGIBLE", "FAILED"}:
                 return result
             time.sleep(.025)
         self.fail("job timeout")
@@ -304,6 +304,75 @@ class JobTests(unittest.TestCase):
         self.assertEqual(job["scopes"][0]["error_code"], "NO_ELIGIBLE_PRODUCTS")
         self.assertEqual(job["scopes"][0]["products"][0]["history_months"], 5)
         self.assertEqual(self.storage.list("forecast_previews"), [])
+
+    def test_recent_product_gets_provisional_ml_path_without_official_writes(self):
+        from services.assistant_api.test_cold_start import corpus, target
+        class Launch:
+            def records(inner, **kwargs):
+                return corpus()
+            def product_catalog(inner, chain):
+                return [target()]
+        job = self.wait(self.runner.submit(Launch(), self.actor, chain_ids=[A], product_id=target()["id"]))
+        self.assertEqual(job["status"], "READY_PROVISIONAL")
+        proposal = job["scopes"][0]["provisional_cold_start"]
+        self.assertEqual(len(proposal["horizons"]), 12)
+        self.assertEqual(proposal["observed_months"], 5)
+        self.assertIsNone(proposal["target_wape"])
+        self.assertEqual(self.runner.latest(self.actor, A, target()["id"])["status"], "READY_PROVISIONAL")
+        self.assertEqual(self.storage.list("forecast_previews"), [])
+        for entity in ("forecast_vintages", "champion_registry", "normalized_observations"):
+            self.assertEqual(self.storage.list(entity), [])
+
+    def test_research_is_scoped_optional_and_never_changes_provisional_quantities(self):
+        from services.assistant_api.test_cold_start import corpus, target
+        class Launch:
+            def records(inner, **kwargs):
+                return corpus()
+            def product_catalog(inner, chain):
+                return [target()]
+        class Research:
+            def start(inner, **kwargs):
+                return {"status": "PENDING", "response_id": "resp_fixture"}
+            def poll(inner, response_id):
+                self.assertEqual(response_id, "resp_fixture")
+                return {"status": "COMPLETED", "summary": "Fuente pública", "sources": []}
+        self.runner.close()
+        self.runner = OperationalMultiChainForecastRunner(self.storage, researcher=Research())
+        job = self.wait(self.runner.submit(Launch(), self.actor, chain_ids=[A], product_id=target()["id"]))
+        proposal = job["scopes"][0]["provisional_cold_start"]
+        original_horizons = proposal["horizons"]
+        self.assertEqual(proposal["research"]["status"], "PENDING")
+        revoked = replace(self.actor, chain_ids=frozenset())
+        with self.assertRaisesRegex(PreviewError, "SCOPE_FORBIDDEN"):
+            self.runner.poll_research(job["job_id"], revoked)
+        result = self.runner.poll_research(job["job_id"], self.actor)
+        updated = result["scopes"][0]["provisional_cold_start"]
+        self.assertEqual(updated["research"]["status"], "COMPLETED")
+        self.assertEqual(updated["horizons"], original_horizons)
+        self.assertEqual(self.storage.list("forecast_previews"), [])
+
+    def test_research_route_requires_verified_jwt_and_scoped_job(self):
+        config = replace(Settings(), data_provider="supabase", supabase_enabled=True,
+            operational_preview_enabled=True, supabase_url=URL, supabase_publishable_key=KEY,
+            ai_assistant_api_enabled=False, state_dir=Path(self.temp.name))
+        case = ProviderTests(); case.setUp()
+        self.storage.put("forecast_jobs", "OPJ-research-test", {"job_id": "OPJ-research-test",
+            "kind": "OPERATIONAL_PREVIEW", "status": "READY_PROVISIONAL", "creator_id": USER,
+            "chain_ids": [A], "product_id": PRODUCT, "mode": "RETROSPECTIVE_TRAINING",
+            "scopes": [{"chain_id": A, "status": "PROVISIONAL_COLD_START",
+                "provisional_cold_start": {"research": {"status": "DISABLED"}, "horizons": []}}]})
+        app = create_app(settings=config, persistence=self.storage, provider=SupabaseDataProvider(case.client),
+            auth_provider=SupabaseAuthProvider(case.client))
+        route = "/api/forecast/preview-runs/OPJ-research-test/research"
+        with TestClient(app) as client:
+            self.assertEqual(client.get(route).status_code, 401)
+            self.assertEqual(client.get(route, headers={"X-User-Role": "admin"}).status_code, 401)
+            viewer = {"Authorization": "Bearer " + jwt("VIEWER")}
+            self.assertEqual(client.get(route, headers=viewer).status_code, 200)
+            foreign_job = self.storage.get("forecast_jobs", "OPJ-research-test")
+            foreign_job["chain_ids"] = [B]
+            self.storage.put("forecast_jobs", "OPJ-research-test", foreign_job)
+            self.assertEqual(client.get(route, headers=viewer).status_code, 403)
 
     def test_hash_literal_deterministic_and_context_sensitive(self):
         rows = fixture(3)

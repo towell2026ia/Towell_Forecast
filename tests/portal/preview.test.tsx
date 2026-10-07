@@ -74,6 +74,19 @@ describe("E2 operational UI", () => {
     await userEvent.click(screen.getByRole("tab", { name: /Machine Learning/ }));
     expect(screen.getByText(/No se ejecutó Machine Learning/)).toBeTruthy();
   });
+  it("shows H1-H12 cold start separately from official forecast and target WAPE", async () => {
+    const provisional: PreviewJob = { ...job, status: "READY_PROVISIONAL", scopes: [{ chain_id: "a", status: "PROVISIONAL_COLD_START", issue_period: "2026-07", products: [{ product_id: "p", product_code: "code", description: "Oxford", category_id: "cat", forecast_status: "INSUFFICIENT", history_months: 5, minimum_history_months: 6 }],
+      provisional_cold_start: { status: "PROVISIONAL_COLD_START", observed_months: 5, model: "ml_random_forest", confidence: "LOW", comparables: [{ product_id: "peer", description: "Comparable" }], target_wape: null, point_in_time_certified: false, official_publication: false, champion_eligible: false,
+        retrospective_peer_metrics: { baseline: { wape: 41, bias: 4, observations: 12, products: 1 }, ml_random_forest: { wape: 28, bias: 2, observations: 12, products: 1 } },
+        horizons: Array.from({ length: 12 }, (_, i) => ({ horizon: i + 1, target_period: i < 5 ? `2026-${String(i + 8).padStart(2, "0")}` : `2027-${String(i - 4).padStart(2, "0")}`, value: 100 + i })), research: { status: "DISABLED" } } }] };
+    harness(api({ latest: vi.fn(async () => provisional) }), { ...emptyFilters, chainId: "a", productId: "p" });
+    await screen.findByRole("region", { name: "Estimación provisional cold start" });
+    expect(screen.getAllByText("H12").length).toBeGreaterThan(0);
+    expect(screen.getByText("28%")).toBeTruthy();
+    expect(document.body.textContent).toContain("no a Oxford");
+    expect(document.body.textContent).not.toContain("Fcst Towell H1");
+    expect(screen.queryByText("Historial insuficiente")).toBeNull();
+  });
   it("does not attribute scope-level models to an ineligible selected product", async () => {
     const scope = { ...job.scopes[0], products: [{ product_id: "p", product_code: "code", description: "Producto corto", category_id: "cat", forecast_status: "INSUFFICIENT", history_months: 5, minimum_history_months: 6, horizons: [] }] };
     harness(api({ latest: vi.fn(async () => ({ ...job, scopes: [scope] })) }), { ...emptyFilters, chainId: "a", productId: "p" });
