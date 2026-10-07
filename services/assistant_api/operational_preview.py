@@ -18,7 +18,7 @@ from .supabase_access import PreviewError
 from services.forecast_engine.registry import ChampionRegistry
 
 PREVIEW_ENGINE_VERSION = ENGINE_VERSION + "-operational-preview-2-retrospective"
-STAGES = ("QUEUED", "READING_DATA", "ELIGIBILITY", "STATISTICAL", "ML", "ENSEMBLE", "QUALITY_GATE", "READY_PREVIEW", "FAILED")
+STAGES = ("QUEUED", "READING_DATA", "ELIGIBILITY", "STATISTICAL", "ML", "ENSEMBLE", "QUALITY_GATE", "READY_PREVIEW", "NOT_ELIGIBLE", "FAILED")
 
 
 def snapshot_hash(rows: list[dict[str, Any]]) -> str:
@@ -43,7 +43,7 @@ class OperationalMultiChainForecastRunner:
         self._child_locks: dict[str, threading.Lock] = {}
         # Tokens are deliberately not recoverable from SQLite. Interrupted jobs fail safely.
         for job in persistence.list("forecast_jobs"):
-            if job.get("kind") == "OPERATIONAL_PREVIEW" and job.get("status") not in {"READY_PREVIEW", "FAILED"}:
+            if job.get("kind") == "OPERATIONAL_PREVIEW" and job.get("status") not in {"READY_PREVIEW", "NOT_ELIGIBLE", "FAILED"}:
                 job.update(status="FAILED", error_code="PREVIEW_INTERRUPTED")
                 persistence.put("forecast_jobs", job["job_id"], job)
 
@@ -132,7 +132,7 @@ class OperationalMultiChainForecastRunner:
                                 "forecast_status": state, "history_months": 0,
                                 "minimum_history_months": self.policy.min_product_observations})
                     if not eligible:
-                        job["scopes"].append({"chain_id": chain, "issue_period": issue, "status": "FAILED",
+                        job["scopes"].append({"chain_id": chain, "issue_period": issue, "status": "NOT_ELIGIBLE",
                             "error_code": "NO_ELIGIBLE_PRODUCTS", "products": states, "eligibility": counts})
                         continue
                     with self._lock:
@@ -164,7 +164,10 @@ class OperationalMultiChainForecastRunner:
             cuts = {scope.get("issue_period") for scope in job["scopes"] if scope.get("issue_period")}
             job["cuts_status"] = "CUTS_NOT_ALIGNED" if len(cuts) > 1 else "ALIGNED"
             job["finished_at"] = time.time()
-            self._stage(job, "READY_PREVIEW" if any(scope["status"] == "READY_PREVIEW" for scope in job["scopes"]) else "FAILED")
+            final = ("READY_PREVIEW" if any(scope["status"] == "READY_PREVIEW" for scope in job["scopes"])
+                     else "NOT_ELIGIBLE" if job["scopes"] and all(scope["status"] == "NOT_ELIGIBLE" for scope in job["scopes"])
+                     else "FAILED")
+            self._stage(job, final)
         finally:
             with self._lock:
                 self._active.pop(signature, None)
@@ -256,7 +259,7 @@ class OperationalMultiChainForecastRunner:
 
     def result(self, job_id, principal, product_id=None):
         job = self.get_job(job_id, principal)
-        if job["status"] != "READY_PREVIEW":
+        if job["status"] not in {"READY_PREVIEW", "NOT_ELIGIBLE"}:
             raise PreviewError("PREVIEW_NOT_READY", 409)
         return self._render_result(job, job["scopes"], product_id)
 
@@ -282,7 +285,7 @@ class OperationalMultiChainForecastRunner:
         if not jobs:
             raise PreviewError("PREVIEW_NOT_FOUND", 404)
         newest = max(jobs, key=lambda job: job["created_at"])
-        if newest["status"] == "READY_PREVIEW":
+        if newest["status"] in {"READY_PREVIEW", "NOT_ELIGIBLE"}:
             references = [scope for scope in newest["scopes"] if not chain_id or scope["chain_id"] == chain_id]
             return self._render_result(newest, references, product_id)
         return newest

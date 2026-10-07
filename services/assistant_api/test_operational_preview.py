@@ -257,7 +257,7 @@ class JobTests(unittest.TestCase):
     def wait(self, job):
         for _ in range(1600):
             result = self.runner.get_job(job["job_id"], self.actor)
-            if result["status"] in {"READY_PREVIEW", "FAILED"}:
+            if result["status"] in {"READY_PREVIEW", "NOT_ELIGIBLE", "FAILED"}:
                 return result
             time.sleep(.025)
         self.fail("job timeout")
@@ -284,11 +284,15 @@ class JobTests(unittest.TestCase):
             def records(inner, **kwargs):
                 return fixture(3)
         job = self.wait(self.runner.submit(Short(), self.actor, chain_ids=[A]))
-        self.assertEqual(job["status"], "FAILED")
+        self.assertEqual(job["status"], "NOT_ELIGIBLE")
         self.assertEqual(job["scopes"][0]["error_code"], "NO_ELIGIBLE_PRODUCTS")
         self.assertEqual(job["scopes"][0]["products"][0]["history_months"], 3)
         self.assertEqual(job["scopes"][0]["products"][0]["minimum_history_months"], 6)
         self.assertEqual(self.storage.list("forecast_previews"), [])
+        rendered = self.runner.result(job["job_id"], self.actor)
+        self.assertEqual(rendered["status"], "NOT_ELIGIBLE")
+        self.assertEqual(rendered["scopes"][0]["products"][0]["horizons"], [])
+        self.assertEqual(self.runner.latest(self.actor, A)["status"], "NOT_ELIGIBLE")
 
     def test_two_prelaunch_zero_months_do_not_make_five_sales_months_eligible(self):
         class ShortLaunch:
@@ -296,7 +300,7 @@ class JobTests(unittest.TestCase):
                 return [{**row, "period": add_month("2026-01", index), "value": 0 if index < 2 else 2500 + index}
                         for index, row in enumerate(fixture(7)[:7])]
         job = self.wait(self.runner.submit(ShortLaunch(), self.actor, chain_ids=[A], product_id=PRODUCT))
-        self.assertEqual(job["status"], "FAILED")
+        self.assertEqual(job["status"], "NOT_ELIGIBLE")
         self.assertEqual(job["scopes"][0]["error_code"], "NO_ELIGIBLE_PRODUCTS")
         self.assertEqual(job["scopes"][0]["products"][0]["history_months"], 5)
         self.assertEqual(self.storage.list("forecast_previews"), [])

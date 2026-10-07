@@ -60,7 +60,26 @@ describe("E2 operational UI", () => {
   });
   it("safe failed state with insufficient product does not display fake forecast zero", async () => {
     harness(api({ latest: vi.fn(async () => ({ ...job, status: "FAILED", scopes: [{ chain_id: "a", status: "FAILED", error_code: "NO_ELIGIBLE_PRODUCTS", products: [{ product_id: "p", product_code: "code", description: "Producto corto", category_id: "cat", forecast_status: "INSUFFICIENT", history_months: 5, minimum_history_months: 6 }] }] })) }), { ...emptyFilters, chainId: "a", productId: "p" });
-    await screen.findByText(/Sin forecast elegible: INSUFFICIENT/); expect(screen.getByText("Error de cálculo")).toBeTruthy(); expect(screen.getByText(/5 meses de historial consecutivo/)).toBeTruthy(); expect(screen.queryByText("H1")).toBeNull();
+    await screen.findByText(/5 meses de venta consecutivos/); expect(screen.getByText("Historial insuficiente")).toBeTruthy();
+    expect(screen.queryByText("Error de cálculo")).toBeNull(); expect(screen.queryByText("Comparativa ejecutiva")).toBeNull();
+    expect(screen.queryByText("H1")).toBeNull();
+  });
+  it("new not-eligible outcome is terminal and leaves no empty model tables", async () => {
+    harness(api({ latest: vi.fn(async () => ({ ...job, status: "NOT_ELIGIBLE", scopes: [{ chain_id: "a", status: "NOT_ELIGIBLE", error_code: "NO_ELIGIBLE_PRODUCTS", products: [{ product_id: "p", product_code: "code", description: "Producto corto", category_id: "cat", forecast_status: "INSUFFICIENT", history_months: 5, minimum_history_months: 6 }] }] })) }), { ...emptyFilters, chainId: "a", productId: "p" });
+    await screen.findByText("Historial insuficiente");
+    expect(screen.getByRole("button", { name: "Calcular vista previa" }).hasAttribute("disabled")).toBe(false);
+    await userEvent.click(screen.getByRole("tab", { name: /Motor Estadístico/ }));
+    expect(screen.getByText(/No se ejecutó el motor estadístico/)).toBeTruthy();
+    expect(screen.queryByText("WAPE retro")).toBeNull();
+    await userEvent.click(screen.getByRole("tab", { name: /Machine Learning/ }));
+    expect(screen.getByText(/No se ejecutó Machine Learning/)).toBeTruthy();
+  });
+  it("does not attribute scope-level models to an ineligible selected product", async () => {
+    const scope = { ...job.scopes[0], products: [{ product_id: "p", product_code: "code", description: "Producto corto", category_id: "cat", forecast_status: "INSUFFICIENT", history_months: 5, minimum_history_months: 6, horizons: [] }] };
+    harness(api({ latest: vi.fn(async () => ({ ...job, scopes: [scope] })) }), { ...emptyFilters, chainId: "a", productId: "p" });
+    await screen.findByText("Historial insuficiente");
+    expect(screen.queryByText("12.5%")).toBeNull();
+    expect(screen.queryByText("Comparativa ejecutiva")).toBeNull();
   });
   it("errors expose fixed safe codes, not upstream messages", async () => {
     harness(api({ latest: vi.fn(async () => { throw new Error("private upstream message"); }) }));

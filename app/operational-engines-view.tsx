@@ -44,7 +44,7 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
   useEffect(() => { revision.current += 1; running.current = false; }, [key]);
   const jobId = current?.job?.job_id, status = current?.job?.status;
   useEffect(() => {
-    if (!client || !jobId || !status || ["READY_PREVIEW", "FAILED"].includes(status)) return;
+    if (!client || !jobId || !status || ["READY_PREVIEW", "NOT_ELIGIBLE", "FAILED"].includes(status)) return;
     let alive = true; let timer: ReturnType<typeof setTimeout>;
     const version = revision.current, id = jobId;
     async function poll() {
@@ -52,8 +52,8 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
         const job = await client!.status(id);
         const result = job.status === "READY_PREVIEW" ? await client!.result(id, filters.productId) : null;
         if (!alive || version !== revision.current) return;
-        setPreview(previous => previous?.key === key ? { ...previous, job, result: result ?? previous.result, error: "", loading: false } : previous);
-        if (!["READY_PREVIEW", "FAILED"].includes(job.status)) timer = setTimeout(poll, 2500);
+        setPreview(previous => previous?.key === key ? { ...previous, job, result: job.status === "READY_PREVIEW" ? result ?? previous.result : ["NOT_ELIGIBLE", "FAILED"].includes(job.status) ? null : previous.result, error: "", loading: false } : previous);
+        if (!["READY_PREVIEW", "NOT_ELIGIBLE", "FAILED"].includes(job.status)) timer = setTimeout(poll, 2500);
       } catch (error) { if (alive && version === revision.current) setPreview(previous => previous?.key === key ? { ...previous, error: safeError(error) } : previous); }
     }
     timer = setTimeout(poll, 1500);
@@ -68,10 +68,10 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
     catch (error) { if (revision.current === version) setPreview(previous => ({ key, job: null, result: previous?.key === key ? previous.result : null, error: safeError(error), loading: false })); }
     finally { if (revision.current === version) running.current = false; }
   }
-  const busy = current?.loading || Boolean(current?.job && !["READY_PREVIEW", "FAILED"].includes(current.job.status));
-  const scopes = current?.result?.scopes ?? current?.job?.scopes ?? [];
+  const busy = current?.loading || Boolean(current?.job && !["READY_PREVIEW", "NOT_ELIGIBLE", "FAILED"].includes(current.job.status));
+  const scopes = current?.job && ["NOT_ELIGIBLE", "FAILED"].includes(current.job.status) ? current.job.scopes : current?.result?.scopes ?? current?.job?.scopes ?? [];
   const selected = filters.chainId ? scopes.find(s => s.chain_id === filters.chainId) ?? null : null;
-  const stale = Boolean(current?.result && selected && !currentRetrospectivePreview(current.result, selected));
+  const stale = Boolean(current?.result && selected?.status === "PREVIEW" && !currentRetrospectivePreview(current.result, selected));
   const cutoff = selected?.issue_period;
   const historyKey = `${JSON.stringify(filters)}/${cutoff ?? ""}`;
   useEffect(() => {
@@ -87,35 +87,38 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
   const horizons = scopeHorizons(stale ? null : selected, filters);
   const points = traderPoints(actual?.rows ?? [], actual?.customer ?? [], horizons, cutoff, filters);
   const product = selected?.products?.find(p => p.product_id === filters.productId);
-  const previous = Boolean(busy && current?.result || current?.result && current.job?.status === "FAILED");
+  const noEligible = selected?.error_code === "NO_ELIGIBLE_PRODUCTS" || Boolean(filters.productId && product &&
+    ["INSUFFICIENT", "COLD_START", "PRE-LAUNCH", "INACTIVE"].includes(product.forecast_status) && !product.horizons?.length);
+  const previous = Boolean(busy && current?.result);
   return <section className="space-y-5">
     <div className="flex flex-wrap items-start justify-between gap-3"><div><h1 className="text-2xl font-semibold tracking-tight">Motores de Forecast</h1><p className="mt-2 text-sm text-slate-500">{scope}{filters.categoryId && ` · ${actual?.categoryName ?? "Categoría seleccionada"}`} · {product?.description ?? "Todos los productos"} · Venta</p><p className="mt-1 text-xs text-slate-500">Datos reales hasta: {selected?.latest_actual_period ?? cutoff ?? "corte independiente por scope"} · Preview retrospectivo</p></div><Button onClick={() => void run()} disabled={!client || profile.global_role === "VIEWER" || busy}>{busy ? "Calculando vista previa…" : "Calcular vista previa"}</Button></div>
     <p className="border-l-2 border-blue-200 pl-3 text-xs leading-5 text-slate-500">Vista previa retrospectiva. Los datos históricos están certificados en valor, pero no en fecha original de disponibilidad; las métricas no constituyen certificación point-in-time.</p>
     {profile.global_role === "VIEWER" && <p className="text-sm text-slate-500">Sólo consulta: no tienes permiso para iniciar corridas.</p>}
     {!client && <p className="text-sm text-slate-500">Conexión operacional pendiente de configuración.</p>}
     {current?.error && <p role="alert" className="text-sm text-rose-700">No fue posible completar la consulta operacional: {current.error}</p>}
-    {current?.job && <div role="status" className="rounded-xl border bg-white p-3 text-sm"><span>{humanStatus(current.job.status)}</span>{busy && <ol className="mt-3 flex flex-wrap gap-3 text-xs">{labels.map((label, i) => <li key={label} className={i === stages.indexOf(current.job!.status) ? "font-semibold text-blue-700" : "text-slate-500"}>{i < stages.indexOf(current.job!.status) ? "✓" : i === stages.indexOf(current.job!.status) ? "●" : "○"} {label}</li>)}</ol>}</div>}
-    {current?.job?.status === "FAILED" && selected?.error_code === "NO_ELIGIBLE_PRODUCTS" && <p role="alert" className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">{product?.forecast_status === "INSUFFICIENT" && product.history_months !== undefined
-      ? `${product.description}: ${product.history_months} meses de historial consecutivo después de su primera venta; se requieren ${product.minimum_history_months ?? 6}. Todavía no hay evidencia suficiente para calcular un pronóstico de producto validado.`
-      : "Ningún producto de este alcance cumple todavía los mínimos de historial para un pronóstico validado."}</p>}
+    {current?.job && <div role="status" className="rounded-xl border bg-white p-3 text-sm"><span>{noEligible ? "Historial insuficiente" : humanStatus(current.job.status)}</span>{busy && <ol className="mt-3 flex flex-wrap gap-3 text-xs">{labels.map((label, i) => <li key={label} className={i === stages.indexOf(current.job!.status) ? "font-semibold text-blue-700" : "text-slate-500"}>{i < stages.indexOf(current.job!.status) ? "✓" : i === stages.indexOf(current.job!.status) ? "●" : "○"} {label}</li>)}</ol>}</div>}
+    {noEligible && <p role="status" className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">{product?.forecast_status === "INSUFFICIENT" && product.history_months !== undefined
+      ? `${product.description}: ${product.history_months} meses de venta consecutivos después de su primera venta; el pronóstico validado requiere ${product.minimum_history_months ?? 6}. No se ejecutaron los modelos estadísticos ni ML para este producto. Una estimación cold start necesitará validación separada antes de mostrarse.`
+      : product ? `${product.description}: ${humanStatus(product.forecast_status)}. No hay pronóstico validado ni métricas retrospectivas de este producto.`
+      : "Ningún producto de este alcance cumple todavía los mínimos de historial para un pronóstico validado. No se generaron cifras."}</p>}
     {current?.job?.status === "FAILED" && selected?.error_code && selected.error_code !== "NO_ELIGIBLE_PRODUCTS" && <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">El cálculo no se completó. Código: {selected.error_code}. No se publicó ningún pronóstico.</p>}
     {!current?.job && !current?.loading && !current?.error && <p className="text-sm text-slate-500">Sin vista previa calculada</p>}
     {stale && <p className="rounded-xl border bg-amber-50 p-3 text-xs text-amber-800">Vista previa desactualizada. Sus métricas retrospectivas no se muestran; el cálculo no se ejecuta automáticamente.</p>}
     <ForecastEnginesTabs value={tab} onChange={setTab}/>
     {tab === "vintages" && <div role="tabpanel" id="engine-panel-vintages" aria-labelledby="engine-tab-vintages"><VintagesPanel key={filters.chainId ?? "all"} chainId={filters.chainId}/></div>}
-    {tab === "statistical" && <div role="tabpanel" id="engine-panel-statistical" aria-labelledby="engine-tab-statistical"><StatisticalEngineDetail scope={stale ? null : selected} scopes={stale ? [] : scopes} filters={filters} historical={actual?.rows ?? []} historyError={actual?.error} cutsStatus={current?.result?.cuts_status ?? current?.job?.cuts_status} compareTowell={compareTowell} onCompare={() => setCompareTowell(v => !v)}/></div>}
-    {tab === "ml" && <div role="tabpanel" id="engine-panel-ml" aria-labelledby="engine-tab-ml"><MLEngineDetail scope={stale ? null : selected} scopes={stale ? [] : scopes} filters={filters} historical={actual?.rows ?? []} horizons={horizons} historyError={actual?.error} cutsStatus={current?.result?.cuts_status ?? current?.job?.cuts_status}/></div>}
+    {tab === "statistical" && <div role="tabpanel" id="engine-panel-statistical" aria-labelledby="engine-tab-statistical">{noEligible ? <p className="rounded-xl border bg-white p-5 text-sm text-slate-600">No se ejecutó el motor estadístico: el producto no reúne el historial mínimo. No hay WAPE, Bias ni pronóstico que mostrar.</p> : <StatisticalEngineDetail scope={stale ? null : selected} scopes={stale ? [] : scopes} filters={filters} historical={actual?.rows ?? []} historyError={actual?.error} cutsStatus={current?.result?.cuts_status ?? current?.job?.cuts_status} compareTowell={compareTowell} onCompare={() => setCompareTowell(v => !v)}/>}</div>}
+    {tab === "ml" && <div role="tabpanel" id="engine-panel-ml" aria-labelledby="engine-tab-ml">{noEligible ? <p className="rounded-xl border bg-white p-5 text-sm text-slate-600">No se ejecutó Machine Learning para este producto. No se atribuyen métricas de otros productos a Oxford.</p> : <MLEngineDetail scope={stale ? null : selected} scopes={stale ? [] : scopes} filters={filters} historical={actual?.rows ?? []} horizons={horizons} historyError={actual?.error} cutsStatus={current?.result?.cuts_status ?? current?.job?.cuts_status}/>}</div>}
     {tab === "summary" && <div role="tabpanel" id="engine-panel-summary" aria-labelledby="engine-tab-summary" className="space-y-5">{filters.chainId ? <>
-      <ForecastSummary scope={selected} horizons={horizons}/>
+      {!noEligible && <ForecastSummary scope={selected} horizons={horizons}/>}
       {product && <p className="text-sm text-slate-500">{product.description} · {humanStatus(product.forecast_status)}{!horizons.length && ` · Sin forecast elegible: ${product.forecast_status}`}</p>}
       {actual?.error && <p role="alert" className="text-sm text-rose-700">No fue posible consultar el histórico para la gráfica.</p>}
       {!actual && <p className="text-xs text-slate-500">Consultando histórico…</p>}
       {actual?.customerError && <p className="text-xs text-slate-500">Fcst Cliente: consulta no disponible. No se sustituyen datos ausentes.</p>}
       {filters.search && !filters.productId && <p className="text-xs text-slate-500">El histórico refleja la búsqueda. Selecciona un producto para comparar su forecast; E2 no entrega un agregado de la búsqueda.</p>}
       <ForecastTraderChart points={points} cutoff={cutoff} visible={visible} onChange={series => setVisible(v => ({ ...v, [series]: !v[series] }))} previous={previous}/>
-      {selected && !stale && <EngineComparison scope={selected} horizons={horizons} productId={filters.productId}/>}
-      <ExecutiveComparison points={points} cutoff={cutoff}/>
-      <ForecastHorizonTable horizons={horizons} product={Boolean(filters.productId)}/>
+      {selected && !stale && !noEligible && <EngineComparison scope={selected} horizons={horizons} productId={filters.productId}/>}
+      {!noEligible && <ExecutiveComparison points={points} cutoff={cutoff}/>}
+      {!noEligible && <ForecastHorizonTable horizons={horizons} product={Boolean(filters.productId)}/>}
     </> : <>
       <p className="rounded-xl border bg-white p-5 text-sm text-slate-500">Selecciona una cadena para visualizar la evolución temporal y el pronóstico.</p>
       {current?.job?.cuts_status === "CUTS_NOT_ALIGNED" && <p className="inline-block rounded-full bg-blue-50 px-3 py-1 text-xs text-blue-800">Cortes diferentes por cadena · CUTS_NOT_ALIGNED</p>}
