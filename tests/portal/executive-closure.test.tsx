@@ -36,6 +36,9 @@ describe("PRD 09.2E.2.2B executive closure", () => {
   });
   it("rejects an old preview, even when it carries plausible metrics", () => {
     expect(currentRetrospectivePreview(job, scope)).toBe(true);
+    const e1Version = "fixture-operational-preview-3-selection-e1";
+    expect(currentRetrospectivePreview({ ...job, engine_version: e1Version }, { ...scope, engine_version: e1Version })).toBe(true);
+    expect(currentRetrospectivePreview({ ...job, engine_version: e1Version }, scope)).toBe(false);
     expect(currentRetrospectivePreview({ ...job, engine_version: "old" }, scope)).toBe(false);
     render(<PreviewPerformancePanel job={{ ...job, engine_version: "old" }} scope={scope} productId="product"/>);
     expect(screen.getByText(/Vista previa desactualizada/)).toBeTruthy();

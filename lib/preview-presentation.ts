@@ -4,9 +4,9 @@ import { getStatisticalCandidates, retrospectiveMetric } from "./statistical-pre
 
 // Only the rolling-origin contract may supply executive retrospective metrics.
 export function currentRetrospectivePreview(job: PreviewJob | null, scope: PreviewScope | null): boolean {
-  return Boolean(job?.engine_version?.endsWith("-operational-preview-2-retrospective") &&
-    scope?.engine_version?.endsWith("-operational-preview-2-retrospective") &&
-    scope.evaluation_mode === "RETROSPECTIVE_EVALUATION");
+  const supported = ["-operational-preview-2-retrospective", "-operational-preview-3-selection-e1"];
+  return Boolean(supported.some(suffix => job?.engine_version?.endsWith(suffix) && scope?.engine_version?.endsWith(suffix)) &&
+    scope?.evaluation_mode === "RETROSPECTIVE_EVALUATION");
 }
 
 export function previewMetrics(scope: PreviewScope, productId: string | null) {

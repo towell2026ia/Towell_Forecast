@@ -289,6 +289,8 @@ class JobTests(unittest.TestCase):
         self.assertTrue(product_job["scopes"][0]["reused"])
         product_view = self.runner.result(product_job["job_id"], self.actor, PRODUCT)["scopes"][0]
         self.assertEqual([row["product_id"] for row in product_view["products"]], [PRODUCT])
+        self.assertEqual(product_view["eligibility"]["visible_products"], 1)
+        self.assertEqual(product_view["eligibility"]["stat_eligible"], 1)
         self.assertEqual(product_view["dataset_hash"], snapshot_hash(self.data.records(chain_id=A, mode="RETROSPECTIVE_TRAINING")))
         self.assertTrue(all(row["product_id"] == PRODUCT for row in product_view["selection"]["product_candidates"]))
 

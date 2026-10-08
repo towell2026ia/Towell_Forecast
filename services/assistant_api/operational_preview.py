@@ -347,6 +347,14 @@ class OperationalMultiChainForecastRunner:
         for scope in scopes:
             scope["products"] = [{**product, "horizons": product.get("horizons", []) if product_id else []}
                 for product in scope.get("products", []) if not product_id or product["product_id"] == product_id]
+            if product_id and scope.get("eligibility"):
+                product = scope["products"][0] if scope["products"] else None
+                horizons = product.get("horizons", []) if product else []
+                scope["eligibility"] = {"visible_products": int(product is not None),
+                    "evaluated": int(product is not None),
+                    "stat_eligible": int(bool(horizons)),
+                    "ml_eligible": int(any(row.get("ml_value") is not None for row in horizons)),
+                    **({product["forecast_status"]: 1} if product else {})}
             if scope.get("selection"):
                 selection = dict(scope["selection"])
                 selection["product_candidates"] = [candidate for candidate in selection.get("product_candidates", [])
