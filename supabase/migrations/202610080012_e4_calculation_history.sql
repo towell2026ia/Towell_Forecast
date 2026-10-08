@@ -365,6 +365,9 @@ begin
   insert into public.audit_log(chain_id,actor_id,action,entity_type,entity_id,new_data)
     values(chain,actor,case when number=1 then 'CREATE_CALCULATION' else 'RECALCULATE' end,
       'forecast_calculation',calc,jsonb_build_object('code','C'||number,'content_hash',p->>'content_hash'));
+  insert into public.audit_log(chain_id,actor_id,action,entity_type,entity_id,new_data)
+    values(chain,actor,'COMPLETE_CALCULATION','forecast_calculation',calc,
+      jsonb_build_object('horizons',12,'status','READY_FOR_DECISION'));
   return calc;
 end $$;
 
@@ -431,7 +434,7 @@ declare delivered public.monthly_observations%rowtype; h record; choice public.f
 declare v_candidate text; amount numeric; best text; best_error numeric; suggested_error numeric;
 declare selected_error numeric; signals jsonb; event_count integer:=0; eval_count integer:=0;
 declare result jsonb; prior public.forecast_live_closures%rowtype; closure_id uuid;
-declare first_sale_available_at timestamptz;
+declare first_sale_available_at timestamptz; learning_id uuid;
 begin
   if not private.e4_actor_allowed(p_actor,p_chain,'close') or p_key is null or length(p_key) not between 1 and 128 or
     p_period is null or extract(day from p_period)<>1 then
@@ -516,6 +519,7 @@ begin
       signals:=signals||to_jsonb(case when suggested_error>selected_error then
         'DECISION_OUTPERFORMED_RECOMMENDATION' else 'DECISION_UNDERPERFORMED_RECOMMENDATION' end);
     end if;
+    learning_id:=null;
     insert into public.forecast_learning_events(calculation_id,chain_id,product_id,horizon,target_period,
       sale_observation_id,sale_version_no,suggested_candidate,selected_candidate,best_candidate_actual,
       order_value,sale_value,delivery_value,decision_regret_absolute,decision_value_added_absolute,
@@ -536,8 +540,14 @@ begin
         'best_absolute_error',best_error,'selected_absolute_error',selected_error,
         'fill_rate',case when ordered.value>0 and delivered.id is not null then delivered.value/ordered.value*100 end,
         'order_observation_id',ordered.id,'delivery_observation_id',delivered.id))
-    on conflict (calculation_id,horizon,sale_observation_id) do nothing;
-    event_count:=event_count+1;
+    on conflict (calculation_id,horizon,sale_observation_id) do nothing returning id into learning_id;
+    if learning_id is not null then
+      event_count:=event_count+1;
+      insert into public.audit_log(chain_id,actor_id,action,entity_type,entity_id,new_data)
+        values(p_chain,p_actor,'LEARNING_EVENT','forecast_learning_event',learning_id,
+          jsonb_build_object('calculation_id',h.calculation_id,'horizon',h.horizon,
+            'target_period',p_period,'sale_observation_id',sale.id));
+    end if;
   end loop;
   result:=jsonb_build_object('status','CLOSED','period',p_period,'sale_observation_id',sale.id,
     'evaluations',eval_count,'learning_events',event_count);
@@ -583,6 +593,7 @@ create function public.e4_confirm_capture(p_session uuid,p_actor uuid,p_key text
 language plpgsql security invoker set search_path='' as $$
 declare s public.forecast_capture_sessions%rowtype; v_profile_id uuid; profile_version uuid;
 declare batch_id uuid; v_version_no integer; metric text; amount numeric; stamp timestamptz;
+declare is_correction boolean;
 begin
   select * into s from public.forecast_capture_sessions where id=p_session for update;
   if s.id is null or not private.e4_actor_allowed(p_actor,s.chain_id,'capture') or p_key is null then
@@ -593,8 +604,9 @@ begin
     return s.source_batch_id;
   end if;
   perform pg_advisory_xact_lock(hashtextextended(s.chain_id::text||s.product_id::text||s.period::text,1));
-  if exists(select 1 from public.monthly_observations where chain_id=s.chain_id and product_id=s.product_id
-    and period=s.period and metric_code='SALES') and nullif(btrim(s.correction_reason),'') is null then
+  select exists(select 1 from public.monthly_observations where chain_id=s.chain_id and product_id=s.product_id
+    and period=s.period and metric_code='SALES') into is_correction;
+  if is_correction and nullif(btrim(s.correction_reason),'') is null then
     raise exception 'correction reason required' using errcode='23514';
   end if;
   select id into v_profile_id from public.import_profiles where chain_id=s.chain_id and name='FORECAST_TOWELL_CAPTURE';
@@ -627,6 +639,11 @@ begin
   insert into public.audit_log(chain_id,actor_id,action,entity_type,entity_id,new_data)
     values(s.chain_id,p_actor,'CONFIRM_MONTH','forecast_capture_session',s.id,
       jsonb_build_object('batch_id',batch_id,'period',s.period));
+  if is_correction then
+    insert into public.audit_log(chain_id,actor_id,action,entity_type,entity_id,new_data)
+      values(s.chain_id,p_actor,'CORRECT_OBSERVATION','forecast_capture_session',s.id,
+        jsonb_build_object('batch_id',batch_id,'period',s.period,'reason',s.correction_reason));
+  end if;
   return batch_id;
 end $$;
 

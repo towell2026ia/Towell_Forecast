@@ -55,4 +55,27 @@ describe("E4 UI contracts", () => {
     expect(screen.getByText("Versiones oficiales")).toBeTruthy();
     expect(screen.queryByText("Vintage separado")).toBeNull();
   });
+
+  it("compares selected C2/C1 curves and actuals rather than statistical defaults", async () => {
+    const old = { ...summary, status: "SUPERSEDED" };
+    const latest = { ...summary, id: "calculation-2", calculation_no: 2, calculation_code: "C2", status: "DECIDED" };
+    const oldCurve = horizons.map(row => ({ horizon: row.horizon, target_period: row.target_period, value: row.statistical_value }));
+    const newCurve = horizons.map(row => ({ horizon: row.horizon, target_period: row.target_period, value: row.ensemble_value! }));
+    const oldDetail = { ...detail, ...old, selection_events: [{ id: "s1", calculation_id: old.id,
+      selected_candidate: "STATISTICAL" as const, selected_curve: oldCurve, selected_at: "2026-09-01T00:00:00Z",
+      decision_reason: null, comment: null }], live_evaluations: [{ target_period: horizons[0].target_period,
+        actual_sale: 98, sale_version_no: 1 }] };
+    const newDetail = { ...detail, ...latest, selection_events: [{ id: "s2", calculation_id: latest.id,
+      selected_candidate: "ENSEMBLE" as const, selected_curve: newCurve, selected_at: "2026-10-01T00:00:00Z",
+      decision_reason: null, comment: null }], live_evaluations: [] };
+    const historyClient = { calculations: vi.fn(async () => [latest, old]),
+      currentSelection: vi.fn(async () => ({ ...newDetail.selection_events[0], calculation_code: "C2", issue_period: issue })),
+      calculationDetail: vi.fn(async (id: string) => id === latest.id ? newDetail : oldDetail) } as unknown as PreviewClient;
+    render(<E4Operations mode="history" client={historyClient} chainId="chain-1" productId="product-1"
+      canWrite={false} canDecide={false}/>);
+    await waitFor(() => expect(screen.getByText("C2 Towell")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("C1 Towell")).toBeTruthy());
+    expect(screen.getByText("-5%")).toBeTruthy();
+    expect(screen.getAllByText("98").length).toBeGreaterThan(0);
+  });
 });

@@ -175,5 +175,11 @@ try {
     assert.equal((await one(`select count(*)::int as n from public.forecast_live_evaluations
       where candidate='STATISTICAL' and calculation_id='${calc1}'`)).n,2)
   })
+  await run('all required operational audit event types are recorded', async () => {
+    const actions = new Set((await db.query(`select action from public.audit_log where chain_id='${id.chain}'`)).rows.map(row => row.action))
+    for (const action of ['CREATE_CALCULATION','COMPLETE_CALCULATION','RECALCULATE','SELECT_FORECAST',
+      'CHANGE_SELECTION','CAPTURE_OBSERVATION','CORRECT_OBSERVATION','CONFIRM_MONTH','LIVE_EVALUATION','LEARNING_EVENT'])
+      assert.ok(actions.has(action), action)
+  })
   process.stdout.write(`E4 schema checks: ${passed} PASS\n`)
 } finally { await db.close() }
