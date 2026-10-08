@@ -7,6 +7,7 @@ import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
+from services.forecast_engine.selection_policy import SELECTION_POLICY
 
 ROOT = Path(__file__).resolve().parents[2]
 ENVIRONMENTS = {"development", "test", "staging", "production"}
@@ -132,16 +133,25 @@ class Settings:
             raise ValueError("vintage_requires_operational_preview")
         if not 0 < self.service_target_fill_rate <= 100:
             raise ValueError("invalid_service_target_fill_rate")
-        if self.quality_policy_version != "E3-GATES-1.0.0" or self.minimum_history_months < 1 or not (
+        if self.quality_policy_version not in {"E3-GATES-1.0.0", "E3-GATES-2.0.0"} or self.minimum_history_months < 1 or not (
                 0 < self.warning_continuity_rate <= self.ready_continuity_rate <= 1) or any(
                 value < 0 or not math.isfinite(value) for value in (self.minimum_improvement_points,
                 self.maximum_bias_deterioration, self.critical_horizon_degradation)):
             raise ValueError("invalid_quality_policy")
-        if self.vintage_persistence_enabled and (
+        if self.vintage_persistence_enabled and self.quality_policy_version == "E3-GATES-1.0.0" and (
                 self.minimum_history_months, self.warning_continuity_rate,
                 self.ready_continuity_rate, self.minimum_improvement_points,
                 self.maximum_bias_deterioration, self.critical_horizon_degradation,
                 self.service_target_fill_rate) != (18, 0.85, 0.95, 0.0, 5.0, 10.0, 95.0):
+            raise ValueError("policy_version_change_requires_review")
+        if self.quality_policy_version == "E3-GATES-2.0.0" and (
+                self.minimum_history_months, self.warning_continuity_rate,
+                self.ready_continuity_rate, self.minimum_improvement_points,
+                self.maximum_bias_deterioration, self.critical_horizon_degradation) != (
+                SELECTION_POLICY.minimum_history_months, SELECTION_POLICY.warning_continuity,
+                SELECTION_POLICY.ready_continuity, SELECTION_POLICY.minimum_improvement_points,
+                SELECTION_POLICY.maximum_bias_deterioration,
+                SELECTION_POLICY.maximum_critical_deterioration):
             raise ValueError("policy_version_change_requires_review")
         if self.data_provider == "supabase" or self.supabase_enabled or self.operational_preview_enabled:
             if not (self.data_provider == "supabase" and self.supabase_enabled and self.operational_preview_enabled):

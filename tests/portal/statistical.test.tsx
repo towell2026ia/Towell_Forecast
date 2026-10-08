@@ -77,7 +77,7 @@ describe("S39–S49 routing, regression and isolation", () => {
     const api = { latest: vi.fn(async () => job), create: vi.fn(), status: vi.fn(), result: vi.fn(), dispose: vi.fn() };
     const repository = { previews: api, getForecastHistory: vi.fn(async () => history) } as unknown as ForecastReadRepository;
     const harness = (f: Filters) => <ForecastFiltersContext.Provider value={{ repository, filters: f, setFilters: vi.fn(), profile: { id: "u", global_role: "ADMIN", full_name: "Test", status: "ACTIVE" } }}><ForecastEnginesView scope="Scope real"/></ForecastFiltersContext.Provider>;
-    const view = render(harness(filters)); await screen.findByText("Forecast H1–H12"); expect(screen.getByText("Comparativa ejecutiva")).toBeTruthy();
+    const view = render(harness(filters)); await screen.findByText("Estimación provisional H1–H12"); expect(screen.getByText("Comparativa ejecutiva")).toBeTruthy();
     fireEvent.click(screen.getByRole("tab", { name: "Motor Estadístico" })); await screen.findByText("Real vs Forecast Estadístico"); fireEvent.click(screen.getByRole("checkbox", { name: "Comparar con Fcst Towell" })); expect(screen.getByTestId("line-towell")).toBeTruthy();
     fireEvent(window, new Event("focus")); fireEvent(document, new Event("visibilitychange")); view.rerender(harness({ ...filters, periodRange: ["2026-05", "2026-06"] })); expect(screen.getByRole("tab", { name: "Motor Estadístico" }).getAttribute("aria-selected")).toBe("true"); expect(screen.getByTestId("line-towell")).toBeTruthy();
     fireEvent.click(screen.getByRole("tab", { name: "Machine Learning" })); expect(screen.getByRole("heading", { name: "Machine Learning" })).toBeTruthy(); expect(screen.queryByText(/Detalle ML disponible en siguiente fase/)).toBeNull();

@@ -53,8 +53,7 @@ describe("PRD 09.2E.2.2B executive closure", () => {
   it("shows no duplicate challenger strategy", () => {
     expect(distinctChallenger(scope.selection?.preview_leader, scope.selection?.preview_challenger)).toBeNull();
     render(<EngineComparison scope={scope}/>);
-    const challenger = screen.getByText("Challenger").parentElement!;
-    expect(within(challenger).getByText("—")).toBeTruthy();
+    expect(screen.getByText("Líder retrospectivo del scope")).toBeTruthy();
     expect(distinctChallenger(scope.selection?.preview_leader, { strategy: "statistical", statistical_weight: 1 })?.strategy).toBe("statistical");
   });
 });

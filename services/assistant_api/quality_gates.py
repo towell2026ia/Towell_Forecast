@@ -7,8 +7,10 @@ import math
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
+from services.forecast_engine.selection_policy import SELECTION_POLICY
 
 POLICY_VERSION = "E3-GATES-1.0.0"
+POLICY_VERSION_2 = "E3-GATES-2.0.0"
 TARGET_FILL_RATE = 95.0
 
 
@@ -23,6 +25,17 @@ class QualityPolicy:
     maximum_recent_deterioration: float = 5.0
     critical_horizon_degradation: float = 10.0
     target_fill_rate: float = TARGET_FILL_RATE
+
+    @classmethod
+    def selection_v2(cls) -> "QualityPolicy":
+        return cls(version=POLICY_VERSION_2,
+            minimum_history_months=SELECTION_POLICY.minimum_history_months,
+            warning_continuity_rate=SELECTION_POLICY.warning_continuity,
+            ready_continuity_rate=SELECTION_POLICY.ready_continuity,
+            minimum_improvement_points=SELECTION_POLICY.minimum_improvement_points,
+            maximum_bias_deterioration=SELECTION_POLICY.maximum_bias_deterioration,
+            maximum_recent_deterioration=SELECTION_POLICY.maximum_recent_deterioration,
+            critical_horizon_degradation=SELECTION_POLICY.maximum_critical_deterioration)
 
 
 def _month_index(value: str) -> int:
@@ -107,6 +120,8 @@ def data_quality(rows: list[dict[str, Any]], preview: dict[str, Any],
 
 def forecast_quality(preview: dict[str, Any], policy: QualityPolicy = QualityPolicy()) -> dict[str, Any]:
     """Compare with this scope's statistical baseline; never use a global WAPE cap."""
+    if policy.version == POLICY_VERSION_2:
+        return _forecast_quality_v2(preview, policy)
     statistical = preview.get("statistical") or {}
     ml = preview.get("ml") or {}
     leader = (preview.get("selection") or {}).get("preview_leader") or {}
@@ -141,6 +156,39 @@ def forecast_quality(preview: dict[str, Any], policy: QualityPolicy = QualityPol
         "ml_wape": _number(ml.get("retrospective_wape")),
         "ml_bias": _number(ml.get("retrospective_bias")),
         "observations": observations, "maximum_horizon_degradation": degradation,
+        "no_degradation": status == "FORECAST_QUALITY_READY",
+        "certified_point_in_time": bool(preview.get("temporal_certification"))}
+
+
+def _forecast_quality_v2(preview: dict[str, Any], policy: QualityPolicy) -> dict[str, Any]:
+    """New scope gate only: matched scope pairs, never product-vs-scope scores."""
+    selection = preview.get("selection") or {}
+    baseline_row = selection.get("scope_comparable_baseline") or {}
+    leader = selection.get("scope_leader") or {}
+    baseline = _number(baseline_row.get("retrospective_wape"))
+    candidate = _number(leader.get("retrospective_wape"))
+    bias = _number(leader.get("retrospective_bias"))
+    baseline_bias = _number(baseline_row.get("retrospective_bias"))
+    by_horizon = {row.get("horizon"): _number(row.get("wape")) for row in baseline_row.get("by_horizon", [])}
+    critical = [(_number(row.get("wape")), by_horizon.get(row.get("horizon")))
+                for row in leader.get("by_horizon", []) if row.get("horizon") in SELECTION_POLICY.critical_horizons]
+    degradation = max((current - previous for current, previous in critical
+                       if current is not None and previous is not None), default=None)
+    if baseline is None or candidate is None or bias is None or baseline_bias is None:
+        status = "INSUFFICIENT_EVIDENCE"
+    elif abs(bias) > policy.maximum_bias_deterioration + abs(baseline_bias) or (
+            leader.get("strategy") != "statistical" and
+            candidate > baseline - policy.minimum_improvement_points):
+        status = "FORECAST_QUALITY_BLOCKED"
+    elif degradation is not None and degradation > policy.critical_horizon_degradation:
+        status = "FORECAST_QUALITY_WARNING"
+    else:
+        status = "FORECAST_QUALITY_READY"
+    return {"gate_type": "FORECAST_QUALITY", "status": status, "policy_version": policy.version,
+        "baseline_scope": preview.get("chain_id"), "baseline_model": "MATCHED_SCOPE_STATISTICAL",
+        "baseline_wape": baseline, "candidate_wape": candidate, "candidate_bias": bias,
+        "stat_wape": baseline, "stat_bias": baseline_bias, "ml_wape": None, "ml_bias": None,
+        "observations": leader.get("observations"), "maximum_horizon_degradation": degradation,
         "no_degradation": status == "FORECAST_QUALITY_READY",
         "certified_point_in_time": bool(preview.get("temporal_certification"))}
 

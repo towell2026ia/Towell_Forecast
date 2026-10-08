@@ -70,6 +70,22 @@ class QualityGateTests(unittest.TestCase):
         self.assertEqual(forecast_quality(absent)["status"], "NO_REFERENCE")
         self.assertEqual(QualityPolicy().version, "E3-GATES-1.0.0")
 
+    def test_e3_v2_is_versioned_and_requires_homogeneous_scope_baseline(self):
+        policy = QualityPolicy.selection_v2()
+        self.assertEqual(policy.version, "E3-GATES-2.0.0")
+        self.assertEqual(policy.minimum_improvement_points, 0.25)
+        preview = deepcopy(self.preview)
+        self.assertEqual(forecast_quality(preview, policy)["status"], "INSUFFICIENT_EVIDENCE")
+        preview["selection"]["scope_comparable_baseline"] = {
+            "retrospective_wape": 45, "retrospective_bias": 12,
+            "by_horizon": [{"horizon": h, "wape": 45} for h in (1, 2, 3)]}
+        preview["selection"]["scope_leader"] = {"strategy": "ml", "retrospective_wape": 44,
+            "retrospective_bias": 11, "observations": 30,
+            "by_horizon": [{"horizon": h, "wape": 44} for h in (1, 2, 3)]}
+        self.assertEqual(forecast_quality(preview, policy)["status"], "FORECAST_QUALITY_READY")
+        preview["selection"]["scope_leader"]["by_horizon"][0]["wape"] = 48
+        self.assertEqual(forecast_quality(preview, policy)["status"], "FORECAST_QUALITY_WARNING")
+
     def test_common_catalog_horizon_warning_and_no_global_wape_cap(self):
         self.assertEqual(len(MODELS), 14)
         self.assertEqual(len(MODEL_FACTORIES), 3)

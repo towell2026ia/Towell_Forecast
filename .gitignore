@@ -55,6 +55,7 @@ next-env.d.ts
 /.codex/
 /outputs/
 /work/
+/build/test-temp/
 # Python caches
 __pycache__/
 *.py[cod]

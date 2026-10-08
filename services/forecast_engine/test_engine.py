@@ -70,7 +70,7 @@ class GenericEngineTests(unittest.TestCase):
                 self.assertLessEqual(band["p10"], band["p50"])
                 self.assertLessEqual(band["p50"], band["p90"])
                 self.assertLessEqual(band["p90"], band["p95"])
-        self.assertTrue(all(row["band_basis"] == "category" for row in new))
+        self.assertTrue(all(row["band_basis"] == "CATEGORY" and row["band_observations"] >= 3 for row in new))
 
     def test_prelaunch_zero_and_postlaunch_zero(self):
         products = normalize_dataset(self.rows, "2024-04")

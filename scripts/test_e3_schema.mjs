@@ -37,6 +37,7 @@ try {
     '202609280001_portal_published_history.sql',
     '202609280002_portal_history_periods.sql',
     '202609290010_e3_vintage_transaction.sql',
+    '202610080011_e1_policy_v2_guard.sql',
   ]) {
     await db.exec(readFileSync(join(dir, file), 'utf8'))
     process.stdout.write(`E3 SQL PASS ${file}\n`)
@@ -93,6 +94,12 @@ try {
   assert.equal((await db.query(`select count(*)::int as n from public.forecast_horizons where vintage_id='${first}'`)).rows[0].n, 12)
   assert.equal((await db.query(`select evidence_mode from public.forecast_run_inputs where run_id=(select run_id from public.forecast_vintages where id='${first}')`)).rows[0].evidence_mode, 'RETROSPECTIVE_TRAINING')
   await db.query(`select public.e3_freeze_vintage('${first}','${actor}')`)
+  const v2Payload = { ...payload, content_hash: 'c'.repeat(64), policy_version: 'E3-GATES-2.0.0', preview_id: 'synthetic-v2' }
+  const v2Encoded = JSON.stringify(v2Payload).replaceAll("'", "''")
+  const v2 = (await db.query(`select public.e3_create_vintage_candidate('${v2Encoded}'::jsonb) as id`)).rows[0].id
+  await db.query(`select public.e3_freeze_vintage('${v2}','${actor}')`)
+  assert.equal((await db.query(`select frozen_at is not null as frozen from public.forecast_vintages where id='${v2}'`)).rows[0].frozen, true)
+  await reject(`select public.e3_promote_champion('${v2}',(select id from public.model_versions where run_id=(select run_id from public.forecast_vintages where id='${v2}') limit 1),'${actor}','v2 remains blocked')`)
   await reject(`select public.e3_close_target_period('${first}','2026-08-01','${actor}')`)
   const actualBatch = id(40), actualObservation = id(41), orderObservation = id(42), deliveryObservation = id(43)
   await db.exec('reset role')

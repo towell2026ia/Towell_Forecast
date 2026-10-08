@@ -94,9 +94,9 @@ describe("Scopes A01–A06", () => {
   it("aggregate table has exactly H1–H12 without statistical/quantile columns", () => { render(<ForecastHorizonTable horizons={scopeHorizons(scope, { ...filters, productId: null })} product={false}/>); expect(screen.getAllByText(/^H\d+$/)).toHaveLength(12); expect(screen.queryByText("P90")).toBeNull(); });
 });
 describe("Comparison C01–C09", () => {
-  it("C01 distribution not global champion, C02 ML candidates, C03 no eligibility error", () => { render(<EngineComparison scope={scope}/>); expect(screen.getByText(/Modelo más seleccionado: Naive/)).toBeTruthy(); expect(screen.getByText("Gradient Boosting Global")).toBeTruthy(); expect(screen.getByText(/832 muestras disponibles/)).toBeTruthy(); expect(screen.queryByText("Error de cálculo")).toBeNull(); });
-  it("C04/C05/C06 leader, no published Champion, promotion OFF", () => { render(<EngineComparison scope={scope}/>); expect(screen.getByText("Ninguno")).toBeTruthy(); expect(screen.getAllByText("statistical")).toHaveLength(2); expect(screen.getByText("OFF")).toBeTruthy(); });
-  it("C07/C08/C09 null metrics use dash with explanation", () => { render(<EngineComparison scope={scope}/>); expect(screen.getAllByText("—").length).toBeGreaterThan(3); expect(document.body.textContent).not.toContain("Sin evidencia%"); expect(document.querySelector('[title*="No existe evidencia retrospectiva"]')).toBeTruthy(); });
+  it("C01 product and scope metrics stay separate", () => { render(<EngineComparison scope={scope}/>); expect(screen.getByText(/Rendimiento global del scope/)).toBeTruthy(); expect(screen.getByText("Líder retrospectivo del scope")).toBeTruthy(); expect(screen.queryByText("Error de cálculo")).toBeNull(); });
+  it("C04/C05/C06 scope leader is not an unpublished Champion", () => { render(<EngineComparison scope={scope}/>); expect(screen.getByText("Sin sugerencia confiable")).toBeTruthy(); expect(screen.getByText("Líder retrospectivo del scope")).toBeTruthy(); expect(document.body.textContent).not.toContain("Promoción automática"); });
+  it("C07/C08/C09 missing product metrics do not use scope WAPE", () => { render(<EngineComparison scope={scope} productId="product"/>); expect(screen.getByText(/No se utilizará el WAPE del scope/)).toBeTruthy(); expect(document.body.textContent).not.toContain("Sin evidencia%"); expect(screen.getByText(/No es Champion publicado/)).toBeTruthy(); });
 });
 describe("Session and execution R01–R10", () => {
   it("R04 module round-trip preserves series, product filters and preview without refetch", async () => {

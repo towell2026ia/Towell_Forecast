@@ -18,7 +18,7 @@ from .cold_start import launch_forecast
 from .supabase_access import PreviewError
 from services.forecast_engine.registry import ChampionRegistry
 
-PREVIEW_ENGINE_VERSION = ENGINE_VERSION + "-operational-preview-2-retrospective"
+PREVIEW_ENGINE_VERSION = ENGINE_VERSION + "-operational-preview-3-selection-e1"
 STAGES = ("QUEUED", "READING_DATA", "ELIGIBILITY", "STATISTICAL", "ML", "ENSEMBLE", "QUALITY_GATE", "READY_PREVIEW", "READY_PROVISIONAL", "NOT_ELIGIBLE", "FAILED")
 
 
@@ -93,16 +93,14 @@ class OperationalMultiChainForecastRunner:
                         raise PreviewError("DATA_LEAKAGE_DETECTED")
                     rows = [row for row in rows if row["period"] <= issue]
                     chain_rows = rows
-                    if job["product_id"]:
-                        rows = [row for row in rows if row["product_id"] == job["product_id"]]
-                    if not rows:
+                    if job["product_id"] and not any(row["product_id"] == job["product_id"] for row in rows):
                         provisional = self._cold_start_scope(provider, job, chain, issue, chain_rows)
                         if provisional:
                             job["scopes"].append(provisional)
                             continue
                         raise PreviewError("INSUFFICIENT_HISTORY")
                     digest = snapshot_hash(rows)
-                    key = content_hash({"dataset_hash": digest, "chain": chain, "product": job["product_id"],
+                    key = content_hash({"dataset_hash": digest, "chain": chain,
                         "objective": "Venta", "issue": issue, "mode": job["mode"],
                         "engine": PREVIEW_ENGINE_VERSION, "policy": asdict(self.policy), "environment": self.environment})
                     with self._lock:
@@ -127,9 +125,18 @@ class OperationalMultiChainForecastRunner:
                             "minimum_history_months": self.policy.min_product_observations})
                         if state in {"ACTIVE", "COLD_START"}:
                             eligible.add(item.product_id)
+                    if job["product_id"] and job["product_id"] not in eligible:
+                        provisional = self._cold_start_scope(provider, job, chain, issue, chain_rows, states, counts)
+                        if provisional:
+                            job["scopes"].append(provisional)
+                            continue
+                        selected = [state for state in states if state["product_id"] == job["product_id"]]
+                        job["scopes"].append({"chain_id": chain, "issue_period": issue, "status": "NOT_ELIGIBLE",
+                            "error_code": "NO_ELIGIBLE_PRODUCTS", "products": selected, "eligibility": counts})
+                        continue
                     if hasattr(provider, "product_catalog"):
                         for product in provider.product_catalog(chain):
-                            if product["id"] in {item["product_id"] for item in states} or job["product_id"] and product["id"] != job["product_id"]:
+                            if product["id"] in {item["product_id"] for item in states}:
                                 continue
                             state = "PRE-LAUNCH" if product.get("first_seen_period", "")[:7] > issue else "INSUFFICIENT"
                             counts[state] += 1
@@ -258,6 +265,15 @@ class OperationalMultiChainForecastRunner:
                 "retrospective_bias": (audit.get("retrospective_ml_metrics") or {}).get("bias"),
                 "failures": audit.get("ml_failures", [])},
             "selection": {"published_champion": None, "preview_leader": selection.get("preview_leader"),
+                "scope_leader": selection.get("scope_leader") or selection.get("preview_leader"),
+                "scope_comparable_baseline": selection.get("scope_comparable_baseline"),
+                "suggested_reference": (selection.get("suggested_references") or {}).get(states[0]["product_id"]) if len(states) == 1 else None,
+                "suggested_references": selection.get("suggested_references", {}),
+                "product_ml_winners": selection.get("product_ml_winners", {}),
+                "product_candidates": audit.get("product_candidates", []),
+                "comparison_status": selection.get("comparison_status", "NOT_COMPARABLE"),
+                "comparison_reason": selection.get("comparison_reason"),
+                "selection_policy_version": audit.get("selection_policy_version"),
                 "preview_challenger": selection.get("preview_challenger"), "no_degradation": selection.get("no_degradation"),
                 "automatic_promotion": False, "promotion_allowed": False,
                 "failures": audit.get("ensemble_failures", [])},
@@ -331,6 +347,13 @@ class OperationalMultiChainForecastRunner:
         for scope in scopes:
             scope["products"] = [{**product, "horizons": product.get("horizons", []) if product_id else []}
                 for product in scope.get("products", []) if not product_id or product["product_id"] == product_id]
+            if scope.get("selection"):
+                selection = dict(scope["selection"])
+                selection["product_candidates"] = [candidate for candidate in selection.get("product_candidates", [])
+                    if product_id and candidate.get("product_id") == product_id]
+                selection["suggested_reference"] = (selection.get("suggested_references") or {}).get(product_id) if product_id else None
+                selection["suggested_references"] = {product_id: selection["suggested_reference"]} if product_id and selection["suggested_reference"] else {}
+                scope["selection"] = selection
         return {**job, "chain_ids": [scope["chain_id"] for scope in scopes], "dataset_hash": content_hash({"scopes": sorted(
             (scope["chain_id"], scope.get("dataset_hash")) for scope in scopes)}), "scopes": scopes}
 

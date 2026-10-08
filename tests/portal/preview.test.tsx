@@ -28,7 +28,7 @@ describe("E2 operational UI", () => {
     expect(screen.getByText("12.5%")).toBeTruthy();
     expect(screen.getAllByText("Croston").length).toBeGreaterThan(0); expect(screen.getAllByText("Holt").length).toBeGreaterThan(0);
     expect(screen.getAllByText("No elegible").length).toBeGreaterThan(0); expect(screen.getByText(/Datos reales hasta: 2026-07/)).toBeTruthy();
-    expect(screen.getByText("Promoción automática")).toBeTruthy(); expect(screen.getByText("OFF")).toBeTruthy();
+    expect(screen.getByText("Champion / Referencia")).toBeTruthy(); expect(document.body.textContent).not.toContain("Promoción automática");
     expect(document.body.textContent).not.toMatch(/FENDI|Walmart|demo forecast|Ejecución no habilitada/);
   });
   it("selected product H1-H12, literal missing bands, search identifiers do not hide selected product", async () => {

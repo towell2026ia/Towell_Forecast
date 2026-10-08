@@ -47,6 +47,8 @@ def mount_preview_routes(app, config, identity, data, runner, limiter, write_rep
     router = APIRouter(prefix="/api/forecast")
 
     def quality_policy():
+        if config.quality_policy_version == "E3-GATES-2.0.0":
+            return QualityPolicy.selection_v2()
         return QualityPolicy(version=config.quality_policy_version,
             minimum_history_months=config.minimum_history_months,
             warning_continuity_rate=config.warning_continuity_rate,

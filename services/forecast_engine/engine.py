@@ -18,6 +18,7 @@ import numpy as np
 from services.ml_engine.engine import MODEL_FACTORIES, Preprocessor
 from services.statistical_engine import engine as stat
 from .identifiers import model_version
+from .selection_policy import SELECTION_POLICY, select_band_rows
 
 ENGINE_VERSION = "prd09.1b-1.0.0"
 HORIZONS = tuple(range(1, 13))
@@ -40,14 +41,14 @@ def month_distance(start: str, end: str) -> int:
 
 @dataclass(frozen=True)
 class ForecastPolicy:
-    min_train_observations: int = 18
-    min_selection_origins: int = 6
-    min_certification_origins: int = 3
-    min_product_observations: int = 6
-    minimum_improvement: float = 0.25
-    max_bias_deterioration: float = 5.0
-    max_stability_deterioration: float = 10.0
-    max_recent_deterioration: float = 10.0
+    min_train_observations: int = SELECTION_POLICY.minimum_history_months
+    min_selection_origins: int = SELECTION_POLICY.selection_origins
+    min_certification_origins: int = SELECTION_POLICY.certification_origins
+    min_product_observations: int = SELECTION_POLICY.product_observations
+    minimum_improvement: float = SELECTION_POLICY.minimum_improvement_points
+    max_bias_deterioration: float = SELECTION_POLICY.maximum_bias_deterioration
+    max_stability_deterioration: float = SELECTION_POLICY.maximum_stability_deterioration
+    max_recent_deterioration: float = SELECTION_POLICY.maximum_recent_deterioration
 
     def __post_init__(self) -> None:
         if min(self.min_train_observations, self.min_selection_origins,
@@ -60,6 +61,7 @@ class Observation:
     period: str
     value: float | None
     available_at: str | None
+    observation_id: str | None = None
 
 
 @dataclass
@@ -171,7 +173,7 @@ def normalize_retrospective_dataset(rows: Iterable[dict[str, Any]], cutoff: str,
             grouped[key] = RetrospectiveProductSeries(chain, product, str(row.get("product_code") or product),
                 str(row.get("description") or product), str(row.get("category") or "UNCLASSIFIED"),
                 str(row.get("variant") or ""), objective)
-        current = Observation(period, value, row.get("available_at"))
+        current = Observation(period, value, row.get("available_at"), row.get("source_id") or row.get("observation_id"))
         if period in grouped[key].observations:
             raise ValueError("duplicate_observation_conflict")
         grouped[key].observations[period] = current
@@ -219,7 +221,7 @@ def normalize_dataset(rows: Iterable[dict[str, Any]], cutoff: str,
                                          str(row.get("category") or "UNCLASSIFIED"),
                                          str(row.get("variant") or ""), objective)
         previous = grouped[key].observations.get(period)
-        current = Observation(period, value, availability)
+        current = Observation(period, value, availability, row.get("source_id") or row.get("observation_id"))
         if previous is not None and previous != current:
             raise ValueError("duplicate_observation_conflict")
         grouped[key].observations[period] = current
@@ -643,20 +645,11 @@ def _forecast_chain(products: list[ProductSeries], issue: str, policy: ForecastP
                     ml_failures.append({"model": ml_choice, "error": type(exc).__name__})
             value = statistical_value * official_weight + (ml_value or 0.0) * (1 - official_weight) if ml_value is not None else statistical_value
             applied_strategy = official["strategy"] if ml_value is not None or official_weight == 1 else "statistical_fallback"
-            def comparable_rows(level: str) -> list[dict[str, Any]]:
-                return [row for row in certification if row["horizon"] == horizon
-                        and (level == "chain" or level == "category" and row["category"] == item.category
-                             or level == "product" and row["product_id"] == item.product_id)
-                        and statistical_choices[row["product_id"]] in row["statistical"]
-                        and (official_weight == 1 or ml_choice in row["ml"])]
-            band_basis = "product"
-            comparable = comparable_rows(band_basis)
-            if not comparable:
-                band_basis = "category"
-                comparable = comparable_rows(band_basis)
-            if not comparable:
-                band_basis = "chain"
-                comparable = comparable_rows(band_basis)
+            band_pool = [row for row in certification
+                         if statistical_choices[row["product_id"]] in row["statistical"]
+                         and (official_weight == 1 or ml_choice in row["ml"])]
+            band_basis, comparable = select_band_rows(band_pool, product_id=item.product_id,
+                category=item.category, horizon=horizon)
             residuals = [row["actual"] -
                          (row["statistical"][statistical_choices[row["product_id"]]] * official_weight
                           + row["ml"].get(ml_choice, 0.0) * (1 - official_weight)) for row in comparable]
@@ -675,10 +668,10 @@ def _forecast_chain(products: list[ProductSeries], issue: str, policy: ForecastP
                              policy.min_product_observations else "PROVISIONAL",
                              "statistical_model": selected_model, "ml_model": ml_choice,
                              "ensemble_value": round(value, 2) if applied_strategy == "ensemble" else None,
-                             "probability": _bands(value, residuals) if not retrospective or len(residuals) >= 3 else None,
-                             "band_basis": ("RETROSPECTIVE_" + band_basis.upper() if retrospective else band_basis)
-                             if residuals and (not retrospective or len(residuals) >= 3) else "insufficient",
-                             "band_observations": len(residuals)})
+                             "probability": _bands(value, residuals) if comparable else None,
+                             "band_basis": band_basis,
+                             "band_observations": len(residuals),
+                             "band_status": "AVAILABLE" if comparable else "INSUFFICIENT_BAND_EVIDENCE"})
     aggregates = []
     for level in ("category", "chain"):
         for horizon in HORIZONS:

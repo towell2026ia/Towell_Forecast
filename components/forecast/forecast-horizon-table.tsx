@@ -6,7 +6,17 @@ export function ForecastGrid({ headers, rows }: { headers: string[]; rows: (stri
 }
 export function ForecastHorizonTable({ horizons, product }: { horizons: Horizon[]; product: boolean }) {
   const aggregateMetrics = !product && horizons.some(r => "statistical_value" in r);
-  return <section><h2 className="mb-3 font-semibold">Forecast H1–H12</h2>{horizons.length ? <ForecastGrid headers={product ? ["Horizonte", "Periodo", "Estadístico", "ML", "Fcst Towell", "P10", "P50", "P90", "P95"] : aggregateMetrics ? ["Horizonte", "Periodo", "Estadístico", "ML", "Fcst Towell"] : ["Horizonte", "Periodo", "Fcst Towell"]} rows={horizons.map(r => [`H${r.horizon}`, r.target_period, ...(product && "p50" in r ? [r.statistical_value, r.ml_value, r.forecast_towell, r.p10, r.p50, r.p90, r.p95] : aggregateMetrics && "statistical_value" in r ? [r.statistical_value, r.ml_value, r.forecast_towell] : [r.forecast_towell]).map(quantity)])}/> : <p className="text-sm text-slate-500">Sin horizontes elegibles para el filtro seleccionado.</p>}</section>;
+  return <section><h2 className="mb-3 font-semibold">Estimación provisional H1–H12</h2>{horizons.length ? <ForecastGrid headers={product ? ["Horizonte", "Periodo", "Estadístico", "ML", "Estimación provisional", "P10", "P50", "P90", "P95", "Base banda", "Residuales"] : aggregateMetrics ? ["Horizonte", "Periodo", "Estadístico", "ML", "Estimación provisional"] : ["Horizonte", "Periodo", "Estimación provisional"]} rows={horizons.map(r => [
+    `H${r.horizon}`, r.target_period,
+    ...(product && "p50" in r ? [r.statistical_value, r.ml_value, r.forecast_towell].map(quantity).concat([
+      r.band_status === "INSUFFICIENT_BAND_EVIDENCE" ? "Sin evidencia" : quantity(r.p10),
+      quantity(r.p50), r.band_status === "INSUFFICIENT_BAND_EVIDENCE" ? "Sin evidencia" : quantity(r.p90),
+      r.band_status === "INSUFFICIENT_BAND_EVIDENCE" ? "Sin evidencia" : quantity(r.p95),
+      r.band_basis === "INSUFFICIENT" ? "Sin evidencia" : r.band_basis ?? "Sin evidencia",
+      quantity(r.band_observations)]) : aggregateMetrics && "statistical_value" in r ?
+      [r.statistical_value, r.ml_value, r.forecast_towell].map(quantity) : [quantity(r.forecast_towell)])
+  ])}/> : <p className="text-sm text-slate-500">Sin horizontes elegibles para el filtro seleccionado.</p>}
+    {product && <p className="mt-2 text-xs text-slate-500">Sin evidencia: no existen al menos tres residuales comparables para ese horizonte a nivel producto, categoría o cadena. Las bandas permanecen nulas; P50 es la estimación central provisional.</p>}</section>;
 }
 export function ExecutiveComparison({ points, cutoff }: { points: TraderPoint[]; cutoff?: string }) {
   const future = points.filter(p => cutoff ? p.period > cutoff : p.towell !== null);

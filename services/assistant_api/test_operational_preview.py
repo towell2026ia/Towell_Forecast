@@ -204,7 +204,8 @@ class TemporalPreviewTests(unittest.TestCase):
                 if row["probability"]:
                     band = [row["probability"][key] for key in ("p10", "p50", "p90", "p95")]
                     self.assertEqual(band, sorted(band))
-                    self.assertTrue(row["band_basis"].startswith("RETROSPECTIVE_"))
+                    self.assertIn(row["band_basis"], {"PRODUCT", "CATEGORY", "CHAIN"})
+                    self.assertGreaterEqual(row["band_observations"], 3)
         for horizon in range(1, 13):
             total = round(sum(row["forecast_towell"] for row in chain["forecast_towell"] if row["horizon"] == horizon), 2)
             self.assertEqual(total, next(row["forecast_towell"] for row in chain["aggregates"] if row["level"] == "chain" and row["horizon"] == horizon))
@@ -236,7 +237,13 @@ class TemporalPreviewTests(unittest.TestCase):
         prelaunch = normalize_retrospective_dataset([{**row, "value": 0} for row in rows], "2023-08")
         self.assertTrue(all(item.lifecycle("2023-08", ForecastPolicy()) == "PRE-LAUNCH" for item in prelaunch))
         result = forecast_dataset(rows, "2023-08", evidence_mode="RETROSPECTIVE_TRAINING")
-        self.assertTrue(all(row["probability"] is None for row in result["chains"][0]["forecast_towell"]))
+        for row in result["chains"][0]["forecast_towell"]:
+            if row["probability"] is None:
+                self.assertEqual(row["band_status"], "INSUFFICIENT_BAND_EVIDENCE")
+                self.assertEqual(row["band_basis"], "INSUFFICIENT")
+            else:
+                self.assertGreaterEqual(row["band_observations"], 3)
+                self.assertIn(row["band_basis"], {"PRODUCT", "CATEGORY", "CHAIN"})
 
 
 class JobTests(unittest.TestCase):
@@ -278,6 +285,12 @@ class JobTests(unittest.TestCase):
         self.assertTrue(all(not product["horizons"] for scope in self.runner.result(job["job_id"], self.actor)["scopes"] for product in scope["products"]))
         rerun = self.wait(self.runner.submit(self.data, self.actor, chain_ids=[A, B]))
         self.assertTrue(all(scope["reused"] for scope in rerun["scopes"]))
+        product_job = self.wait(self.runner.submit(self.data, self.actor, chain_ids=[A], product_id=PRODUCT))
+        self.assertTrue(product_job["scopes"][0]["reused"])
+        product_view = self.runner.result(product_job["job_id"], self.actor, PRODUCT)["scopes"][0]
+        self.assertEqual([row["product_id"] for row in product_view["products"]], [PRODUCT])
+        self.assertEqual(product_view["dataset_hash"], snapshot_hash(self.data.records(chain_id=A, mode="RETROSPECTIVE_TRAINING")))
+        self.assertTrue(all(row["product_id"] == PRODUCT for row in product_view["selection"]["product_candidates"]))
 
     def test_missing_or_insufficient_is_not_fake_zero(self):
         class Short:

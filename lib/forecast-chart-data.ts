@@ -10,7 +10,7 @@ export const series = [
   { key: "order", label: "Pedido", color: "#7c3aed" },
   { key: "delivery", label: "Entrega", color: "#0891b2" },
   { key: "client", label: "Fcst Cliente", color: "#f59e0b", dash: "5 4" },
-  { key: "towell", label: "Fcst Towell", color: "#0f172a" },
+  { key: "towell", label: "Estimación provisional E2", color: "#0f172a" },
   { key: "statistical", label: "Estadístico", color: "#64748b", dash: "7 5" },
   { key: "ml", label: "Machine Learning", color: "#c026d3", dash: "2 4" },
   { key: "provisional", label: "Estimación provisional", color: "#ea580c", dash: "6 4" },
