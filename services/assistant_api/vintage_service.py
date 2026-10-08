@@ -168,7 +168,7 @@ class SupabaseForecastWriteRepository:
     def rpc(self, name: str, payload: dict[str, Any]) -> str | dict[str, Any]:
         if not self.__key:
             raise PreviewError("REQUIRED_SECRET_MISSING", 503)
-        if not re.fullmatch(r"e3_(create_vintage_candidate|freeze_vintage|publish_official|promote_champion|close_target_period)", name):
+        if not re.fullmatch(r"e3_(create_vintage_candidate|freeze_vintage|publish_official|promote_champion|close_target_period)|e4_(create_calculation|select_forecast|save_capture|confirm_capture|close_live)", name):
             raise PreviewError("REQUEST_001", 400)
         try:
             with httpx.Client(timeout=self.timeout, transport=self.transport, follow_redirects=False) as client:
@@ -177,6 +177,10 @@ class SupabaseForecastWriteRepository:
             if response.status_code not in (200, 201):
                 raise PreviewError("VINTAGE_WRITE_FAILED", 503)
             result = response.json()
+            if name == "e4_close_live":
+                if not isinstance(result, dict) or result.get("status") != "CLOSED":
+                    raise PreviewError("E4_WRITE_FAILED", 503)
+                return result
             if name == "e3_close_target_period":
                 if (not isinstance(result, dict) or result.get("status") not in {"CLOSED", "ALREADY_CLOSED"}
                         or result.get("vintage_id") != payload.get("p_vintage_id")

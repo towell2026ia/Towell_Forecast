@@ -37,7 +37,19 @@ export type VintageDetail = { vintage: VintageSummary; run: { id: string; chain_
   models: { id: string; model_family: string; algorithm: string; validation_wape: number | null; certification_status: string }[];
   inputs: { id: string; monthly_observation_id: string | null; evidence_mode: string }[];
   gates: { id: string; gate_type: string; status: string; policy_version: string; observed: number | null; target: number | null }[] };
-export type VintageCapabilities = { vintage_persistence: boolean; official_publication: boolean; champion_publication: boolean };
+export type VintageCapabilities = { vintage_persistence: boolean; official_publication: boolean; champion_publication: boolean;
+  forecast_calculation_history?: boolean; forecast_selection?: boolean; capture_center?: boolean; live_learning?: boolean };
+export type CalculationSummary = { id: string; chain_id: string; product_id: string; calculation_no: number; calculation_code: string;
+  issue_period: string; status: string; created_at: string; suggested_reference: SuggestedReference | null; recalculation_reason: string | null };
+export type CalculationHorizon = { horizon: number; target_period: string; statistical_value: number; ml_value: number | null;
+  ensemble_value: number | null; p10: number | null; p50: number | null; p90: number | null; p95: number | null;
+  band_basis: string; band_observations: number; statistical_model: string | null; ml_model: string | null;
+  ensemble_ml_model?: string | null; ensemble_ml_component?: number | null; statistical_weight?: number | null; ml_weight?: number | null };
+export type SelectionEvent = { id: string; calculation_id: string; selected_candidate: "STATISTICAL" | "ML" | "ENSEMBLE";
+  selected_curve: { horizon: number; target_period: string; value: number }[]; selected_at: string; decision_reason: string | null; comment: string | null };
+export type CalculationDetail = CalculationSummary & { candidate_metrics: Record<string, ProductCandidate | null>; input_snapshot: Record<string, unknown>;
+  research_snapshot: Record<string, unknown> | null; data_snapshot_hash: string; preview_id: string; engine_version: string; git_sha: string;
+  horizons: CalculationHorizon[]; selection_events: SelectionEvent[]; live_evaluations: Record<string, unknown>[] };
 export interface PreviewClient {
   create(chainId: string | null, productId: string | null): Promise<PreviewJob>;
   status(jobId: string): Promise<PreviewJob>;
@@ -51,6 +63,18 @@ export interface PreviewClient {
   createCandidate?(chainId: string, previewId: string): Promise<string>;
   freezeVintage?(vintageId: string): Promise<string>;
   publishVintage?(vintageId: string, comment: string): Promise<string>;
+  calculations?(chainId: string, productId: string): Promise<CalculationSummary[]>;
+  calculationDetail?(calculationId: string): Promise<CalculationDetail>;
+  createCalculation?(chainId: string, productId: string, previewId: string, reason?: string): Promise<string>;
+  selectCalculation?(calculationId: string, candidate: "STATISTICAL" | "ML" | "ENSEMBLE", reason?: string, comment?: string): Promise<string>;
+  currentSelection?(chainId: string, productId: string): Promise<(SelectionEvent & { calculation_code: string; issue_period: string }) | null>;
+  saveCapture?(data: { chain_id: string; product_id: string; period: string; order_value: number; sale_value: number; delivery_value: number; notes?: string; correction_reason?: string }): Promise<string>;
+  confirmCapture?(sessionId: string): Promise<string>;
+  captureHistory?(chainId: string, productId: string, period: string): Promise<{ sessions: Record<string, unknown>[];
+    observations: { id: string; metric_code: string; value: number; version_no: number; available_at: string | null }[] }>;
+  closeLive?(chainId: string, productId: string, period: string): Promise<Record<string, unknown>>;
+  liveMetrics?(chainId: string, productId: string): Promise<Record<string, unknown>>;
+  learning?(chainId: string, productId: string): Promise<Record<string, unknown>[]>;
   dispose(): void;
 }
 export class PreviewReadError extends Error { constructor(public code: string) { super(code); } }
@@ -134,7 +158,70 @@ export class RailwayPreviewClient implements PreviewClient {
     const result = await response.json() as Partial<VintageCapabilities>;
     return { vintage_persistence: response.ok && result.vintage_persistence === true,
       official_publication: response.ok && result.official_publication === true,
-      champion_publication: response.ok && result.champion_publication === true };
+      champion_publication: response.ok && result.champion_publication === true,
+      forecast_calculation_history: response.ok && result.forecast_calculation_history === true,
+      forecast_selection: response.ok && result.forecast_selection === true,
+      capture_center: response.ok && result.capture_center === true,
+      live_learning: response.ok && result.live_learning === true };
+  }
+  private async e4<T>(path: string, body?: unknown, idempotencyKey?: string): Promise<T> {
+    let url: URL;
+    try { url = new URL(this.origin); if (url.protocol !== "https:" || url.username || url.password || url.pathname !== "/" || url.search || url.hash) throw new Error(); }
+    catch { throw new PreviewReadError("PREVIEW_CONFIGURATION_REQUIRED"); }
+    if (this.controller.signal.aborted) throw new PreviewReadError("AUTH_REQUIRED");
+    const { data } = await this.auth.auth.getSession();
+    if (!data.session?.access_token) throw new PreviewReadError("AUTH_REQUIRED");
+    const response = await fetch(url.origin + path, { method: body === undefined ? "GET" : "POST", credentials: "omit",
+      cache: "no-store", signal: this.controller.signal,
+      headers: { Authorization: `Bearer ${data.session.access_token}`,
+        ...(body === undefined ? {} : { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey ?? crypto.randomUUID() }) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    const result = await response.json() as T & { error_code?: string };
+    if (!response.ok) throw new PreviewReadError(result.error_code ?? "DATA_READ_FAILED");
+    return result;
+  }
+  async calculations(chainId: string, productId: string) {
+    const result = await this.e4<{ calculations: CalculationSummary[] }>(`/api/forecast/calculations?chain_id=${encodeURIComponent(chainId)}&product_id=${encodeURIComponent(productId)}`);
+    return result.calculations;
+  }
+  calculationDetail(calculationId: string) { return this.e4<CalculationDetail>(`/api/forecast/calculations/${encodeURIComponent(calculationId)}`); }
+  async createCalculation(chainId: string, productId: string, previewId: string, reason?: string) {
+    const result = await this.e4<{ calculation_id: string }>("/api/forecast/calculations", { chain_id: chainId, product_id: productId,
+      preview_id: previewId, recalculation_reason: reason ?? null }, `calc:${previewId}:${productId}`);
+    return result.calculation_id;
+  }
+  async selectCalculation(calculationId: string, candidate: "STATISTICAL" | "ML" | "ENSEMBLE", reason?: string, comment?: string) {
+    const result = await this.e4<{ selection_event_id: string }>(`/api/forecast/calculations/${encodeURIComponent(calculationId)}/select`,
+      { selected_candidate: candidate, decision_reason: reason ?? null, comment: comment ?? null });
+    return result.selection_event_id;
+  }
+  async currentSelection(chainId: string, productId: string) {
+    const result = await this.e4<{ selection: (SelectionEvent & { calculation_code: string; issue_period: string }) | null }>(
+      `/api/forecast/current-selection?chain_id=${encodeURIComponent(chainId)}&product_id=${encodeURIComponent(productId)}`);
+    return result.selection;
+  }
+  async saveCapture(data: { chain_id: string; product_id: string; period: string; order_value: number; sale_value: number;
+      delivery_value: number; notes?: string; correction_reason?: string }) {
+    const result = await this.e4<{ session_id: string }>("/api/forecast/observations/capture", data);
+    return result.session_id;
+  }
+  async confirmCapture(sessionId: string) {
+    const result = await this.e4<{ source_batch_id: string }>(`/api/forecast/observations/capture/${encodeURIComponent(sessionId)}/confirm`, {}, `confirm:${sessionId}`);
+    return result.source_batch_id;
+  }
+  captureHistory(chainId: string, productId: string, period: string) {
+    return this.e4<{ sessions: Record<string, unknown>[]; observations: { id: string; metric_code: string; value: number;
+      version_no: number; available_at: string | null }[] }>(`/api/forecast/observations/capture?chain_id=${encodeURIComponent(chainId)}&product_id=${encodeURIComponent(productId)}&period=${encodeURIComponent(period)}`);
+  }
+  closeLive(chainId: string, productId: string, period: string) {
+    return this.e4<Record<string, unknown>>("/api/forecast/live-evaluation", { chain_id: chainId, product_id: productId, target_period: period });
+  }
+  liveMetrics(chainId: string, productId: string) {
+    return this.e4<Record<string, unknown>>(`/api/forecast/live-metrics?chain_id=${encodeURIComponent(chainId)}&product_id=${encodeURIComponent(productId)}`);
+  }
+  async learning(chainId: string, productId: string) {
+    const result = await this.e4<{ events: Record<string, unknown>[] }>(`/api/forecast/learning?chain_id=${encodeURIComponent(chainId)}&product_id=${encodeURIComponent(productId)}`);
+    return result.events;
   }
   private async writeVintage(path: string, body: unknown): Promise<string> {
     const url = new URL(this.origin);

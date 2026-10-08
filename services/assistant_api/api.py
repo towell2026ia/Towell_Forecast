@@ -89,6 +89,7 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
     from .operational_preview import OperationalMultiChainForecastRunner
     from .cold_start_research import ColdStartResearch
     from .preview_api import mount_preview_routes
+    from .e4_api import mount_e4_routes
     from .vintage_service import SupabaseForecastWriteRepository
     supabase_client = SupabaseReadClient(config.supabase_url, config.supabase_publishable_key,
         timeout=config.external_timeout_seconds) if config.operational_preview_enabled else None
@@ -145,8 +146,11 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
     app.state.preview_runner = preview_runner
     if preview_runner:
         write_repository = SupabaseForecastWriteRepository(config.supabase_url, config.supabase_service_role_key,
-            timeout=config.external_timeout_seconds) if config.vintage_persistence_enabled else None
+            timeout=config.external_timeout_seconds) if (config.vintage_persistence_enabled or any((
+                config.forecast_calculation_history_enabled,config.forecast_selection_enabled,
+                config.capture_center_enabled,config.live_learning_enabled))) else None
         mount_preview_routes(app, config, identity, data, preview_runner, rate_limiter, write_repository)
+        mount_e4_routes(app, config, identity, data, preview_runner, write_repository)
 
     @app.exception_handler(PreviewError)
     async def preview_exception(request: Request, exc: PreviewError):
@@ -270,6 +274,10 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
                 "vintage_persistence": config.vintage_persistence_enabled,
                 "official_publication": config.official_publication_enabled,
                 "champion_publication": config.champion_publication_enabled,
+                "forecast_calculation_history": config.forecast_calculation_history_enabled,
+                "forecast_selection": config.forecast_selection_enabled,
+                "capture_center": config.capture_center_enabled,
+                "live_learning": config.live_learning_enabled,
                 "service_target_fill_rate": config.service_target_fill_rate})
         providers = {"data": data.health(), "persistence": storage.health(),
                      "assistant": orchestrator.assistant_provider.health(),

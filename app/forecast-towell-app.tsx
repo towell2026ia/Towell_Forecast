@@ -23,6 +23,8 @@ import { scopeHorizons, traderPoints } from "@/lib/forecast-chart-data";
 import { currentRetrospectivePreview } from "@/lib/preview-presentation";
 import { PreviewPerformancePanel } from "@/components/forecast/preview-performance-panel";
 import { UserAdministrationView } from "./user-administration-view";
+import { CaptureCenterView } from "./capture-center-view";
+import { selectedForecastHorizons, useCurrentForecastSelection } from "@/lib/forecast-e4-ui";
 
 const modules = [
   ["inicio", "Inicio", Home], ["historico", "Histórico", History],
@@ -106,7 +108,7 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
         {active === "calidad" && <QualityView/>}
         {active === "periodos" && <PeriodsView/>}
         {active === "usuarios" && profile.global_role === "ADMIN" && <UsersView/>}
-        {active === "captura" && <Unavailable title="Centro de captura" copy="La carga mensual y las acciones de escritura no están habilitadas en esta fase."/>}
+        {active === "captura" && <CaptureCenterView key={`${filters.chainId}/${filters.productId}`}/>}
         {active === "auditoria" && <Unavailable title="Auditoría" copy="La consulta de auditoría operativa se habilitará en una fase posterior. No se muestran eventos simulados."/>}
       </main>
     </SidebarInset>
@@ -149,6 +151,7 @@ export function GlobalFilters() {
 function Intro({ title, copy }: { title: string; copy: string }) { return <div className="mb-5"><h1 className="text-2xl font-semibold tracking-tight text-slate-950 sm:text-3xl">{title}</h1><p className="mt-2 text-sm leading-6 text-slate-500">{copy}</p></div>; }
 export function Dashboard() {
   const { repository, filters, preview, seriesVisibility, setSeriesVisibility } = useForecastFilters();
+  const currentSelection = useCurrentForecastSelection(repository.previews, filters.chainId, filters.productId);
   const summary = useRead(useCallback(() => repository.getHistoricalSummary(filters), [repository, filters]));
   const scope = filters.chainId ? preview?.result?.scopes.find(s => s.chain_id === filters.chainId) ?? null : null;
   const validScope = currentRetrospectivePreview(preview?.result ?? null, scope) ? scope : null;
@@ -160,15 +163,18 @@ export function Dashboard() {
     ? repository.previews.qualityGates(filters.chainId) : Promise.resolve(null),
     [repository, filters.chainId, validScope]));
   const quality = gates.data?.dataset_hash === validScope?.dataset_hash ? gates.data : null;
-  const points = traderPoints(historical.data ?? [], customer.data ?? [], scopeHorizons(validScope, filters), cutoff, filters, scopeProvisionalHorizons(chartScope, filters));
+  const currentHorizons = selectedForecastHorizons(currentSelection);
+  const chartCutoff = currentHorizons.length === 12 ? currentSelection?.issue_period.slice(0,7) : cutoff;
+  const points = traderPoints(historical.data ?? [], customer.data ?? [], currentHorizons.length ? currentHorizons : scopeHorizons(validScope, filters), chartCutoff, filters, scopeProvisionalHorizons(chartScope, filters));
   return <div><Intro title="Dashboard ejecutivo" copy="Histórico publicado según tu acceso y los filtros seleccionados."/><ReadState loading={summary.loading} error={summary.error} empty={summary.data?.observationCount === 0}/>{summary.data && <>
     <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">{[["Scopes con histórico", number(summary.data.scopeCount)], ["Productos visibles", number(summary.data.productCount)], ["Observaciones", number(summary.data.observationCount)], ["Último periodo disponible", summary.data.latestPeriod ?? "Sin dato"]].map(([label, value]) => <Card key={label} className="border-slate-200 shadow-sm"><CardContent className="p-5"><p className="text-sm text-slate-500">{label}</p><p className="mt-4 text-3xl font-semibold tracking-tight text-slate-950">{value}</p></CardContent></Card>)}</div>
     <div className="mt-5 space-y-5">{filters.chainId ? <>
+      {currentSelection && <p className="rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-950"><strong>Forecast Towell vigente:</strong> {currentSelection.calculation_code} · {currentSelection.selected_candidate} · H1–H12 seleccionados. No es Champion publicado.</p>}
       <PreviewPerformancePanel job={preview?.result ?? null} scope={scope} productId={filters.productId}/>
       <Card className="border-slate-200 shadow-sm"><CardContent className="p-5"><h2 className="font-semibold">Calidad y nivel de servicio</h2>{quality ? <div className="mt-3 grid gap-3 text-sm sm:grid-cols-2 xl:grid-cols-4"><div><p className="text-slate-500">Calidad de datos</p><p className="font-medium">{quality.data_quality.status}</p></div><div><p className="text-slate-500">Calidad del forecast</p><p className="font-medium">{quality.forecast_quality.status}</p></div><div><p className="text-slate-500">Fill Rate observado</p><p className="font-medium">{quality.service_level.observed_fill_rate === null ? "—" : `${quality.service_level.observed_fill_rate.toFixed(2)}%`}</p><p className="text-xs text-slate-500">Objetivo {quality.service_level.target_fill_rate}% · Brecha {quality.service_level.gap_pp === null ? "—" : `${quality.service_level.gap_pp.toFixed(2)} pp`}</p></div><div><p className="text-slate-500">Publicación</p><p className="font-medium">{quality.publication}</p><p className="text-xs text-slate-500">Simulación logística pendiente</p></div></div> : <p className="mt-2 text-sm text-slate-500">{gates.loading ? "Evaluando calidad…" : gates.error ? "Calidad no disponible para este preview." : "Sin evaluación de calidad para este preview."}</p>}</CardContent></Card>
       {historical.error && <p role="alert" className="text-sm text-rose-700">No fue posible consultar la venta histórica para la gráfica.</p>}
       {customer.error && <p className="text-sm text-slate-500">Fcst Cliente no disponible; no se sustituyen datos ausentes.</p>}
-      {historical.loading ? <p role="status" className="rounded-xl border bg-white p-5 text-sm text-slate-500">Preparando gráfica histórica…</p> : points.length ? <ForecastTraderChart points={points} cutoff={cutoff} visible={seriesVisibility ?? defaultVisibility} onChange={key => setSeriesVisibility?.(v => ({ ...v, [key]: !v[key] }))}/> : <p className="rounded-xl border bg-white p-5 text-sm text-slate-500">No hay meses publicados para graficar en este filtro.</p>}
+      {historical.loading ? <p role="status" className="rounded-xl border bg-white p-5 text-sm text-slate-500">Preparando gráfica histórica…</p> : points.length ? <ForecastTraderChart points={points} cutoff={chartCutoff} visible={seriesVisibility ?? defaultVisibility} onChange={key => setSeriesVisibility?.(v => ({ ...v, [key]: !v[key] }))} operationalSelection={currentHorizons.length === 12}/> : <p className="rounded-xl border bg-white p-5 text-sm text-slate-500">No hay meses publicados para graficar en este filtro.</p>}
     </> : <DashboardAllScopesChart scopes={summary.data.byScope} />}</div>
     <Card className="mt-5 border-slate-200 shadow-sm"><CardContent className="p-5"><h2 className="font-semibold">Cobertura por scope</h2><p className="mt-2 text-sm text-slate-500">Los scopes padre e hijo se presentan por separado. El número de observaciones es un conteo de registros, no una suma de cantidades entre niveles.</p><div className="mt-4"><DataTable headers={["Cadena / unidad comercial", "Observaciones"]} rows={summary.data.byScope.map(s => [s.chain.name, number(s.observations)])}/></div></CardContent></Card>
   </>}</div>;

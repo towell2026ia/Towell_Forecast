@@ -5,6 +5,8 @@ import { PreviewReadError } from "@/lib/forecast-preview";
 import { defaultVisibility, quantity, scopeHorizons, scopeProvisionalHorizons, traderPoints, type CustomerMonth, type HistoricalMonth, type SeriesVisibility } from "@/lib/forecast-chart-data";
 import { ForecastTraderChart } from "@/components/forecast/forecast-trader-chart";
 import { EngineComparison } from "@/components/forecast/engine-comparison";
+import { E4Operations } from "@/components/forecast/e4-operations";
+import { selectedForecastHorizons, useCurrentForecastSelection } from "@/lib/forecast-e4-ui";
 import { ForecastGrid, ForecastHorizonTable, ExecutiveComparison } from "@/components/forecast/forecast-horizon-table";
 import { ForecastSummary, humanStatus } from "@/components/forecast/forecast-summary";
 import { ForecastEnginesTabs, type EngineTab } from "@/components/forecast/forecast-engines-tabs";
@@ -12,7 +14,7 @@ import { MLEngineDetail } from "@/components/forecast/ml-engine-detail";
 import { StatisticalEngineDetail } from "@/components/forecast/statistical-engine-detail";
 import { useForecastFilters, type PreviewView } from "./forecast-towell-app";
 import { currentRetrospectivePreview } from "@/lib/preview-presentation";
-import type { VintageDetail, VintageSummary } from "@/lib/forecast-preview";
+import type { VintageCapabilities, VintageDetail, VintageSummary } from "@/lib/forecast-preview";
 
 const safeError = (error: unknown) => error instanceof PreviewReadError ? error.code : "DATA_READ_FAILED";
 const researchFailure = (reason?: string) => ({
@@ -33,8 +35,16 @@ const labels = ["En cola", "Datos", "Elegibilidad", "Estadístico", "Machine Lea
 export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit?: () => void }) {
   const { repository, filters, profile, seriesVisibility, setSeriesVisibility, preview: sharedPreview, setPreview: sharedSetPreview } = useForecastFilters();
   const client = repository.previews;
+  const currentSelection = useCurrentForecastSelection(client, filters.chainId, filters.productId);
   const [localVisibility, setLocalVisibility] = useState<SeriesVisibility>({ ...defaultVisibility });
   const [tab, setTab] = useState<EngineTab>("summary");
+  const [e4Capabilities, setE4Capabilities] = useState<VintageCapabilities | null>(null);
+  useEffect(() => {
+    let alive = true;
+    if (client?.vintageCapabilities) void client.vintageCapabilities().then(flags => { if (alive) setE4Capabilities(flags); })
+      .catch(() => { if (alive) setE4Capabilities(null); });
+    return () => { alive = false; };
+  }, [client]);
   const [localPreview, setLocalPreview] = useState<PreviewView | null>(null);
   const setPreview = sharedSetPreview ?? setLocalPreview;
   const [compareTowell, setCompareTowell] = useState(false);
@@ -109,7 +119,9 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
   const actual = history?.key === historyKey ? history : null;
   const horizons = scopeHorizons(stale ? null : selected, filters);
   const provisionalHorizons = scopeProvisionalHorizons(selected, filters);
-  const points = traderPoints(actual?.rows ?? [], actual?.customer ?? [], horizons, cutoff, filters, provisionalHorizons);
+  const currentHorizons = selectedForecastHorizons(currentSelection);
+  const chartCutoff = currentHorizons.length === 12 ? currentSelection?.issue_period.slice(0,7) : cutoff;
+  const points = traderPoints(actual?.rows ?? [], actual?.customer ?? [], currentHorizons.length ? currentHorizons : horizons, chartCutoff, filters, provisionalHorizons);
   const product = selected?.products?.find(p => p.product_id === filters.productId);
   const noEligible = !provisional && (selected?.error_code === "NO_ELIGIBLE_PRODUCTS" || Boolean(filters.productId && product &&
     ["INSUFFICIENT", "COLD_START", "PRE-LAUNCH", "INACTIVE"].includes(product.forecast_status) && !product.horizons?.length));
@@ -137,7 +149,9 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
       <p className="text-xs">Evaluación retrospectiva rolling-origin de productos comparables. No constituye certificación point-in-time ni mide el error futuro del producto nuevo.</p>
       <div className="border-t border-blue-200 pt-3"><h3 className="font-medium">Investigación pública complementaria</h3>{provisional.research?.status === "PENDING" ? <p>Consultando fuentes públicas…</p> : provisional.research?.status === "COMPLETED" ? <><p className="whitespace-pre-wrap">{provisional.research.summary}</p><ul>{provisional.research.sources?.map(source => <li key={source.url}><a className="underline" href={source.url} target="_blank" rel="noopener noreferrer">{source.title}</a></li>)}</ul></> : <p>{provisional.research?.status === "DISABLED" ? "No habilitada en el servidor. La estimación cuantitativa no depende de esta consulta." : `${researchFailure(provisional.research?.reason)} La estimación cuantitativa permanece independiente.`}</p>}</div>
     </section>}
-    <ForecastEnginesTabs value={tab} onChange={setTab}/>
+    <ForecastEnginesTabs value={tab} onChange={setTab} operational={Boolean(e4Capabilities?.forecast_calculation_history)}/>
+    {tab === "decision" && e4Capabilities?.forecast_calculation_history && client && <div role="tabpanel" id="engine-panel-decision" aria-labelledby="engine-tab-decision"><E4Operations key={`${filters.chainId}/${filters.productId}/decision`} mode="decision" client={client} chainId={filters.chainId} productId={filters.productId} canWrite={profile.global_role !== "VIEWER"} canDecide={profile.global_role === "ADMIN" && Boolean(e4Capabilities.forecast_selection)}/></div>}
+    {tab === "history" && e4Capabilities?.forecast_calculation_history && client && <div role="tabpanel" id="engine-panel-history" aria-labelledby="engine-tab-history"><E4Operations key={`${filters.chainId}/${filters.productId}/history`} mode="history" client={client} chainId={filters.chainId} productId={filters.productId} canWrite={profile.global_role !== "VIEWER"} canDecide={false}><VintagesPanel key={filters.chainId ?? "all"} chainId={filters.chainId}/></E4Operations></div>}
     {tab === "vintages" && <div role="tabpanel" id="engine-panel-vintages" aria-labelledby="engine-tab-vintages"><VintagesPanel key={filters.chainId ?? "all"} chainId={filters.chainId}/></div>}
     {tab === "statistical" && <div role="tabpanel" id="engine-panel-statistical" aria-labelledby="engine-tab-statistical" className="space-y-4">{provisional ? <><p className="rounded-xl border bg-white p-5 text-sm text-slate-600">El motor estadístico validado requiere más historial propio. Se grafica el líder provisional de comparables, no un pronóstico estadístico certificado ni un WAPE de este producto.</p><ForecastTraderChart points={points} cutoff={cutoff} visible={visible} onChange={series => setVisible(v => ({ ...v, [series]: !v[series] }))}/></> : noEligible ? <p className="rounded-xl border bg-white p-5 text-sm text-slate-600">No se ejecutó el motor estadístico: el producto no reúne el historial mínimo. No hay WAPE, Bias ni pronóstico que mostrar.</p> : <StatisticalEngineDetail scope={stale ? null : selected} scopes={stale ? [] : scopes} filters={filters} historical={actual?.rows ?? []} historyError={actual?.error} cutsStatus={current?.result?.cuts_status ?? current?.job?.cuts_status} compareTowell={compareTowell} onCompare={() => setCompareTowell(v => !v)}/>}</div>}
     {tab === "ml" && <div role="tabpanel" id="engine-panel-ml" aria-labelledby="engine-tab-ml" className="space-y-4">{provisional ? <><p className="rounded-xl border bg-white p-5 text-sm text-slate-600">Random Forest global, trayectoria análoga y baseline se evaluaron con comparables. La línea muestra sólo el método provisional elegido; no inventamos una línea ML separada cuando Random Forest no ganó.</p><ForecastTraderChart points={points} cutoff={cutoff} visible={visible} onChange={series => setVisible(v => ({ ...v, [series]: !v[series] }))}/></> : noEligible ? <p className="rounded-xl border bg-white p-5 text-sm text-slate-600">No se ejecutó Machine Learning para este producto. No se atribuyen métricas de otros productos a Oxford.</p> : <MLEngineDetail scope={stale ? null : selected} scopes={stale ? [] : scopes} filters={filters} historical={actual?.rows ?? []} horizons={horizons} historyError={actual?.error} cutsStatus={current?.result?.cuts_status ?? current?.job?.cuts_status}/>}</div>}
@@ -148,10 +162,11 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
       {!actual && <p className="text-xs text-slate-500">Consultando histórico…</p>}
       {actual?.customerError && <p className="text-xs text-slate-500">Fcst Cliente: consulta no disponible. No se sustituyen datos ausentes.</p>}
       {filters.search && !filters.productId && <p className="text-xs text-slate-500">El histórico refleja la búsqueda. Selecciona un producto para comparar su forecast; E2 no entrega un agregado de la búsqueda.</p>}
-      <ForecastTraderChart points={points} cutoff={cutoff} visible={visible} onChange={series => setVisible(v => ({ ...v, [series]: !v[series] }))} previous={previous}/>
+      {currentSelection && <p className="rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-950"><strong>Forecast Towell vigente:</strong> {currentSelection.calculation_code} · {currentSelection.selected_candidate}. Curva H1–H12 elegida por Towell; no es Champion.</p>}
+      <ForecastTraderChart points={points} cutoff={chartCutoff} visible={visible} onChange={series => setVisible(v => ({ ...v, [series]: !v[series] }))} previous={previous} operationalSelection={currentHorizons.length === 12}/>
       {selected && !stale && !noEligible && !provisional && <EngineComparison scope={selected} horizons={horizons} productId={filters.productId}/>}
-      {!noEligible && !provisional && <ExecutiveComparison points={points} cutoff={cutoff}/>}
-      {!noEligible && !provisional && <ForecastHorizonTable horizons={horizons} product={Boolean(filters.productId)}/>}
+      {!noEligible && !provisional && <ExecutiveComparison points={points} cutoff={chartCutoff}/>}
+      {!noEligible && !provisional && <ForecastHorizonTable horizons={currentHorizons.length === 12 ? currentHorizons : horizons} product={Boolean(filters.productId)}/>}
     </> : <>
       <p className="rounded-xl border bg-white p-5 text-sm text-slate-500">Selecciona una cadena para visualizar la evolución temporal y el pronóstico.</p>
       {current?.job?.cuts_status === "CUTS_NOT_ALIGNED" && <p className="inline-block rounded-full bg-blue-50 px-3 py-1 text-xs text-blue-800">Cortes diferentes por cadena · CUTS_NOT_ALIGNED</p>}

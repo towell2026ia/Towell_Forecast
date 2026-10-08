@@ -67,6 +67,10 @@ class Settings:
     vintage_persistence_enabled: bool = False
     official_publication_enabled: bool = False
     champion_publication_enabled: bool = False
+    forecast_calculation_history_enabled: bool = False
+    forecast_selection_enabled: bool = False
+    capture_center_enabled: bool = False
+    live_learning_enabled: bool = False
     service_target_fill_rate: float = 95.0
     quality_policy_version: str = "E3-GATES-1.0.0"
     minimum_history_months: int = 18
@@ -131,6 +135,14 @@ class Settings:
             raise ValueError("champion_requires_vintage_persistence")
         if self.vintage_persistence_enabled and not self.operational_preview_enabled:
             raise ValueError("vintage_requires_operational_preview")
+        if any((self.forecast_calculation_history_enabled, self.forecast_selection_enabled,
+                self.capture_center_enabled, self.live_learning_enabled)):
+            if not self.operational_preview_enabled or not self.supabase_service_role_key:
+                raise ValueError("e4_requires_supabase_write_repository")
+            if self.forecast_selection_enabled and not self.forecast_calculation_history_enabled:
+                raise ValueError("selection_requires_calculation_history")
+            if self.live_learning_enabled and not (self.forecast_calculation_history_enabled and self.capture_center_enabled):
+                raise ValueError("live_requires_history_and_capture")
         if not 0 < self.service_target_fill_rate <= 100:
             raise ValueError("invalid_service_target_fill_rate")
         if self.quality_policy_version not in {"E3-GATES-1.0.0", "E3-GATES-2.0.0"} or self.minimum_history_months < 1 or not (
@@ -235,6 +247,10 @@ class Settings:
             vintage_persistence_enabled=flag("VINTAGE_PERSISTENCE_ENABLED", False),
             official_publication_enabled=flag("OFFICIAL_PUBLICATION_ENABLED", False),
             champion_publication_enabled=flag("CHAMPION_PUBLICATION_ENABLED", False),
+            forecast_calculation_history_enabled=flag("FORECAST_CALCULATION_HISTORY_ENABLED", False),
+            forecast_selection_enabled=flag("FORECAST_SELECTION_ENABLED", False),
+            capture_center_enabled=flag("CAPTURE_CENTER_ENABLED", False),
+            live_learning_enabled=flag("LIVE_LEARNING_ENABLED", False),
             service_target_fill_rate=_float(env.get("SERVICE_TARGET_FILL_RATE", "95.0"), "SERVICE_TARGET_FILL_RATE"),
             quality_policy_version=env.get("QUALITY_POLICY_VERSION", "E3-GATES-1.0.0"),
             minimum_history_months=number("MINIMUM_HISTORY_MONTHS", 18, 120),

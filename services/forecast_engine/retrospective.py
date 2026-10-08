@@ -310,13 +310,16 @@ def forecast_chain(products, issue, policy, incumbent, on_stage=None):
                            "observations": sum(r["horizon"] == h for r in comparable)} for h in HORIZONS]
             product_candidates.append({"family": family, "model": model,
                 "strategy": family, "product_id": item.product_id,
+                "statistical_weight": weight_value if family == "ensemble" else None,
+                "ensemble_ml_model": ml_choice if family == "ensemble" else None,
                 **metrics, "observations": len(comparable),
                 "windows": len({row["origin"] for row in comparable}),
                 "by_horizon": by_horizon, "evaluation_signature": signature,
                 "evidence_mode": "RETROSPECTIVE_TRAINING",
                 "horizons": [{"horizon": row["horizon"], "target_period": row["target_period"],
                     "value": round(product_ml_forecasts[(item.product_id, row["horizon"])] if family == "ml" else
-                                   row["statistical"] * weight_value + (row["ml"] or 0) * (1 - weight_value), 2)}
+                                   row["statistical"] * weight_value + (row["ml"] or 0) * (1 - weight_value), 2),
+                    "ml_component": round(row["ml"], 2) if family == "ensemble" and row["ml"] is not None else None}
                     for row in own_forecast]})
         suggested_references[item.product_id] = suggest_reference(
             [candidate for candidate in product_candidates if candidate["product_id"] == item.product_id])
