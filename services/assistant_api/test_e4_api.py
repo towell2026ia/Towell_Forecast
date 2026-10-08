@@ -122,8 +122,12 @@ class E4ApiTests(unittest.TestCase):
         self.assertEqual(name, "e4_create_calculation")
         self.assertEqual(len(payload["p"]["horizons"]), 12)
         self.assertEqual(payload["p"]["input_observation_ids"], [self.source._records[0]["source_id"]])
-        self.assertEqual(self.client.get(f"/api/forecast/calculations/{result.json()['calculation_id']}",
-            headers=headers).json()["status"], "READY_FOR_DECISION")
+        readback = self.client.get(f"/api/forecast/calculations/{result.json()['calculation_id']}",
+            headers=headers).json()
+        self.assertEqual(readback["status"], "READY_FOR_DECISION")
+        self.assertEqual([row["p50"] for row in readback["horizons"]],
+                         [row["p50"] for row in self.preview["products"][0]["horizons"]])
+        self.assertEqual(readback["horizons"], payload["p"]["horizons"])
         selection = self.client.post(f"/api/forecast/calculations/{result.json()['calculation_id']}/select",
             json={"selected_candidate": "ENSEMBLE"}, headers=headers)
         self.assertEqual(selection.status_code, 200, selection.text)

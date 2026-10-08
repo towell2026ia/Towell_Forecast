@@ -42,7 +42,7 @@ export type VintageCapabilities = { vintage_persistence: boolean; official_publi
 export type CalculationSummary = { id: string; chain_id: string; product_id: string; calculation_no: number; calculation_code: string;
   issue_period: string; status: string; created_at: string; suggested_reference: SuggestedReference | null; recalculation_reason: string | null };
 export type CalculationHorizon = { horizon: number; target_period: string; statistical_value: number; ml_value: number | null;
-  ensemble_value: number | null; p10: number | null; p50: number | null; p90: number | null; p95: number | null;
+  ensemble_value: number | null; p10: number | null; p50: number; p90: number | null; p95: number | null;
   band_basis: string; band_observations: number; statistical_model: string | null; ml_model: string | null;
   ensemble_ml_model?: string | null; ensemble_ml_component?: number | null; statistical_weight?: number | null; ml_weight?: number | null };
 export type SelectionEvent = { id: string; calculation_id: string; selected_candidate: "STATISTICAL" | "ML" | "ENSEMBLE";

@@ -79,7 +79,7 @@ try {
       target_period:new Date(Date.UTC(2026,7+i,1)).toISOString().slice(0,10),
       statistical_value:100+i,ml_value:90+i,ensemble_value:95+i,
       ensemble_ml_component:90+i,ensemble_ml_model:'Scope Forest',statistical_weight:.5,ml_weight:.5,
-      p10:null,p50:null,p90:null,p95:null,band_basis:'INSUFFICIENT',band_observations:0,
+      p10:null,p50:95+i,p90:null,p95:null,band_basis:'INSUFFICIENT',band_observations:0,
       band_status:'INSUFFICIENT_BAND_EVIDENCE'}))
   })
   const first = payload(id.admin,'calc-1')
@@ -95,8 +95,48 @@ try {
   await run('C1 creates twelve immutable horizons', async () => {
     calc1 = (await one(`select public.e4_create_calculation(${q(first)}) as id`)).id
     assert.equal((await one(`select count(*)::int as n from public.forecast_calculation_horizons where calculation_id='${calc1}'`)).n,12)
+    const readback = (await db.query(`select horizon,p50,p10,p90,p95 from public.forecast_calculation_horizons where calculation_id='${calc1}' order by horizon`)).rows
+    assert.deepEqual(readback.map(row => Number(row.p50)),first.horizons.map(row => row.p50))
+    assert.ok(readback.every(row => row.p10 === null && row.p90 === null && row.p95 === null))
     assert.equal((await one(`select public.e4_create_calculation(${q(first)}) as id`)).id,calc1)
     await reject(`update public.forecast_calculation_horizons set statistical_value=1 where calculation_id='${calc1}'`, '23514')
+  })
+  for (const basis of ['PRODUCT','CATEGORY','CHAIN']) {
+    await run(`${basis} full bands preserve central P50`, async () => {
+      const available = {...payload(id.admin,`band-${basis}`), recalculation_reason:'Nueva evidencia externa'}
+      available.horizons = available.horizons.map(row => ({...row,band_basis:basis,band_status:'AVAILABLE',
+        band_observations:3,p10:row.p50-10,p90:row.p50+10,p95:row.p50+20}))
+      await db.exec('begin')
+      try {
+        const calc = (await one(`select public.e4_create_calculation(${q(available)}) as id`)).id
+        const readback = (await db.query(`select p10,p50,p90,p95,band_basis from public.forecast_calculation_horizons where calculation_id='${calc}' order by horizon`)).rows
+        assert.equal(readback.length,12)
+        assert.deepEqual(readback.map(row => [Number(row.p10),Number(row.p50),Number(row.p90),Number(row.p95),row.band_basis]),
+          available.horizons.map(row => [row.p10,row.p50,row.p90,row.p95,basis]))
+      } finally { await db.exec('rollback') }
+    })
+  }
+  await run('INSUFFICIENT rejects missing or negative P50', async () => {
+    for (const p50 of [null,-1]) {
+      const invalid = {...payload(id.admin,`bad-p50-${p50}`),recalculation_reason:'Nueva evidencia externa'}
+      invalid.horizons[0].p50 = p50
+      await reject(`select public.e4_create_calculation(${q(invalid)})`, '23514')
+    }
+  })
+  await run('INSUFFICIENT rejects fabricated P10 P90 P95', async () => {
+    for (const quantile of ['p10','p90','p95']) {
+      const invalid = {...payload(id.admin,`bad-${quantile}`),recalculation_reason:'Nueva evidencia externa'}
+      invalid.horizons[0][quantile] = 96
+      await reject(`select public.e4_create_calculation(${q(invalid)})`, '23514')
+    }
+  })
+  await run('AVAILABLE still requires sufficient complete ordered evidence', async () => {
+    for (const overrides of [{p90:null},{band_observations:2},{p10:110},{p95:90}]) {
+      const invalid = {...payload(id.admin,`bad-available-${JSON.stringify(overrides)}`),recalculation_reason:'Nueva evidencia externa'}
+      invalid.horizons[0] = {...invalid.horizons[0],band_basis:'PRODUCT',band_status:'AVAILABLE',
+        band_observations:3,p10:80,p90:100,p95:105,...overrides}
+      await reject(`select public.e4_create_calculation(${q(invalid)})`, '23514')
+    }
   })
   let calc2
   await run('C2 requires a reason and does not replace C1', async () => {

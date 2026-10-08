@@ -89,11 +89,13 @@ def snapshot_from_preview(preview: dict[str, Any], *, product_id: str, preview_i
             raise PreviewError("CALCULATION_INVALID", 409)
         basis = source.get("band_basis") or "INSUFFICIENT"
         bands = [_amount(source.get(key), nullable=True) for key in ("p10", "p50", "p90", "p95")]
-        # Preview p50 is also its central curve even when no residual band exists.
-        # E4 must not persist that central value as a fabricated confidence band.
+        # P50 is the literal provisional central curve, not a certified band.
+        # Never derive it from another candidate or reconstruct it on readback.
+        if bands[1] is None or bands[1] != _amount(source.get("forecast_towell")):
+            raise PreviewError("CALCULATION_INVALID", 409)
         if basis == "INSUFFICIENT":
-            bands = [None, None, None, None]
-        if any(value is not None for value in bands) and (any(value is None for value in bands) or bands != sorted(bands)):
+            bands = [None, bands[1], None, None]
+        elif any(value is None for value in bands) or bands != sorted(bands):
             raise PreviewError("CALCULATION_INVALID", 409)
         count = int(source.get("band_observations") or 0)
         if basis not in {"PRODUCT", "CATEGORY", "CHAIN", "INSUFFICIENT"} or count < 0 or (basis == "INSUFFICIENT") != (bands[0] is None):

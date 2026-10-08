@@ -6,6 +6,7 @@ from services.assistant_api.calculation_history import (
     learning_event, live_metrics, live_rows, selection_curve, snapshot_from_preview, validate_selection,
 )
 from services.assistant_api.supabase_access import PreviewError
+from services.assistant_api.persistence import content_hash
 from services.forecast_engine.engine import add_month
 
 
@@ -17,6 +18,7 @@ ACTOR = "00000000-0000-4000-8000-000000000003"
 def preview():
     horizons = [{"horizon": n, "target_period": add_month("2026-07", n),
         "statistical_value": 100 + n, "ml_value": 90 + n, "ensemble_value": 95 + n,
+        "forecast_towell": 95 + n,
         "statistical_model": "SBA", "ml_model": "Random Forest Global",
         "p10": None, "p50": 95 + n, "p90": None, "p95": None,
         "band_basis": "INSUFFICIENT", "band_observations": 0} for n in range(1, 13)]
@@ -46,15 +48,48 @@ def calculation():
 
 
 class CalculationHistoryTests(unittest.TestCase):
-    def test_snapshot_preserves_three_curves_and_null_bands(self):
+    def test_snapshot_preserves_three_curves_and_provisional_p50(self):
         result = calculation()
         self.assertEqual(len(result["horizons"]), 12)
         self.assertEqual(result["suggested_reference"]["family"], "ensemble")
         self.assertEqual(result["horizons"][0]["statistical_value"], 101)
         self.assertEqual(result["horizons"][0]["ml_value"], 91)
         self.assertEqual(result["horizons"][0]["ensemble_value"], 96)
-        self.assertIsNone(result["horizons"][0]["p50"])
+        for row, source in zip(result["horizons"], preview()["products"][0]["horizons"]):
+            self.assertEqual(row["p50"], source["p50"])
+            self.assertEqual(row["p50"], source["forecast_towell"])
+            self.assertEqual([row[key] for key in ("p10", "p90", "p95")], [None, None, None])
+            self.assertEqual(row["band_status"], "INSUFFICIENT_BAND_EVIDENCE")
         self.assertEqual(result["horizons"][0]["band_basis"], "INSUFFICIENT")
+
+    def test_available_bands_preserve_product_category_chain_evidence(self):
+        for basis in ("PRODUCT", "CATEGORY", "CHAIN"):
+            with self.subTest(basis=basis):
+                source = preview()
+                for row in source["products"][0]["horizons"]:
+                    row.update(band_basis=basis, band_observations=3,
+                               p10=row["p50"]-10, p90=row["p50"]+10, p95=row["p50"]+20)
+                saved = snapshot_from_preview(source, product_id=PRODUCT, preview_id="p", actor_id=ACTOR, git_sha="test")
+                for original, row in zip(source["products"][0]["horizons"], saved["horizons"]):
+                    self.assertEqual(row["band_basis"], basis)
+                    self.assertEqual(row["band_status"], "AVAILABLE")
+                    self.assertEqual([row[key] for key in ("p10", "p50", "p90", "p95")],
+                                     [original[key] for key in ("p10", "p50", "p90", "p95")])
+
+    def test_p50_must_be_present_nonnegative_and_match_preview_central_curve(self):
+        for value in (None, -1, float("nan"), float("inf"), 97):
+            with self.subTest(p50=value):
+                source = preview()
+                source["products"][0]["horizons"][0]["p50"] = value
+                with self.assertRaises(PreviewError):
+                    snapshot_from_preview(source, product_id=PRODUCT, preview_id="p", actor_id=ACTOR, git_sha="test")
+
+    def test_content_hash_includes_literal_provisional_p50(self):
+        saved = snapshot_from_preview(preview(), product_id=PRODUCT, preview_id="p", actor_id=ACTOR, git_sha="test")
+        digest = saved.pop("content_hash")
+        self.assertEqual(digest, content_hash(saved))
+        saved["horizons"][0]["p50"] += 1
+        self.assertNotEqual(digest, content_hash(saved))
 
     def test_selected_curve_is_all_twelve_and_never_mutates_source(self):
         source = calculation()

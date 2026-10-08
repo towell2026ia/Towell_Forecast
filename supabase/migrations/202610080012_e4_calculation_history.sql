@@ -58,7 +58,7 @@ create table public.forecast_calculation_horizons (
   unique (calculation_id,horizon), unique (calculation_id,target_period),
   constraint e4_band_shape check (
     (band_basis='INSUFFICIENT' and band_status='INSUFFICIENT_BAND_EVIDENCE' and
-      p10 is null and p50 is null and p90 is null and p95 is null)
+      p10 is null and p50 is not null and p50>=0 and p90 is null and p95 is null)
     or (band_basis<>'INSUFFICIENT' and band_status='AVAILABLE' and band_observations>=3 and
       p10 is not null and p50 is not null and p90 is not null and p95 is not null and
       p10>=0 and p10<=p50 and p50<=p90 and p90<=p95)),

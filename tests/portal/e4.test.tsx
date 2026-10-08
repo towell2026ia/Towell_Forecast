@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { E4Operations } from "../../components/forecast/e4-operations";
 import { ForecastEnginesTabs } from "../../components/forecast/forecast-engines-tabs";
 import { selectedForecastHorizons } from "../../lib/forecast-e4-ui";
@@ -10,7 +10,7 @@ const issue = "2026-07-01";
 const horizons = Array.from({ length: 12 }, (_, index) => ({
   horizon: index + 1, target_period: new Date(Date.UTC(2026, 7 + index, 1)).toISOString().slice(0,10),
   statistical_value: 100 + index, ml_value: 90 + index, ensemble_value: 95 + index,
-  p10: null, p50: null, p90: null, p95: null, band_basis: "INSUFFICIENT", band_observations: 0,
+  p10: null, p50: 95 + index, p90: null, p95: null, band_basis: "INSUFFICIENT", band_observations: 0,
   statistical_model: "SBA", ml_model: "Random Forest Global",
 }));
 const summary: CalculationSummary = { id: "calculation-1", chain_id: "chain-1", product_id: "product-1",
@@ -51,7 +51,12 @@ describe("E4 UI contracts", () => {
     expect(screen.getAllByText("C1").length).toBeGreaterThan(0);
     expect(screen.getAllByText("H12").length).toBeGreaterThan(0);
     expect(screen.getByRole("img", { name: /Curvas H1 a H12 de C1/ })).toBeTruthy();
-    expect(screen.getAllByText("Sin evidencia").length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Sin evidencia/).length).toBeGreaterThan(0);
+    for (const horizon of horizons) {
+      const cell = screen.getByText(`Sin evidencia / ${horizon.p50} / Sin evidencia / Sin evidencia`);
+      const row = cell.closest("tr")!;
+      expect(within(row).getByText(`H${horizon.horizon}`)).toBeTruthy();
+    }
     expect(screen.getByText("Versiones oficiales")).toBeTruthy();
     expect(screen.queryByText("Vintage separado")).toBeNull();
   });
