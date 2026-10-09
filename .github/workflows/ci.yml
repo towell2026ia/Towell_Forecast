@@ -94,6 +94,7 @@ jobs:
       - run: npm run test:supabase-security
       - run: node scripts/test_e3_schema.mjs
       - run: node scripts/test_e4_schema.mjs
+      - run: npm run test:e4-privileges
       - run: node scripts/test_user_administration.mjs
       - run: deno check supabase/functions/user-admin/index.ts
       - run: npm run test:portal

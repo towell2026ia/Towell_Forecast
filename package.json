@@ -18,6 +18,7 @@
     "test:supabase-baseline": "node scripts/test_supabase_baseline.mjs",
     "test:supabase-security": "node scripts/test_supabase_security.mjs",
     "test:e4-schema": "node scripts/test_e4_schema.mjs",
+    "test:e4-privileges": "node scripts/test_e4_service_privileges.mjs",
     "test:portal": "vitest run --no-file-parallelism --maxWorkers=1",
     "db:generate": "drizzle-kit generate"
   },

@@ -152,7 +152,13 @@ try {
     const selected = (await one(`select public.e4_select_forecast(${q(selection)}) as id`)).id
     assert.equal((await one(`select jsonb_array_length(selected_curve) as n from public.forecast_selection_events where id='${selected}'`)).n,12)
     assert.equal((await one(`select public.e4_select_forecast(${q(selection)}) as id`)).id,selected)
+    assert.equal((await one(`select status from public.forecast_calculations where id='${calc1}'`)).status,'DECIDED')
     await reject(`update public.forecast_selection_events set selected_candidate='ML' where id='${selected}'`, '23514')
+    await reject(`delete from public.forecast_selection_events where id='${selected}'`, '23514')
+  })
+  await run('calculation mathematical fields and delete remain blocked', async () => {
+    await reject(`update public.forecast_calculations set engine_version='tampered' where id='${calc1}'`, '23514')
+    await reject(`delete from public.forecast_calculations where id='${calc2}'`, '23514')
   })
   await run('browser roles cannot call write RPC', async () => {
     await db.exec('set role authenticated')
@@ -173,6 +179,8 @@ try {
     assert.equal(observation.available_at.toISOString(),observation.uploaded_at.toISOString())
     assert.equal(observation.version_no,1)
     await reject(`update public.monthly_observations set value=999 where product_id='${id.product}'`, '23514')
+    await reject(`update public.forecast_capture_sessions set order_value=999 where id='${captured}'`, '23514')
+    await reject(`delete from public.forecast_capture_sessions where id='${captured}'`, '23514')
   })
   await run('correction appends V2 and preserves V1', async () => {
     const draft = {actor_id:id.admin,chain_id:id.chain,product_id:id.product,period:'2026-08-01',
@@ -199,6 +207,10 @@ try {
       where calculation_id='${calc1}'`)
     assert.ok(Math.abs(Number(learned.metrics_json.fill_rate)-95/130*100)<1e-9)
     assert.ok(learned.signals_json.includes('SUPPLY_SHORTFALL'))
+    await reject(`update public.forecast_live_evaluations set actual_sale=999 where calculation_id='${calc1}'`, '23514')
+    await reject(`delete from public.forecast_live_evaluations where calculation_id='${calc1}'`, '23514')
+    await reject(`delete from public.forecast_learning_events where calculation_id='${calc1}'`, '23514')
+    await reject(`delete from public.forecast_live_closures where chain_id='${id.chain}'`, '23514')
   })
   await run('post-actual decision is excluded from LIVE even after actual correction', async () => {
     const decision = {actor_id:id.admin,calculation_id:calc2,selected_candidate:'ML',
