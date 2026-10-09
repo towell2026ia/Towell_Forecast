@@ -476,15 +476,37 @@ class JobTests(unittest.TestCase):
             supabase_url=URL, supabase_publishable_key=KEY, ai_assistant_api_enabled=False, state_dir=Path(self.temp.name))
         case = ProviderTests(); case.setUp()
         app = create_app(settings=config, persistence=self.storage, provider=SupabaseDataProvider(case.client), auth_provider=SupabaseAuthProvider(case.client))
-        with TestClient(app) as client:
+        with TestClient(app) as client, patch.object(OperationalMultiChainForecastRunner, "submit",
+                return_value={"job_id": "OPJ-local-auth", "status": "QUEUED", "scopes": []}) as submit:
             self.assertEqual(client.post("/api/forecast/preview-runs", json={}).status_code, 401)
             self.assertEqual(client.post("/api/forecast/preview-runs", json={}, headers={"Authorization": "Bearer invalid"}).status_code, 401)
             viewer = {"Authorization": "Bearer " + jwt("VIEWER"), "X-User-Role": "admin", "X-User-ID": USER}
             self.assertEqual(client.post("/api/forecast/preview-runs", json={}, headers=viewer).status_code, 403)
+            scope_body = {"chain_id": A, "product_id": None, "objective": "Venta",
+                          "issue_period": "2026-07", "mode": "RETROSPECTIVE_TRAINING"}
+            self.assertEqual(client.post("/api/forecast/preview-runs", json=scope_body, headers=viewer).status_code, 403)
             editor = {"Authorization": "Bearer " + jwt("EDITOR")}
             self.assertEqual(client.post("/api/forecast/preview-runs", json={"chain_id": B}, headers=editor).status_code, 403)
             self.assertEqual(client.post("/api/forecast/preview-runs", json={"chain_id": A}, headers=editor).status_code, 202)
-            self.assertEqual(client.post("/api/forecast/preview-runs", json={"chain_id": A}, headers={"Authorization": "Bearer " + jwt()}).status_code, 202)
+            admin = {"Authorization": "Bearer " + jwt()}
+            self.assertEqual(client.post("/api/forecast/preview-runs", json=scope_body, headers=admin).status_code, 202)
+            self.assertEqual(submit.call_args.kwargs["chain_ids"], [A])
+            self.assertIsNone(submit.call_args.kwargs["product_id"])
+            self.assertEqual(submit.call_args.kwargs["issue_period"], "2026-07")
+            self.assertEqual(submit.call_args.kwargs["mode"], "RETROSPECTIVE_TRAINING")
+            self.assertEqual(client.post("/api/forecast/preview-runs", json={**scope_body, "chain_id": B}, headers=editor).status_code, 403)
+            self.assertEqual(client.post("/api/forecast/preview-runs", json={**scope_body, "issue_period": "2026-13"}, headers=admin).status_code, 422)
+            preflight = {"Origin": config.frontend_url, "Access-Control-Request-Method": "POST",
+                         "Access-Control-Request-Headers": "authorization,content-type"}
+            allowed = client.options("/api/forecast/preview-runs", headers=preflight)
+            self.assertEqual(allowed.status_code, 200)
+            self.assertEqual(allowed.headers["access-control-allow-origin"], config.frontend_url)
+            self.assertIn("POST", allowed.headers["access-control-allow-methods"])
+            self.assertIn("Authorization", allowed.headers["access-control-allow-headers"])
+            self.assertIn("Content-Type", allowed.headers["access-control-allow-headers"])
+            denied = client.options("/api/forecast/preview-runs", headers={**preflight, "Origin": "https://wrong.example"})
+            self.assertEqual(denied.status_code, 400)
+            self.assertNotIn("access-control-allow-origin", denied.headers)
             self.assertEqual(client.get("/api/ready").status_code, 200)
             ready = client.get("/api/ready").json()
             self.assertFalse(ready["vintage_persistence"])

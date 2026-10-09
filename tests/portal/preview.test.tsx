@@ -103,10 +103,21 @@ describe("E2 operational UI", () => {
     harness(api({ latest: vi.fn(async () => { throw new Error("private upstream message"); }) }));
     await screen.findByRole("alert"); expect(document.body.textContent).toContain("DATA_READ_FAILED"); expect(document.body.textContent).not.toContain("private upstream message");
   });
+  it("explains a transport failure without showing its raw browser exception", async () => {
+    harness(api({ latest: vi.fn(async () => { throw new PreviewReadError("PREVIEW_NETWORK_FAILED"); }) }));
+    expect((await screen.findByRole("alert")).textContent).toContain("No se pudo establecer la conexión con Railway");
+    expect(document.body.textContent).not.toContain("TypeError");
+  });
   it("historical date filters never change operational cutoff or API input", async () => {
     const client = api(); harness(client, { ...emptyFilters, chainId: "a", periodRange: ["2025-01", "2025-02"] });
     await screen.findByText(/Datos reales hasta: 2026-07/); expect(client.latest).toHaveBeenCalledWith("a", null);
     await userEvent.click(screen.getByRole("button", { name: "Calcular vista previa" })); await waitFor(() => expect(client.create).toHaveBeenCalledWith("a", null));
+  });
+  it("submits an explicit cutoff for the authorized scope independently of historical filters", async () => {
+    const client = api(); harness(client, { ...emptyFilters, chainId: "a", periodRange: ["2025-01", "2025-02"] });
+    await userEvent.type(screen.getByLabelText("Corte explícito (opcional)"), "2026-07");
+    await userEvent.click(screen.getByRole("button", { name: "Calcular vista previa" }));
+    await waitFor(() => expect(client.create).toHaveBeenCalledWith("a", null, "2026-07"));
   });
 });
 describe("E2 Railway browser boundary", () => {
@@ -118,6 +129,30 @@ describe("E2 Railway browser boundary", () => {
     expect(url).toBe("https://backend.example/api/forecast/preview-runs"); expect(options.credentials).toBe("omit");
     expect(options.headers).toEqual({ Authorization: "Bearer synthetic-access-token", "Content-Type": "application/json" });
     expect(JSON.parse(String(options.body))).toEqual({ chain_id: "a", product_id: "p", objective: "Venta", issue_period: null, mode: "RETROSPECTIVE_TRAINING" });
+  });
+  it("submits explicit product and scope cutoffs with the same authenticated body contract", async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify(job), { status: 202 })); vi.stubGlobal("fetch", fetcher);
+    const client = new RailwayPreviewClient(auth(), "https://backend.example");
+    await client.create("a", "p", "2026-07");
+    await client.create("a", null, "2026-07");
+    for (const [index, productId] of ["p", null].entries()) {
+      const [url, options] = fetcher.mock.calls[index] as unknown as [string, RequestInit];
+      expect(url).toBe("https://backend.example/api/forecast/preview-runs"); expect(options.method).toBe("POST");
+      expect(options.headers).toEqual({ Authorization: "Bearer synthetic-access-token", "Content-Type": "application/json" });
+      expect(JSON.parse(String(options.body))).toEqual({ chain_id: "a", product_id: productId, objective: "Venta", issue_period: "2026-07", mode: "RETROSPECTIVE_TRAINING" });
+    }
+    expect(() => client.create("a", null, "2026-13")).toThrow("REQUEST_001");
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+  it("classifies transport failure and in-flight abort without exposing browser errors", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("sensitive browser detail"); }));
+    await expect(new RailwayPreviewClient(auth(), "https://backend.example").create("a", null)).rejects.toThrow("PREVIEW_NETWORK_FAILED");
+    vi.stubGlobal("fetch", vi.fn((_url: string, options: RequestInit) => new Promise((_resolve, reject) => {
+      options.signal?.addEventListener("abort", () => reject(new DOMException("sensitive abort", "AbortError")));
+    })));
+    const client = new RailwayPreviewClient(auth(), "https://backend.example");
+    const pending = client.create("a", null); await vi.waitFor(() => expect(fetch).toHaveBeenCalled());
+    client.dispose(); await expect(pending).rejects.toThrow("PREVIEW_REQUEST_ABORTED");
   });
   it("missing session, malformed origins and logout abort deny before fetch", async () => {
     const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);

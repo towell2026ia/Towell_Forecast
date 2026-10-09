@@ -17,6 +17,10 @@ import { currentRetrospectivePreview } from "@/lib/preview-presentation";
 import type { VintageCapabilities, VintageDetail, VintageSummary } from "@/lib/forecast-preview";
 
 const safeError = (error: unknown) => error instanceof PreviewReadError ? error.code : "DATA_READ_FAILED";
+const operationalErrorMessage = (code: string) => ({
+  PREVIEW_NETWORK_FAILED: "No se pudo establecer la conexión con Railway. La solicitud no obtuvo respuesta del backend.",
+  PREVIEW_REQUEST_ABORTED: "La solicitud se canceló antes de obtener respuesta. Vuelve a intentarlo sólo después de revisar la sesión.",
+} as Record<string, string>)[code] ?? code;
 const researchFailure = (reason?: string) => ({
   AUTHENTICATION: "OpenAI rechazó la autenticación. Revisa la clave configurada en Railway.",
   QUOTA: "La cuenta de API no tiene cuota o saldo disponible.",
@@ -48,6 +52,7 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
   const [localPreview, setLocalPreview] = useState<PreviewView | null>(null);
   const setPreview = sharedSetPreview ?? setLocalPreview;
   const [compareTowell, setCompareTowell] = useState(false);
+  const [explicitIssuePeriod, setExplicitIssuePeriod] = useState("");
   const visible = seriesVisibility ?? localVisibility, setVisible = setSeriesVisibility ?? setLocalVisibility;
   const [history, setHistory] = useState<{ key: string; rows: HistoricalMonth[]; customer: CustomerMonth[]; categoryName: string | null; error: boolean; customerError: boolean } | null>(null);
   const key = `${filters.chainId}/${filters.productId}`;
@@ -64,7 +69,7 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
     }).catch(error => { if (alive) setLocalPreview({ key, result: null, job: null, error: safeError(error), loading: false }); });
     return () => { alive = false; };
   }, [sharedPreview, client, filters.chainId, filters.productId, key]);
-  useEffect(() => { revision.current += 1; running.current = false; }, [key]);
+  useEffect(() => { revision.current += 1; running.current = false; setExplicitIssuePeriod(""); }, [key]);
   const jobId = current?.job?.job_id, status = current?.job?.status;
   useEffect(() => {
     if (!client || !jobId || !status || ["READY_PREVIEW", "READY_PROVISIONAL", "NOT_ELIGIBLE", "FAILED"].includes(status)) return;
@@ -87,7 +92,12 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
     running.current = true;
     const version = ++revision.current;
     setPreview(previous => ({ key, job: null, result: previous?.key === key ? previous.result : null, error: "", loading: true }));
-    try { const job = await client.create(filters.chainId, filters.productId); if (revision.current === version) setPreview(previous => ({ key, job, result: previous?.key === key ? previous.result : null, error: "", loading: false })); }
+    try {
+      const job = explicitIssuePeriod
+        ? await client.create(filters.chainId, filters.productId, explicitIssuePeriod)
+        : await client.create(filters.chainId, filters.productId);
+      if (revision.current === version) setPreview(previous => ({ key, job, result: previous?.key === key ? previous.result : null, error: "", loading: false }));
+    }
     catch (error) { if (revision.current === version) setPreview(previous => ({ key, job: null, result: previous?.key === key ? previous.result : null, error: safeError(error), loading: false })); }
     finally { if (revision.current === version) running.current = false; }
   }
@@ -127,11 +137,17 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
     ["INSUFFICIENT", "COLD_START", "PRE-LAUNCH", "INACTIVE"].includes(product.forecast_status) && !product.horizons?.length));
   const previous = Boolean(busy && current?.result);
   return <section className="space-y-5">
-    <div className="flex flex-wrap items-start justify-between gap-3"><div><h1 className="text-2xl font-semibold tracking-tight">Motores de Forecast</h1><p className="mt-2 text-sm text-slate-500">{scope}{filters.categoryId && ` · ${actual?.categoryName ?? "Categoría seleccionada"}`} · {product?.description ?? "Todos los productos"} · Venta</p><p className="mt-1 text-xs text-slate-500">Datos reales hasta: {selected?.latest_actual_period ?? cutoff ?? "corte independiente por scope"} · Preview retrospectivo</p></div><Button onClick={() => void run()} disabled={!client || profile.global_role === "VIEWER" || busy}>{busy ? "Calculando vista previa…" : "Calcular vista previa"}</Button></div>
+    <div className="flex flex-wrap items-start justify-between gap-3">
+      <div><h1 className="text-2xl font-semibold tracking-tight">Motores de Forecast</h1><p className="mt-2 text-sm text-slate-500">{scope}{filters.categoryId && ` · ${actual?.categoryName ?? "Categoría seleccionada"}`} · {product?.description ?? "Todos los productos"} · Venta</p><p className="mt-1 text-xs text-slate-500">Datos reales hasta: {selected?.latest_actual_period ?? cutoff ?? "corte independiente por scope"} · Preview retrospectivo</p></div>
+      <div className="flex flex-wrap items-end gap-2">
+        <label className="text-xs text-slate-600">Corte explícito (opcional)<input type="month" min="2000-01" max="2099-12" value={explicitIssuePeriod} onChange={event => setExplicitIssuePeriod(event.target.value)} disabled={!client || profile.global_role === "VIEWER" || busy} className="mt-1 block rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm"/></label>
+        <Button onClick={() => void run()} disabled={!client || profile.global_role === "VIEWER" || busy}>{busy ? "Calculando vista previa…" : "Calcular vista previa"}</Button>
+      </div>
+    </div>
     <p className="border-l-2 border-blue-200 pl-3 text-xs leading-5 text-slate-500">Vista previa retrospectiva. Los datos históricos están certificados en valor, pero no en fecha original de disponibilidad; las métricas no constituyen certificación point-in-time.</p>
     {profile.global_role === "VIEWER" && <p className="text-sm text-slate-500">Sólo consulta: no tienes permiso para iniciar corridas.</p>}
     {!client && <p className="text-sm text-slate-500">Conexión operacional pendiente de configuración.</p>}
-    {current?.error && <p role="alert" className="text-sm text-rose-700">No fue posible completar la consulta operacional: {current.error}</p>}
+    {current?.error && <p role="alert" className="text-sm text-rose-700">No fue posible completar la consulta operacional: {operationalErrorMessage(current.error)}</p>}
     {current?.job && <div role="status" className="rounded-xl border bg-white p-3 text-sm"><span>{noEligible ? "Historial insuficiente" : humanStatus(current.job.status)}</span>{busy && <ol className="mt-3 flex flex-wrap gap-3 text-xs">{labels.map((label, i) => <li key={label} className={i === stages.indexOf(current.job!.status) ? "font-semibold text-blue-700" : "text-slate-500"}>{i < stages.indexOf(current.job!.status) ? "✓" : i === stages.indexOf(current.job!.status) ? "●" : "○"} {label}</li>)}</ol>}</div>}
     {noEligible && <p role="status" className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">{product?.forecast_status === "INSUFFICIENT" && product.history_months !== undefined
       ? `${product.description}: ${product.history_months} meses de venta consecutivos después de su primera venta; el pronóstico validado requiere ${product.minimum_history_months ?? 6}. No se ejecutaron los modelos estadísticos ni ML para este producto. Una estimación cold start necesitará validación separada antes de mostrarse.`

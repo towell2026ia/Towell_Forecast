@@ -51,7 +51,7 @@ export type CalculationDetail = CalculationSummary & { candidate_metrics: Record
   research_snapshot: Record<string, unknown> | null; data_snapshot_hash: string; preview_id: string; engine_version: string; git_sha: string;
   horizons: CalculationHorizon[]; selection_events: SelectionEvent[]; live_evaluations: Record<string, unknown>[] };
 export interface PreviewClient {
-  create(chainId: string | null, productId: string | null): Promise<PreviewJob>;
+  create(chainId: string | null, productId: string | null, issuePeriod?: string | null): Promise<PreviewJob>;
   status(jobId: string): Promise<PreviewJob>;
   result(jobId: string, productId?: string | null): Promise<PreviewJob>;
   research?(jobId: string): Promise<PreviewJob>;
@@ -89,14 +89,23 @@ export class RailwayPreviewClient implements PreviewClient {
     if (this.controller.signal.aborted) throw new PreviewReadError("AUTH_REQUIRED");
     const { data } = await this.auth.auth.getSession();
     if (!data.session?.access_token) throw new PreviewReadError("AUTH_REQUIRED");
-    const response = await fetch(url.origin + path, { method: body ? "POST" : "GET", credentials: "omit", cache: "no-store", signal: this.controller.signal,
-      headers: { Authorization: `Bearer ${data.session.access_token}`, ...(body ? { "Content-Type": "application/json" } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
+    let response: Response;
+    try {
+      response = await fetch(url.origin + path, { method: body ? "POST" : "GET", credentials: "omit", cache: "no-store", signal: this.controller.signal,
+        headers: { Authorization: `Bearer ${data.session.access_token}`, ...(body ? { "Content-Type": "application/json" } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
+    } catch (error) {
+      if (this.controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) throw new PreviewReadError("PREVIEW_REQUEST_ABORTED");
+      throw new PreviewReadError("PREVIEW_NETWORK_FAILED");
+    }
     const result = await response.json() as { error_code?: string; job_id?: string; scopes?: unknown[] };
     if (!response.ok) throw new PreviewReadError(result.error_code && safeCodes.has(result.error_code) ? result.error_code : "DATA_READ_FAILED");
     if (typeof result.job_id !== "string" || !Array.isArray(result.scopes)) throw new PreviewReadError("DATA_READ_FAILED");
     return result as PreviewJob;
   }
-  create(chainId: string | null, productId: string | null) { return this.request("/api/forecast/preview-runs", { chain_id: chainId, product_id: productId, objective: "Venta", issue_period: null, mode: "RETROSPECTIVE_TRAINING" }); }
+  create(chainId: string | null, productId: string | null, issuePeriod?: string | null) {
+    if (issuePeriod != null && !/^20\d{2}-(0[1-9]|1[0-2])$/.test(issuePeriod)) throw new PreviewReadError("REQUEST_001");
+    return this.request("/api/forecast/preview-runs", { chain_id: chainId, product_id: productId, objective: "Venta", issue_period: issuePeriod ?? null, mode: "RETROSPECTIVE_TRAINING" });
+  }
   status(jobId: string) { return this.request(`/api/forecast/preview-runs/${encodeURIComponent(jobId)}`); }
   result(jobId: string, productId?: string | null) { return this.request(`/api/forecast/preview-runs/${encodeURIComponent(jobId)}/result${productId ? `?product_id=${encodeURIComponent(productId)}` : ""}`); }
   research(jobId: string) { return this.request(`/api/forecast/preview-runs/${encodeURIComponent(jobId)}/research`); }
