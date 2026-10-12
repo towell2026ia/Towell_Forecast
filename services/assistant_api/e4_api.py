@@ -88,9 +88,21 @@ def mount_e4_routes(app, config, identity, data, runner, writer):
 
     def detail(client, header):
         calc_id = header["id"]
+        horizons = client.rows("forecast_calculation_horizons", {
+            "select": "*", "calculation_id": f"eq.{calc_id}", "order": "horizon.asc"})
+        captures = client.rows("forecast_capture_sessions", {"select": "source_batch_id",
+            "chain_id": f"eq.{header['chain_id']}", "product_id": f"eq.{header['product_id']}",
+            "status": "eq.CONFIRMED", "source_batch_id": "not.is.null"})
+        batches = sorted({uuid_value(row["source_batch_id"]) for row in captures if row.get("source_batch_id")})
+        periods = sorted({str(row["target_period"])[:10] for row in horizons})
+        actual_sales = client.rows("portal_monthly_observations_current", {
+            "select": "observation_id,period,value,version_no,available_at,source_batch_id",
+            "chain_id": f"eq.{header['chain_id']}", "product_id": f"eq.{header['product_id']}",
+            "metric_code": "eq.SALES", "available_at": "not.is.null",
+            "source_batch_id": f"in.({','.join(batches)})", "period": f"in.({','.join(periods)})",
+            "order": "period.asc"}) if batches and periods else []
         return {**header,
-            "horizons": client.rows("forecast_calculation_horizons", {
-                "select": "*", "calculation_id": f"eq.{calc_id}", "order": "horizon.asc"}),
+            "horizons": horizons, "actual_sales": actual_sales,
             "selection_events": client.rows("forecast_selection_events", {
                 "select": "*", "calculation_id": f"eq.{calc_id}", "order": "selected_at.asc,id.asc"}),
             "live_evaluations": client.rows("forecast_live_evaluations", {

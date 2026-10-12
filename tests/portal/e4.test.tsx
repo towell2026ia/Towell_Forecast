@@ -1,9 +1,10 @@
 import React from "react";
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { E4Operations } from "../../components/forecast/e4-operations";
 import { ForecastEnginesTabs } from "../../components/forecast/forecast-engines-tabs";
 import { selectedForecastHorizons } from "../../lib/forecast-e4-ui";
+import { PreviewReadError } from "../../lib/forecast-preview";
 import type { CalculationDetail, CalculationSummary, PreviewClient } from "../../lib/forecast-preview";
 
 const issue = "2026-07-01";
@@ -24,6 +25,51 @@ const client = { calculations: vi.fn(async () => [summary]), currentSelection: v
   calculationDetail: vi.fn(async () => detail) } as unknown as PreviewClient;
 
 describe("E4 UI contracts", () => {
+  it("loads Calculation History while Selection is still disabled", async () => {
+    const historyOnly = { calculations: vi.fn(async () => [summary]),
+      currentSelection: vi.fn(async () => { throw new PreviewReadError("E4_DISABLED"); }),
+      calculationDetail: vi.fn(async () => detail) } as unknown as PreviewClient;
+    render(<E4Operations mode="history" client={historyOnly} chainId="chain-1" productId="product-1"
+      canWrite={false} canDecide={false}/>);
+    await waitFor(() => expect(screen.getByText(/Lineage: preview preview-1/)).toBeTruthy());
+    expect(screen.queryByText("No fue posible consultar los cálculos.")).toBeNull();
+  });
+
+  it("shows a confirmed actual point without LIVE and preserves unknown months", async () => {
+    const confirmed = { ...detail, actual_sales: [{ observation_id: "sale-1", period: "2026-08-01",
+      value: 98, version_no: 1, available_at: "2026-09-01T00:00:00Z", source_batch_id: "batch-1" }] };
+    const actualClient = { calculations: vi.fn(async () => [summary]), currentSelection: vi.fn(async () => null),
+      calculationDetail: vi.fn(async () => confirmed) } as unknown as PreviewClient;
+    render(<E4Operations mode="history" client={actualClient} chainId="chain-1" productId="product-1"
+      canWrite={false} canDecide={false}/>);
+    await waitFor(() => expect(screen.getByText("Venta real capturada")).toBeTruthy());
+    const chart = screen.getByRole("img", { name: /Curvas H1 a H12/ });
+    expect(chart.querySelectorAll('circle[fill="#059669"]')).toHaveLength(1);
+    expect(confirmed.live_evaluations).toHaveLength(0);
+  });
+
+  it("reuses the existing C1 preview, prevents double clicks and gives C2 its own action key", async () => {
+    const job = { job_id: "job-1", status: "READY_PREVIEW", mode: "RETROSPECTIVE_TRAINING", engine_version: "test",
+      scopes: [{ chain_id: "chain-1", status: "READY_PREVIEW", preview_id: "preview-1" }] };
+    const calculations = vi.fn().mockResolvedValueOnce([]).mockResolvedValue([summary]);
+    const create = vi.fn(async () => job), createCalculation = vi.fn<NonNullable<PreviewClient["createCalculation"]>>(async () => summary.id);
+    const writable = { calculations, currentSelection: vi.fn(async () => null), calculationDetail: vi.fn(async () => detail),
+      latest: vi.fn(async () => job), create, status: vi.fn(async () => job), result: vi.fn(async () => job),
+      createCalculation } as unknown as PreviewClient;
+    render(<E4Operations mode="decision" client={writable} chainId="chain-1" productId="product-1"
+      canWrite canDecide={false}/>);
+    await waitFor(() => expect(calculations).toHaveBeenCalledOnce());
+    const initial = screen.getByRole("button", { name: "Calcular forecast H1–H12" });
+    fireEvent.click(initial); fireEvent.click(initial);
+    await waitFor(() => expect(createCalculation).toHaveBeenCalledOnce());
+    expect(create).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByLabelText("Motivo del recálculo")).toBeTruthy());
+    fireEvent.change(screen.getByLabelText("Motivo del recálculo"), { target: { value: "Revisión gerencial" } });
+    fireEvent.click(screen.getByRole("button", { name: "Recalcular forecast H1–H12" }));
+    await waitFor(() => expect(createCalculation).toHaveBeenCalledTimes(2));
+    expect(create).toHaveBeenCalledOnce();
+    expect(createCalculation.mock.calls[0][4]).not.toBe(createCalculation.mock.calls[1][4]);
+  });
   it("shows operational decision/history tabs only after capability is enabled", () => {
     const { rerender } = render(<ForecastEnginesTabs value="summary" onChange={() => {}}/>);
     expect(screen.queryByText("Decisión")).toBeNull();

@@ -190,6 +190,27 @@ try {
     const versions = (await db.query(`select version_no,value from public.monthly_observations where product_id='${id.product}' and metric_code='SALES' order by version_no`)).rows
     assert.deepEqual(versions.map(row => Number(row.value)),[100,105])
   })
+  await run('a calculation created after its target month cannot become retroactive LIVE', async () => {
+    const result = (await one(`select public.e4_close_live('${id.chain}','${id.product}','2026-08-01','${id.admin}','late-close') as result`)).result
+    assert.equal(result.status,'NO_TEMPORALLY_ELIGIBLE_CALCULATIONS')
+    assert.equal(result.evaluations,0)
+    assert.equal((await one('select count(*)::int as n from public.forecast_live_evaluations')).n,0)
+    assert.equal((await one('select count(*)::int as n from public.forecast_live_closures')).n,0)
+    const sale = await one(`select id,version_no from public.monthly_observations
+      where product_id='${id.product}' and metric_code='SALES' order by version_no desc limit 1`)
+    await reject(`insert into public.forecast_live_evaluations(calculation_id,chain_id,product_id,horizon,target_period,
+      candidate,forecast_value,actual_sale,absolute_error,signed_error,sale_observation_id,sale_version_no)
+      values('${calc1}','${id.chain}','${id.product}',1,'2026-08-01','STATISTICAL',100,105,5,5,'${sale.id}',${sale.version_no})`, '23514')
+  })
+  // Explicit timestamp fixtures exist only in this isolated PGlite database.
+  await db.exec(`
+    alter table public.forecast_calculations disable trigger forecast_calculations_state;
+    update public.forecast_calculations set created_at='2026-07-31T20:00:00Z';
+    alter table public.forecast_calculations enable trigger forecast_calculations_state;
+    alter table public.forecast_selection_events disable trigger forecast_selection_events_immutable;
+    update public.forecast_selection_events set selected_at='2026-07-31T21:00:00Z';
+    alter table public.forecast_selection_events enable trigger forecast_selection_events_immutable;
+  `)
   await run('LIVE evaluates all mature calculations against one real version', async () => {
     const result = (await one(`select public.e4_close_live('${id.chain}','${id.product}','2026-08-01','${id.admin}','close-1') as result`)).result
     assert.equal(result.status,'CLOSED')
@@ -226,6 +247,11 @@ try {
     assert.equal(late.n,0)
     assert.equal((await one(`select count(*)::int as n from public.forecast_live_evaluations
       where candidate='STATISTICAL' and calculation_id='${calc1}'`)).n,2)
+  })
+  await run('future captures are rejected before LIVE evaluation', async () => {
+    const draft = {actor_id:id.admin,chain_id:id.chain,product_id:id.product,period:'2027-07-01',
+      order_value:120,sale_value:100,delivery_value:90,idempotency_key:'future-capture'}
+    await reject(`select public.e4_save_capture(${q(draft)})`, '23514')
   })
   await run('all required operational audit event types are recorded', async () => {
     const actions = new Set((await db.query(`select action from public.audit_log where chain_id='${id.chain}'`)).rows.map(row => row.action))

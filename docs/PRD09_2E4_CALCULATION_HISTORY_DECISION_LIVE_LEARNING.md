@@ -30,7 +30,7 @@ Todos los endpoints exigen JWT Supabase verificado en FastAPI. Las lecturas viaj
 
 El botón de cálculo en Decisión inicia o reutiliza el preview matemático, espera H1–H12 completos y los congela mediante el RPC. Si cambió el hash de datos del preview, FastAPI bloquea la escritura; no reinterpreta automáticamente entradas históricas. Deep Research sólo se guarda como snapshot de contexto y nunca entra a la selección o las fórmulas.
 
-En Historial, la comparación toma por defecto la decisión vigente y el cálculo reemplazado más reciente. La gráfica y la tabla usan las **curvas seleccionadas** alineadas por periodo, no dos curvas estadísticas por conveniencia. Venta real sólo aparece si existe una evaluación LIVE confirmada; ausencia de decisión o de real se muestra como vacío, no como cero.
+En Historial, la comparación toma por defecto la decisión vigente y el cálculo reemplazado más reciente. La gráfica y la tabla usan las **curvas seleccionadas** alineadas por periodo. Venta real capturada se consulta desde observaciones de sesiones confirmadas, incluso con LIVE apagado. Ausencia de real se muestra como SIN DATO REAL; nunca como cero. La migración 014 separa esa comparación de la elegibilidad LIVE.
 
 ## Métricas y evidencia
 

@@ -6,6 +6,7 @@ transaction boundary is deliberately separate from mathematical validation.
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -156,20 +157,40 @@ def validate_selection(calculation: dict[str, Any], candidate: str, reason: str 
 
 def live_rows(calculations: list[dict[str, Any]], *, period: str, sale: dict[str, Any],
               order: dict[str, Any] | None = None, delivery: dict[str, Any] | None = None,
-              selections: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+              selections: dict[str, dict[str, Any]] | None = None,
+              now: datetime | None = None) -> list[dict[str, Any]]:
     """Evaluate every mature issue at its ORIGINAL horizon against one sale version."""
     actual = _amount(sale["value"])
+    def stamp(value):
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo is not None else None
+        except (TypeError, ValueError):
+            return None
+    target = datetime.fromisoformat(period[:7] + "-01").replace(tzinfo=timezone.utc)
+    mature = datetime.fromisoformat(add_month(period[:7], 1) + "-01").replace(tzinfo=timezone.utc)
+    available = stamp(sale.get("available_at"))
+    first_available = stamp(sale.get("first_available_at", sale.get("available_at")))
+    current = now or datetime.now(timezone.utc)
+    if available is None or first_available is None or available > current or mature > current:
+        return []
     order_value = _amount(order["value"], nullable=True) if order else None
     delivery_value = _amount(delivery["value"], nullable=True) if delivery else None
     result = []
     for calculation in calculations:
         if calculation.get("objective") != "Venta":
             continue
+        created = stamp(calculation.get("created_at"))
+        if created is None or created >= target or created >= first_available:
+            continue
         matching = [row for row in calculation.get("horizons", []) if row["target_period"][:7] == period[:7]]
         if len(matching) != 1:
             continue
         horizon = matching[0]
         selection = (selections or {}).get(calculation["id"])
+        selected_at = stamp((selection or {}).get("selected_at"))
+        if selected_at is None or selected_at >= target or selected_at > first_available:
+            selection = None
         selected = selection.get("selected_candidate") if selection else None
         suggested = ((calculation.get("suggested_reference") or {}).get("family") or "").upper()
         forecast_values = {"STATISTICAL": horizon.get("statistical_value"), "ML": horizon.get("ml_value"),

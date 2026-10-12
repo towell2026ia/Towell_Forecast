@@ -49,7 +49,8 @@ export type SelectionEvent = { id: string; calculation_id: string; selected_cand
   selected_curve: { horizon: number; target_period: string; value: number }[]; selected_at: string; decision_reason: string | null; comment: string | null };
 export type CalculationDetail = CalculationSummary & { candidate_metrics: Record<string, ProductCandidate | null>; input_snapshot: Record<string, unknown>;
   research_snapshot: Record<string, unknown> | null; data_snapshot_hash: string; preview_id: string; engine_version: string; git_sha: string;
-  horizons: CalculationHorizon[]; selection_events: SelectionEvent[]; live_evaluations: Record<string, unknown>[] };
+  horizons: CalculationHorizon[]; selection_events: SelectionEvent[]; live_evaluations: Record<string, unknown>[];
+  actual_sales?: { observation_id: string; period: string; value: number; version_no: number; available_at: string; source_batch_id: string }[] };
 export interface PreviewClient {
   create(chainId: string | null, productId: string | null, issuePeriod?: string | null): Promise<PreviewJob>;
   status(jobId: string): Promise<PreviewJob>;
@@ -65,7 +66,7 @@ export interface PreviewClient {
   publishVintage?(vintageId: string, comment: string): Promise<string>;
   calculations?(chainId: string, productId: string): Promise<CalculationSummary[]>;
   calculationDetail?(calculationId: string): Promise<CalculationDetail>;
-  createCalculation?(chainId: string, productId: string, previewId: string, reason?: string): Promise<string>;
+  createCalculation?(chainId: string, productId: string, previewId: string, reason?: string, idempotencyKey?: string): Promise<string>;
   selectCalculation?(calculationId: string, candidate: "STATISTICAL" | "ML" | "ENSEMBLE", reason?: string, comment?: string): Promise<string>;
   currentSelection?(chainId: string, productId: string): Promise<(SelectionEvent & { calculation_code: string; issue_period: string }) | null>;
   saveCapture?(data: { chain_id: string; product_id: string; period: string; order_value: number; sale_value: number; delivery_value: number; notes?: string; correction_reason?: string }): Promise<string>;
@@ -194,9 +195,9 @@ export class RailwayPreviewClient implements PreviewClient {
     return result.calculations;
   }
   calculationDetail(calculationId: string) { return this.e4<CalculationDetail>(`/api/forecast/calculations/${encodeURIComponent(calculationId)}`); }
-  async createCalculation(chainId: string, productId: string, previewId: string, reason?: string) {
+  async createCalculation(chainId: string, productId: string, previewId: string, reason?: string, idempotencyKey?: string) {
     const result = await this.e4<{ calculation_id: string }>("/api/forecast/calculations", { chain_id: chainId, product_id: productId,
-      preview_id: previewId, recalculation_reason: reason ?? null }, `calc:${previewId}:${productId}`);
+      preview_id: previewId, recalculation_reason: reason ?? null }, idempotencyKey ?? crypto.randomUUID());
     return result.calculation_id;
   }
   async selectCalculation(calculationId: string, candidate: "STATISTICAL" | "ML" | "ENSEMBLE", reason?: string, comment?: string) {

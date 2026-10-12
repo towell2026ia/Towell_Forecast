@@ -66,7 +66,9 @@ export function CaptureCenterView() {
     if (!client?.closeLive || !filters.chainId || !filters.productId || !period) return;
     setBusy(true); setMessage("");
     try { const result = await client.closeLive(filters.chainId, filters.productId, `${period}-01`);
-      setRevision(value => value + 1); setMessage(`Cierre LIVE: ${String(result.evaluations ?? 0)} evaluaciones sobre los cálculos maduros.`); }
+      setRevision(value => value + 1); setMessage(result.status === "NO_TEMPORALLY_ELIGIBLE_CALCULATIONS"
+        ? "La venta quedó capturada. No hay cálculos emitidos antes del periodo que puedan evaluarse como LIVE."
+        : `Cierre LIVE: ${String(result.evaluations ?? 0)} evaluaciones sobre los cálculos maduros.`); }
     catch (error) { setMessage(error instanceof Error ? error.message : "No se pudo evaluar el periodo."); }
     finally { setBusy(false); }
   }

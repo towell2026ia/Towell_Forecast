@@ -178,7 +178,10 @@ class SupabaseForecastWriteRepository:
                 raise PreviewError("VINTAGE_WRITE_FAILED", 503)
             result = response.json()
             if name == "e4_close_live":
-                if not isinstance(result, dict) or result.get("status") != "CLOSED":
+                if not isinstance(result, dict) or result.get("status") not in {"CLOSED", "NO_TEMPORALLY_ELIGIBLE_CALCULATIONS"}:
+                    raise PreviewError("E4_WRITE_FAILED", 503)
+                if result["status"] == "NO_TEMPORALLY_ELIGIBLE_CALCULATIONS" and (
+                        result.get("evaluations") != 0 or result.get("learning_events") != 0):
                     raise PreviewError("E4_WRITE_FAILED", 503)
                 return result
             if name == "e3_close_target_period":

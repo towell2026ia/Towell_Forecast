@@ -1,5 +1,6 @@
 """E4 calculation/decision/LIVE rules; all data is synthetic test evidence."""
 import copy
+from datetime import datetime, timezone
 import unittest
 
 from services.assistant_api.calculation_history import (
@@ -44,7 +45,7 @@ def preview():
 def calculation():
     data = snapshot_from_preview(preview(), product_id=PRODUCT, preview_id="preview-1", actor_id=ACTOR,
         git_sha="test", input_observation_ids=["observation-1"])
-    return {**data, "id": "calc-1", "status": "READY_FOR_DECISION"}
+    return {**data, "id": "calc-1", "status": "READY_FOR_DECISION", "created_at": "2026-07-31T20:00:00Z"}
 
 
 class CalculationHistoryTests(unittest.TestCase):
@@ -146,9 +147,10 @@ class CalculationHistoryTests(unittest.TestCase):
         third["horizons"] = [{**row, "horizon": row["horizon"]-1} for row in third["horizons"][1:]]
         third["horizons"].append({**third["horizons"][-1], "horizon": 12, "target_period": "2027-09-01"})
         # One October actual evaluates July H3, August H2 and September H1.
-        rows = live_rows([first, second, third], period="2026-10", sale={"id": "sale-v2", "value": 102},
+        rows = live_rows([first, second, third], period="2026-10", sale={"id": "sale-v2", "value": 102, "available_at": "2026-11-01T00:00:00Z"},
             order={"id": "order-v1", "value": 120}, delivery={"id": "delivery-v1", "value": 90},
-            selections={"calc-1": {"selected_candidate": "ENSEMBLE"}})
+            selections={"calc-1": {"selected_candidate": "ENSEMBLE", "selected_at": "2026-07-31T21:00:00Z"}},
+            now=datetime(2026, 11, 15, tzinfo=timezone.utc))
         self.assertEqual({(row["calculation_id"], row["horizon"]) for row in rows},
             {("calc-1", 3), ("calc-2", 2), ("calc-3", 1)})
         self.assertEqual(len(rows), 10)
@@ -168,14 +170,30 @@ class CalculationHistoryTests(unittest.TestCase):
 
     def test_learning_reports_regret_without_promotion(self):
         source = calculation()
-        rows = live_rows([source], period="2026-08", sale={"id": "sale", "value": 95},
+        rows = live_rows([source], period="2026-08", sale={"id": "sale", "value": 95, "available_at": "2026-09-01T00:00:00Z"},
             order={"id": "order", "value": 100}, delivery={"id": "delivery", "value": 70},
-            selections={"calc-1": {"selected_candidate": "STATISTICAL"}})
+            selections={"calc-1": {"selected_candidate": "STATISTICAL", "selected_at": "2026-07-31T21:00:00Z"}},
+            now=datetime(2026, 10, 1, tzinfo=timezone.utc))
         event = learning_event(rows)
         self.assertEqual(event["best_candidate_actual"], "ENSEMBLE")
         self.assertGreater(event["decision_regret_absolute"], 0)
         self.assertIn("LOW_FILL_RATE", event["signals"])
         self.assertNotIn("champion", event)
+
+    def test_live_rejects_late_calculation_and_unknown_availability(self):
+        source = calculation()
+        source["created_at"] = "2026-10-11T20:00:00Z"
+        sale = {"id": "sale", "value": 95, "available_at": "2026-10-12T00:00:00Z"}
+        self.assertEqual(live_rows([source], period="2026-08", sale=sale,
+            now=datetime(2026, 11, 1, tzinfo=timezone.utc)), [])
+        source["created_at"] = "2026-07-31T20:00:00Z"
+        self.assertEqual(live_rows([source], period="2026-08", sale={"id": "sale", "value": 95}), [])
+
+    def test_live_does_not_evaluate_an_unfinished_target_month(self):
+        source = calculation()
+        self.assertEqual(live_rows([source], period="2026-08",
+            sale={"id": "sale", "value": 95, "available_at": "2026-08-15T00:00:00Z"},
+            now=datetime(2026, 8, 20, tzinfo=timezone.utc)), [])
 
 
 if __name__ == "__main__":

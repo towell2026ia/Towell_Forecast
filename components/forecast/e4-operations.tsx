@@ -1,6 +1,7 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { PreviewReadError } from "@/lib/forecast-preview";
 import type { CalculationDetail, CalculationHorizon, CalculationSummary, PreviewClient, SelectionEvent } from "@/lib/forecast-preview";
 
 type Candidate = "STATISTICAL" | "ML" | "ENSEMBLE";
@@ -9,19 +10,30 @@ const reasons = ["Información directa del cliente", "Promoción comercial", "Ca
   "Apertura/cierre de tiendas", "Cambio de distribución", "Pedido extraordinario", "Evento especial", "Experiencia comercial", "Otro"];
 const fmt = (value: number | null | undefined) => value == null ? "—" : value.toLocaleString("es-MX", { maximumFractionDigits: 2 });
 
+function actualSalesByPeriod(detail: CalculationDetail, compare: CalculationDetail | null) {
+  const actuals = new Map<string, { value: number; version: number }>();
+  for (const calculation of [detail, compare]) {
+    if (!calculation) continue;
+    for (const row of calculation.actual_sales ?? []) {
+      const period = row.period.slice(0, 7);
+      if (row.available_at && Number.isFinite(Number(row.value)) && row.version_no > (actuals.get(period)?.version ?? 0))
+        actuals.set(period, { value: Number(row.value), version: row.version_no });
+    }
+    for (const row of calculation.live_evaluations) {
+      const period = String(row.target_period ?? "").slice(0, 7), version = Number(row.sale_version_no ?? 0);
+      if (row.actual_sale != null && Number.isFinite(Number(row.actual_sale)) && version > (actuals.get(period)?.version ?? 0))
+        actuals.set(period, { value: Number(row.actual_sale), version });
+    }
+  }
+  return actuals;
+}
+
 function CalculationCurveChart({ detail, compare }: { detail: CalculationDetail; compare: CalculationDetail | null }) {
   const rows = [...detail.horizons].sort((a, b) => a.horizon - b.horizon);
   const selected = detail.selection_events.at(-1);
   const previous = compare?.selection_events.at(-1);
   const previousByPeriod = new Map(previous?.selected_curve.map(row => [row.target_period.slice(0, 7), Number(row.value)]) ?? []);
-  const actualByPeriod = new Map<string, { value: number; version: number }>();
-  for (const evaluation of [...detail.live_evaluations, ...(compare?.live_evaluations ?? [])]) {
-    const period = String(evaluation.target_period ?? "").slice(0, 7);
-    const version = Number(evaluation.sale_version_no ?? 0);
-    const value = Number(evaluation.actual_sale);
-    if (period && Number.isFinite(value) && version > (actualByPeriod.get(period)?.version ?? 0))
-      actualByPeriod.set(period, { value, version });
-  }
+  const actualByPeriod = actualSalesByPeriod(detail, compare);
   const curves = [
     { name: "Estadístico", color: "#2563eb", values: rows.map(row => row.statistical_value) },
     { name: "ML", color: "#a855f7", values: rows.map(row => row.ml_value) },
@@ -30,7 +42,7 @@ function CalculationCurveChart({ detail, compare }: { detail: CalculationDetail;
       values: rows.map(row => selected?.selected_curve.find(item => item.horizon === row.horizon)?.value ?? null) },
     ...(previous ? [{ name: `Towell ${compare?.calculation_code}`, color: "#64748b",
       values: rows.map(row => previousByPeriod.get(row.target_period.slice(0, 7)) ?? null) }] : []),
-    { name: "Venta real", color: "#059669", values: rows.map(row => actualByPeriod.get(row.target_period.slice(0,7))?.value ?? null) },
+    { name: "Venta real capturada", color: "#059669", values: rows.map(row => actualByPeriod.get(row.target_period.slice(0,7))?.value ?? null) },
   ];
   const maxima = curves.flatMap(curve => curve.values).filter((value): value is number => value !== null && Number.isFinite(value));
   const ceiling = Math.max(1, ...maxima) * 1.08;
@@ -51,9 +63,10 @@ function CalculationCurveChart({ detail, compare }: { detail: CalculationDetail;
     <svg className="mt-2 w-full" viewBox="0 0 850 258" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
       {[0, .25, .5, .75, 1].map(fraction => <g key={fraction}><line x1="46" x2="797" y1={222-190*fraction} y2={222-190*fraction} stroke="#e2e8f0"/><text x="42" y={226-190*fraction} textAnchor="end" fontSize="9" fill="#64748b">{fmt(ceiling*fraction)}</text></g>)}
       {curves.flatMap(curve => segments(curve.values).map((points, index) => <polyline key={`${curve.name}-${index}`} points={points} fill="none" stroke={curve.color} strokeWidth={curve.name.startsWith("Towell") ? 3 : 2} strokeDasharray={curve.name === `Towell ${compare?.calculation_code}` ? "5 4" : undefined}/>))}
+      {curves.flatMap(curve => curve.values.map((value, index) => value == null ? null : <circle key={`${curve.name}-point-${index}`} cx={x(index)} cy={y(value)} r={2.5} fill={curve.color}/>))}
       {rows.map((row, index) => <text key={row.horizon} x={x(index)} y="242" textAnchor="middle" fontSize="9" fill="#64748b">H{row.horizon}</text>)}
     </svg>
-    <p className="text-xs text-slate-500">Líneas ausentes = candidato no elegible; la línea Towell sólo aparece después de una decisión. {previous ? "La curva anterior se alinea por periodo calendario, no por número de horizonte." : ""}</p>
+    <p className="text-xs text-slate-500">{actualByPeriod.size ? "Venta confirmada; la elegibilidad LIVE se verifica por separado." : "SIN DATO REAL"}</p>
   </div>;
 }
 
@@ -73,10 +86,16 @@ export function E4Operations({ mode, client, chainId, productId, canWrite, canDe
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [revision, setRevision] = useState(0);
+  const running = useRef(false);
+  const calculationRequest = useRef<{ signature: string; key: string } | null>(null);
   useEffect(() => {
     let alive = true;
-    if (chainId && productId && client.calculations && client.currentSelection) {
-      void Promise.all([client.calculations(chainId, productId), client.currentSelection(chainId, productId)])
+    if (chainId && productId && client.calculations) {
+      const selection = client.currentSelection?.(chainId, productId).catch(error => {
+        if (error instanceof PreviewReadError && error.code === "E4_DISABLED") return null;
+        throw error;
+      }) ?? Promise.resolve(null);
+      void Promise.all([client.calculations(chainId, productId), selection])
         .then(([list, selection]) => { if (alive) { setRows(list); setCurrent(selection); } })
         .catch(() => { if (alive) setError("No fue posible consultar los cálculos."); });
     }
@@ -107,10 +126,12 @@ export function E4Operations({ mode, client, chainId, productId, canWrite, canDe
   }
   async function calculate() {
     if (!chainId || !productId || !client.createCalculation || !client.create || !client.status || !client.result) return;
+    if (running.current) return;
     if (rows.length && !recalcReason.trim()) { setError("Selecciona un motivo de recálculo."); return; }
-    setBusy(true); setError("");
+    running.current = true; setBusy(true); setError("");
     try {
-      const job = await client.create(chainId, productId);
+      const existing = rows.length === 0 ? await client.latest(chainId, productId) : null;
+      const job = existing?.status === "READY_PREVIEW" ? existing : await client.create(chainId, productId);
       let status = job;
       for (let attempt = 0; attempt < 60 && !["READY_PREVIEW", "READY_PROVISIONAL", "NOT_ELIGIBLE", "FAILED"].includes(status.status); attempt++) {
         await new Promise(resolve => setTimeout(resolve, 1500));
@@ -120,11 +141,15 @@ export function E4Operations({ mode, client, chainId, productId, canWrite, canDe
       const result = await client.result(job.job_id, productId);
       const scope = result.scopes.find(row => row.chain_id === chainId);
       if (!scope?.preview_id) throw new Error("Falta el identificador del preview. No se creó un cálculo.");
-      const id = await client.createCalculation(chainId, productId, scope.preview_id, rows.length ? recalcReason : undefined);
+      const signature = JSON.stringify([chainId, productId, scope.preview_id, rows.length ? recalcReason : null]);
+      if (calculationRequest.current?.signature !== signature)
+        calculationRequest.current = { signature, key: crypto.randomUUID() };
+      const id = await client.createCalculation(chainId, productId, scope.preview_id, rows.length ? recalcReason : undefined, calculationRequest.current.key);
+      calculationRequest.current = null;
       setRevision(value => value + 1);
       await open(id);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "No se pudo calcular el forecast."); }
-    finally { setBusy(false); }
+    finally { running.current = false; setBusy(false); }
   }
   async function decide() {
     if (!detail?.id || !client.selectCalculation) return;
@@ -149,6 +174,7 @@ export function E4Operations({ mode, client, chainId, productId, canWrite, canDe
   const hasCandidate = (kind: Candidate) => detail?.horizons.length === 12 && detail.horizons.every(row =>
     row[`${kind === "STATISTICAL" ? "statistical" : kind === "ML" ? "ml" : "ensemble"}_value`] != null);
   const metrics = detail?.candidate_metrics ?? {};
+  const actuals = detail ? actualSalesByPeriod(detail, compare) : new Map<string, { value: number; version: number }>();
   return <section className="space-y-4" aria-label={mode === "decision" ? "Decisión Forecast Towell" : "Historial de cálculos"}>
     {error && <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</p>}
     {mode === "history" && <div className="flex gap-2"><Button variant={tab === "calculations" ? "default" : "outline"} onClick={() => setTab("calculations")}>Cálculos C1/C2/C3</Button><Button variant={tab === "official" ? "default" : "outline"} onClick={() => setTab("official")}>Versiones oficiales</Button></div>}
@@ -162,6 +188,7 @@ export function E4Operations({ mode, client, chainId, productId, canWrite, canDe
         <div className="mt-4 overflow-x-auto"><table className="min-w-full text-left text-sm"><thead><tr className="border-b"><th className="p-2">Cálculo</th><th className="p-2">Corte</th><th className="p-2">Referencia*</th><th className="p-2">Estado</th><th className="p-2">Fecha</th><th className="p-2">Abrir</th></tr></thead><tbody>{rows.map(row => <tr className="border-b" key={row.id}><td className="p-2">{row.calculation_code}</td><td className="p-2">{row.issue_period.slice(0,7)}</td><td className="p-2">{row.suggested_reference?.model ?? "—"}</td><td className="p-2">{current?.calculation_code === row.calculation_code ? "Vigente" : row.status}</td><td className="p-2">{row.created_at.slice(0,10)}</td><td className="p-2"><Button variant="outline" size="sm" onClick={() => void open(row.id)}>Ver detalle</Button></td></tr>)}</tbody></table>{!rows.length && <p className="mt-3 text-slate-500">Aún no existe C1 para este producto.</p>}</div>
       </div>
       {detail && <div className="space-y-4 rounded-xl border bg-white p-5 text-sm"><h3 className="font-semibold">{detail.calculation_code} · {detail.issue_period.slice(0,7)} · {detail.status}</h3>
+        <p className="text-sm">Creado: {new Date(detail.created_at).toLocaleString("es-MX")} · Corte de datos: {detail.issue_period.slice(0,7)}</p>
         <CalculationCurveChart detail={detail} compare={mode === "history" ? compare : null}/>
         <p>Referencia sugerida: {detail.suggested_reference?.model ?? "Sin recomendación comparable"} * · No es Champion publicado.</p>
         <p>Lineage: preview {detail.preview_id ?? "—"} · motor {detail.engine_version} · Git {detail.git_sha} · SHA datos {detail.data_snapshot_hash}</p>
@@ -176,9 +203,8 @@ export function E4Operations({ mode, client, chainId, productId, canWrite, canDe
         <div className="overflow-x-auto"><table className="min-w-full text-left"><thead><tr className="border-b"><th className="p-2">H</th><th className="p-2">Periodo</th><th className="p-2">Stat</th><th className="p-2">ML</th><th className="p-2">Ensemble</th><th className="p-2">P10/P50/P90/P95</th><th className="p-2">Base de banda</th></tr></thead><tbody>{detail.horizons.map(row => <tr className="border-b" key={row.horizon}><td className="p-2">H{row.horizon}</td><td className="p-2">{row.target_period.slice(0,7)}</td><td className="p-2">{fmt(row.statistical_value)}</td><td className="p-2">{fmt(row.ml_value)}</td><td className="p-2">{fmt(row.ensemble_value)}</td><td className="p-2">{[row.p10,row.p50,row.p90,row.p95].map(value => value == null ? "Sin evidencia" : fmt(value)).join(" / ")}</td><td className="p-2">{row.band_basis} · {row.band_observations}</td></tr>)}</tbody></table></div>
         {mode === "history" && rows.length > 1 && <div><label>Comparar con <select className="ml-2 rounded border p-2" value={compare?.id ?? ""} onChange={event => void chooseCompare(event.target.value)}><option value="">Sin comparación</option>{rows.filter(row => row.id !== detail.id).map(row => <option key={row.id} value={row.id}>{row.calculation_code}</option>)}</select></label>{compare && <div className="mt-3 overflow-x-auto"><table className="min-w-full text-left"><thead><tr className="border-b"><th className="p-2">Periodo</th><th className="p-2">{detail.calculation_code} Towell</th><th className="p-2">{compare.calculation_code} Towell</th><th className="p-2">Variación</th><th className="p-2">Venta real</th></tr></thead><tbody>{detail.horizons.map(row => { const now = detail.selection_events.at(-1)?.selected_curve.find(item => item.target_period.slice(0,7) === row.target_period.slice(0,7))?.value;
           const before = compare.selection_events.at(-1)?.selected_curve.find(item => item.target_period.slice(0,7) === row.target_period.slice(0,7))?.value;
-          const actual = [...detail.live_evaluations, ...compare.live_evaluations].filter(item => String(item.target_period).slice(0,7) === row.target_period.slice(0,7))
-            .sort((a,b) => Number(b.sale_version_no) - Number(a.sale_version_no))[0];
-          return <tr className="border-b" key={row.horizon}><td className="p-2">{row.target_period.slice(0,7)}</td><td className="p-2">{fmt(now)}</td><td className="p-2">{fmt(before)}</td><td className="p-2">{now != null && before != null && before !== 0 ? `${fmt((now-before)/before*100)}%` : "—"}</td><td className="p-2">{fmt(actual ? Number(actual.actual_sale) : null)}</td></tr>; })}</tbody></table><p className="mt-2 text-xs text-slate-500">Se comparan decisiones congeladas por periodo calendario. Sin decisión o real confirmado, la celda queda vacía; no se sustituye por la curva estadística.</p></div>}</div>}
+          const actual = actuals.get(row.target_period.slice(0,7));
+          return <tr className="border-b" key={row.horizon}><td className="p-2">{row.target_period.slice(0,7)}</td><td className="p-2">{fmt(now)}</td><td className="p-2">{fmt(before)}</td><td className="p-2">{now != null && before != null && before !== 0 ? `${fmt((now-before)/before*100)}%` : "—"}</td><td className="p-2">{actual ? fmt(actual.value) : "SIN DATO REAL"}</td></tr>; })}</tbody></table><p className="mt-2 text-xs text-slate-500">Se comparan decisiones congeladas por periodo calendario.</p></div>}</div>}
       </div>}
     </>}
   </section>;

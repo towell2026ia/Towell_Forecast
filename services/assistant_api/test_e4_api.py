@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import unittest
+import httpx
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -13,6 +14,7 @@ from services.assistant_api.e4_api import mount_e4_routes
 from services.assistant_api.operational_preview import snapshot_hash
 from services.assistant_api.supabase_access import PreviewError
 from services.assistant_api.test_calculation_history import ACTOR, CHAIN, PRODUCT, preview
+from services.assistant_api.vintage_service import SupabaseForecastWriteRepository
 
 
 class FakeIdentity:
@@ -47,9 +49,13 @@ class FakeSource:
         if table == "forecast_live_evaluations":
             return self.saved.get("live", [])
         if table == "forecast_capture_sessions":
+            if "captures" in self.saved:
+                return self.saved["captures"]
             return [{"id": self.saved["session"], "chain_id": CHAIN, "product_id": PRODUCT, "status": "DRAFT"}] if self.saved.get("session") else []
         if table == "monthly_observations":
             return []
+        if table == "portal_monthly_observations_current":
+            return self.saved.get("actual_sales", [])
         if table == "current_forecast_selection":
             return []
         if table == "forecast_learning_events":
@@ -79,6 +85,15 @@ class FakeWriter:
 
 
 class E4ApiTests(unittest.TestCase):
+    def test_live_repository_accepts_an_explicit_no_eligible_result_without_a_false_close(self):
+        result = {"status": "NO_TEMPORALLY_ELIGIBLE_CALCULATIONS", "evaluations": 0, "learning_events": 0}
+        transport = httpx.MockTransport(lambda request: httpx.Response(200, json=result))
+        writer = SupabaseForecastWriteRepository("https://test.supabase.co", "test-secret", transport=transport)
+        self.assertEqual(writer.rpc("e4_close_live", {}), result)
+        result["evaluations"] = 1
+        with self.assertRaises(PreviewError):
+            writer.rpc("e4_close_live", {})
+
     def setUp(self):
         records = [{"chain_id": CHAIN, "product_id": PRODUCT, "period": "2026-07",
             "objective": "Venta", "value": 100, "source_id": "00000000-0000-4000-8000-000000000400",
@@ -142,6 +157,20 @@ class E4ApiTests(unittest.TestCase):
         closed = self.client.post("/api/forecast/live-evaluation", json={"chain_id": CHAIN,
             "product_id": PRODUCT, "target_period": "2026-08-01"}, headers=headers)
         self.assertEqual(closed.json()["evaluations"], 4)
+
+    def test_confirmed_actual_sales_are_readable_before_live_is_enabled(self):
+        self.flags.live_learning_enabled = False
+        headers = {"Authorization": "Bearer admin", "Idempotency-Key": "actual-sales"}
+        result = self.client.post("/api/forecast/calculations", json={"chain_id": CHAIN,
+            "product_id": PRODUCT, "preview_id": "preview-1"}, headers=headers)
+        self.saved["captures"] = [{"source_batch_id": "00000000-0000-4000-8000-000000000500"}]
+        self.saved["actual_sales"] = [{"observation_id": "sale-1", "period": "2026-08-01",
+            "value": 98, "version_no": 1, "available_at": "2026-09-01T00:00:00Z",
+            "source_batch_id": "00000000-0000-4000-8000-000000000500"}]
+        readback = self.client.get(f"/api/forecast/calculations/{result.json()['calculation_id']}", headers=headers).json()
+        self.assertEqual(readback["actual_sales"], self.saved["actual_sales"])
+        self.assertEqual(readback["live_evaluations"], [])
+        self.assertFalse(any(name == "e4_close_live" for name, _ in self.writer.calls))
 
 
 if __name__ == "__main__":
