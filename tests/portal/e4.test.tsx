@@ -5,7 +5,7 @@ import { E4Operations } from "../../components/forecast/e4-operations";
 import { ForecastEnginesTabs } from "../../components/forecast/forecast-engines-tabs";
 import { selectedForecastHorizons } from "../../lib/forecast-e4-ui";
 import { PreviewReadError } from "../../lib/forecast-preview";
-import type { CalculationDetail, CalculationSummary, PreviewClient } from "../../lib/forecast-preview";
+import type { CalculationDetail, CalculationSummary, PreviewClient, SelectionEvent } from "../../lib/forecast-preview";
 
 const issue = "2026-07-01";
 const horizons = Array.from({ length: 12 }, (_, index) => ({
@@ -25,6 +25,80 @@ const client = { calculations: vi.fn(async () => [summary]), currentSelection: v
   calculationDetail: vi.fn(async () => detail) } as unknown as PreviewClient;
 
 describe("E4 UI contracts", () => {
+  it("shows all alternatives and the suggestion without preselecting or writing a decision", async () => {
+    const reference = { family: "ensemble", model: "weighted", wape: 18.1144 } as CalculationDetail["suggested_reference"];
+    const metric = { product_id: "product-1", bias: null, mae: null, rmse: null, observations: 24,
+      windows: 12, evaluation_signature: null, evidence_mode: "RETROSPECTIVE_TRAINING", horizons: [], by_horizon: [] };
+    const ready: CalculationDetail = { ...detail, suggested_reference: reference, candidate_metrics: {
+      STATISTICAL: { ...metric, family: "statistical", strategy: "statistical", model: "SBA", wape: 18.9023 },
+      ML: { ...metric, family: "ml", strategy: "ml", model: "Random Forest Global", wape: 19.3899 },
+      ENSEMBLE: { ...metric, family: "ensemble", strategy: "ensemble", model: "weighted", wape: 18.1144 },
+    } };
+    const selectCalculation = vi.fn(async () => "event-1");
+    const decisionClient = { calculations: vi.fn(async () => [summary]), currentSelection: vi.fn(async () => null),
+      calculationDetail: vi.fn(async () => ready), selectCalculation } as unknown as PreviewClient;
+    render(<E4Operations mode="decision" client={decisionClient} chainId="chain-1" productId="product-1"
+      canWrite={false} canDecide/>);
+    await waitFor(() => expect(screen.getByText(/Referencia sugerida: weighted/)).toBeTruthy());
+    const radios = screen.getAllByRole("radio") as HTMLInputElement[];
+    expect(radios.map(radio => radio.value)).toEqual(["STATISTICAL", "ML", "ENSEMBLE"]);
+    expect(radios.every(radio => !radio.checked && !radio.disabled)).toBe(true);
+    expect((screen.getByRole("button", { name: "Adoptar como Forecast Towell" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getAllByText("H12").length).toBeGreaterThan(0);
+    for (const value of ["18.9%", "19.39%", "18.11%"]) expect(screen.getByText(value)).toBeTruthy();
+    expect(screen.getByText("Sin decisiones registradas.")).toBeTruthy();
+    expect(selectCalculation).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("radio", { name: /Ensemble/ }));
+    expect(selectCalculation).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Adoptar como Forecast Towell" }));
+    await waitFor(() => expect(selectCalculation).toHaveBeenCalledExactlyOnceWith(summary.id, "ENSEMBLE", undefined, undefined));
+    await waitFor(() => expect((screen.getByRole("radio", { name: /Ensemble/ }) as HTMLInputElement).checked).toBe(false));
+  });
+
+  it("requires a deviation reason and an Otro comment before a manual adoption", async () => {
+    const ready = { ...detail, suggested_reference: { family: "ensemble", model: "weighted" } as CalculationDetail["suggested_reference"] };
+    const selectCalculation = vi.fn(async () => "event-1");
+    const decisionClient = { calculations: vi.fn(async () => [summary]), currentSelection: vi.fn(async () => null),
+      calculationDetail: vi.fn(async () => ready), selectCalculation } as unknown as PreviewClient;
+    render(<E4Operations mode="decision" client={decisionClient} chainId="chain-1" productId="product-1"
+      canWrite={false} canDecide/>);
+    await waitFor(() => expect(screen.getByRole("radio", { name: "Estadístico" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("radio", { name: "Estadístico" }));
+    const button = screen.getByRole("button", { name: "Adoptar como Forecast Towell" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText("Motivo obligatorio"), { target: { value: "Otro" } });
+    expect(button.disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText("Comentario obligatorio"), { target: { value: "Revisión autorizada" } });
+    expect(button.disabled).toBe(false);
+    expect(selectCalculation).not.toHaveBeenCalled();
+    fireEvent.click(button);
+    await waitFor(() => expect(selectCalculation).toHaveBeenCalledExactlyOnceWith(summary.id, "STATISTICAL", "Otro", "Revisión autorizada"));
+  });
+
+  it("displays every recorded decision with its own actor, timestamp, reason and comment", async () => {
+    const events: SelectionEvent[] = [
+      { id: "selection-1", calculation_id: summary.id, selected_candidate: "STATISTICAL", selected_curve: [],
+        selected_by: "actor-first", selected_at: "2026-10-13T20:00:00Z", decision_reason: "Promoción comercial", comment: "Primera revisión" },
+      { id: "selection-2", calculation_id: summary.id, selected_candidate: "ML", selected_curve: [],
+        selected_by: "actor-second", selected_at: "2026-10-13T21:00:00Z", decision_reason: "Cambio de precio", comment: "Segunda revisión" },
+    ];
+    const historyClient = { calculations: vi.fn(async () => [summary]), currentSelection: vi.fn(async () => null),
+      calculationDetail: vi.fn(async () => ({ ...detail, selection_events: events })) } as unknown as PreviewClient;
+    render(<E4Operations mode="history" client={historyClient} chainId="chain-1" productId="product-1"
+      canWrite={false} canDecide={false}/>);
+    const table = await screen.findByRole("table", { name: "Historial de decisiones de C1" });
+    expect(within(table).getAllByRole("row")).toHaveLength(3);
+    for (const event of events) {
+      const row = within(table).getByText(event.selected_by!).closest("tr")!;
+      expect(within(row).getByText(event.decision_reason!)).toBeTruthy();
+      expect(within(row).getByText(event.comment!)).toBeTruthy();
+      expect(row.querySelector("time")?.dateTime).toBe(event.selected_at);
+    }
+    expect(within(table).getByText("13/10/2026, 14:00:00")).toBeTruthy();
+    expect(within(table).getByText("13/10/2026, 15:00:00")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Adoptar como Forecast Towell" })).toBeNull();
+  });
+
   it("loads Calculation History while Selection is still disabled", async () => {
     const historyOnly = { calculations: vi.fn(async () => [summary]),
       currentSelection: vi.fn(async () => { throw new PreviewReadError("E4_DISABLED"); }),

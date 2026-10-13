@@ -45,6 +45,17 @@ Los objetos y jobs E1 permanecen legibles e intactos. La version nueva genera ot
 La reparacion autorizada permite un unico preview de producto FENDI AZUL, corte 2026-07, no un preview de scope ni C1.
 Antes de C1 verificar el nuevo resultado, sus campos de procedencia, hash y 12 horizontes; mantener las otras flags apagadas.
 
+## Interfaz De Selection
+
+La activacion de Selection y la decision productiva son autorizaciones separadas.
+La interfaz deja las tres alternativas sin preseleccion; cargar o abrir C1 no adopta la referencia sugerida.
+El boton de adopcion exige una eleccion manual, motivo si difiere de la sugerencia y comentario para "Otro".
+El detalle conserva todos los eventos de decision, con el identificador real del usuario, fecha y hora CDMX,
+alternativa, motivo y comentario. No sustituye el usuario por el creador del calculo ni inventa identidades ausentes.
+Estos cambios son de presentacion; no recalculan curvas, modifican C1 ni crean eventos al desplegar.
+Antes de activar la flag, comprobar CI, alineacion de versiones, RPC de Selection exclusivo del servidor,
+RLS, eventos append-only y snapshot de C1 intacto. Capture, LIVE, Vintage, Official y Champion permanecen OFF.
+
 ## Reversión
 
 Si una etapa falla, apagar su flag y detener el avance. La validación fallida de política v2 exige volver a v1.

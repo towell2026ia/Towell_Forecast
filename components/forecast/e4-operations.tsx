@@ -79,7 +79,7 @@ export function E4Operations({ mode, client, chainId, productId, canWrite, canDe
   const [detail, setDetail] = useState<CalculationDetail | null>(null);
   const [compare, setCompare] = useState<CalculationDetail | null>(null);
   const [tab, setTab] = useState<"calculations" | "official">("calculations");
-  const [candidate, setCandidate] = useState<Candidate>("STATISTICAL");
+  const [candidate, setCandidate] = useState<Candidate | null>(null);
   const [reason, setReason] = useState("");
   const [comment, setComment] = useState("");
   const [recalcReason, setRecalcReason] = useState("");
@@ -105,8 +105,7 @@ export function E4Operations({ mode, client, chainId, productId, canWrite, canDe
     let alive = true;
     const target = rows.find(row => row.id === current?.calculation_id) ?? rows[0];
     if (!detail && target && client.calculationDetail) void client.calculationDetail(target.id)
-      .then(async result => { if (alive) { setDetail(result); const family = result.suggested_reference?.family?.toUpperCase();
-        if (family === "STATISTICAL" || family === "ML" || family === "ENSEMBLE") setCandidate(family);
+      .then(async result => { if (alive) { setDetail(result);
         if (mode === "history") {
           const previous = rows.find(row => row.id !== target.id && row.status === "SUPERSEDED");
           if (previous) try { const old = await client.calculationDetail!(previous.id); if (alive) setCompare(old); } catch { /* comparison remains optional */ }
@@ -119,8 +118,7 @@ export function E4Operations({ mode, client, chainId, productId, canWrite, canDe
     if (!client.calculationDetail) return;
     setError("");
     try { const result = await client.calculationDetail(id); setDetail(result);
-      const family = result.suggested_reference?.family?.toUpperCase();
-      if (family === "STATISTICAL" || family === "ML" || family === "ENSEMBLE") setCandidate(family);
+      setCandidate(null);
       setReason(""); setComment(""); }
     catch { setError("No fue posible abrir el cálculo."); }
   }
@@ -152,7 +150,7 @@ export function E4Operations({ mode, client, chainId, productId, canWrite, canDe
     finally { running.current = false; setBusy(false); }
   }
   async function decide() {
-    if (!detail?.id || !client.selectCalculation) return;
+    if (!detail?.id || !candidate || !canDecide || !client.selectCalculation) return;
     setBusy(true); setError("");
     try {
       await client.selectCalculation(detail.id, candidate, reason || undefined, comment || undefined);
@@ -170,7 +168,6 @@ export function E4Operations({ mode, client, chainId, productId, canWrite, canDe
   if ((!chainId || !productId) && mode === "history") return <div className="space-y-3"><div className="flex gap-2"><Button variant={tab === "calculations" ? "default" : "outline"} onClick={() => setTab("calculations")}>Cálculos C1/C2/C3</Button><Button variant={tab === "official" ? "default" : "outline"} onClick={() => setTab("official")}>Versiones oficiales</Button></div>{tab === "official" ? children : <p className="rounded-xl border bg-white p-5 text-sm text-slate-600">Selecciona cadena y producto para consultar sus cálculos.</p>}</div>;
   if (!chainId || !productId) return <p className="rounded-xl border bg-white p-5 text-sm text-slate-600">Selecciona una cadena y un producto para consultar sus cálculos C1/C2/C3.</p>;
   const suggested = String(detail?.suggested_reference?.family ?? "").toUpperCase();
-  const chosen = detail?.selection_events?.at(-1);
   const hasCandidate = (kind: Candidate) => detail?.horizons.length === 12 && detail.horizons.every(row =>
     row[`${kind === "STATISTICAL" ? "statistical" : kind === "ML" ? "ml" : "ensemble"}_value`] != null);
   const metrics = detail?.candidate_metrics ?? {};
@@ -196,10 +193,20 @@ export function E4Operations({ mode, client, chainId, productId, canWrite, canDe
         {detail.horizons[0]?.ensemble_value != null && <p>Ensemble congelado: {fmt((detail.horizons[0].statistical_weight ?? 0)*100)}% Estadístico + {fmt((detail.horizons[0].ml_weight ?? 0)*100)}% {detail.horizons[0].ensemble_ml_model ?? "ML del scope"}. Su componente ML puede ser distinto del ganador ML individual.</p>}
         <div className="overflow-x-auto"><table className="min-w-full text-left"><thead><tr className="border-b"><th className="p-2">Candidato</th><th className="p-2">Modelo / estrategia</th><th className="p-2">WAPE retro producto</th><th className="p-2">Bias retro</th><th className="p-2">H1</th><th className="p-2">Estado</th></tr></thead><tbody>{(["STATISTICAL","ML","ENSEMBLE"] as Candidate[]).map(kind => { const metric = metrics[kind]; const field = `${kind === "STATISTICAL" ? "statistical" : kind === "ML" ? "ml" : "ensemble"}_value` as keyof CalculationHorizon; return <tr className="border-b" key={kind}><td className="p-2">{names[kind]}</td><td className="p-2">{metric?.model ?? metric?.strategy ?? "—"}</td><td className="p-2">{fmt(metric?.wape)}%</td><td className="p-2">{fmt(metric?.bias)}%</td><td className="p-2">{fmt(detail.horizons[0]?.[field] as number | null)}</td><td className="p-2">{hasCandidate(kind) ? "Elegible" : "Sin curva"}</td></tr>; })}</tbody></table></div>
         {mode === "decision" && canDecide && detail.status !== "SUPERSEDED" && <div className="space-y-3 rounded-xl border border-blue-100 bg-blue-50 p-4"><h4 className="font-semibold">¿Qué curva utilizará Towell?</h4><div className="flex flex-wrap gap-4">{(["STATISTICAL","ML","ENSEMBLE"] as Candidate[]).map(kind => <label className="flex items-center gap-2" key={kind}><input type="radio" name="forecast-candidate" value={kind} disabled={!hasCandidate(kind)} checked={candidate === kind} onChange={() => setCandidate(kind)}/>{names[kind]} {suggested === kind ? "*" : ""}</label>)}</div>
-          {candidate !== suggested && <label className="block">Motivo obligatorio<select className="mt-1 w-full rounded border p-2" value={reason} onChange={event => setReason(event.target.value)}><option value="">Selecciona un motivo</option>{reasons.map(value => <option key={value}>{value}</option>)}</select></label>}
+          {candidate && candidate !== suggested && <label className="block">Motivo obligatorio<select className="mt-1 w-full rounded border p-2" value={reason} onChange={event => setReason(event.target.value)}><option value="">Selecciona un motivo</option>{reasons.map(value => <option key={value}>{value}</option>)}</select></label>}
           {reason === "Otro" && <label className="block">Comentario obligatorio<textarea className="mt-1 w-full rounded border p-2" value={comment} onChange={event => setComment(event.target.value)}/></label>}
-          <Button onClick={() => void decide()} disabled={busy || !hasCandidate(candidate) || !["READY_FOR_DECISION","DECIDED"].includes(detail.status) || (candidate !== suggested && !reason) || (reason === "Otro" && !comment.trim())}>Adoptar como Forecast Towell</Button><p className="text-xs">La decisión conserva H1–H12 exactos y no publica Champion. Una corrección crea otro evento.</p></div>}
-        {chosen && <p><strong>Última decisión en este cálculo:</strong> {names[chosen.selected_candidate]} · {chosen.selected_at.slice(0,10)} · {chosen.decision_reason ?? "Siguió la sugerencia"}</p>}
+          <Button onClick={() => void decide()} disabled={busy || !candidate || !hasCandidate(candidate) || !["READY_FOR_DECISION","DECIDED"].includes(detail.status) || (candidate !== suggested && !reason) || (reason === "Otro" && !comment.trim())}>Adoptar como Forecast Towell</Button><p className="text-xs">La decisión conserva H1–H12 exactos y no publica Champion. Una corrección crea otro evento.</p></div>}
+        <div><h4 className="font-semibold">Historial de decisiones</h4>
+          {detail.selection_events.length ? <div className="mt-2 overflow-x-auto"><table className="min-w-full text-left" aria-label={`Historial de decisiones de ${detail.calculation_code}`}>
+            <thead><tr className="border-b"><th className="p-2">Alternativa</th><th className="p-2">Usuario</th><th className="p-2">Fecha (CDMX)</th><th className="p-2">Motivo</th><th className="p-2">Comentario</th></tr></thead>
+            <tbody>{detail.selection_events.map(event => <tr className="border-b" key={event.id}>
+              <td className="p-2">{names[event.selected_candidate]}</td>
+              <td className="max-w-52 break-all p-2">{event.selected_by ?? "Usuario no disponible"}</td>
+              <td className="whitespace-nowrap p-2"><time dateTime={event.selected_at}>{new Date(event.selected_at).toLocaleString("es-MX", { timeZone: "America/Mexico_City", hourCycle: "h23" })}</time></td>
+              <td className="p-2">{event.decision_reason ?? "Sin motivo registrado"}</td>
+              <td className="max-w-80 break-words p-2">{event.comment ?? "Sin comentario"}</td>
+            </tr>)}</tbody></table></div> : <p className="mt-2 text-slate-500">Sin decisiones registradas.</p>}
+        </div>
         <div className="overflow-x-auto"><table className="min-w-full text-left"><thead><tr className="border-b"><th className="p-2">H</th><th className="p-2">Periodo</th><th className="p-2">Stat</th><th className="p-2">ML</th><th className="p-2">Ensemble</th><th className="p-2">P10/P50/P90/P95</th><th className="p-2">Base de banda</th></tr></thead><tbody>{detail.horizons.map(row => <tr className="border-b" key={row.horizon}><td className="p-2">H{row.horizon}</td><td className="p-2">{row.target_period.slice(0,7)}</td><td className="p-2">{fmt(row.statistical_value)}</td><td className="p-2">{fmt(row.ml_value)}</td><td className="p-2">{fmt(row.ensemble_value)}</td><td className="p-2">{[row.p10,row.p50,row.p90,row.p95].map(value => value == null ? "Sin evidencia" : fmt(value)).join(" / ")}</td><td className="p-2">{row.band_basis} · {row.band_observations}</td></tr>)}</tbody></table></div>
         {mode === "history" && rows.length > 1 && <div><label>Comparar con <select className="ml-2 rounded border p-2" value={compare?.id ?? ""} onChange={event => void chooseCompare(event.target.value)}><option value="">Sin comparación</option>{rows.filter(row => row.id !== detail.id).map(row => <option key={row.id} value={row.id}>{row.calculation_code}</option>)}</select></label>{compare && <div className="mt-3 overflow-x-auto"><table className="min-w-full text-left"><thead><tr className="border-b"><th className="p-2">Periodo</th><th className="p-2">{detail.calculation_code} Towell</th><th className="p-2">{compare.calculation_code} Towell</th><th className="p-2">Variación</th><th className="p-2">Venta real</th></tr></thead><tbody>{detail.horizons.map(row => { const now = detail.selection_events.at(-1)?.selected_curve.find(item => item.target_period.slice(0,7) === row.target_period.slice(0,7))?.value;
           const before = compare.selection_events.at(-1)?.selected_curve.find(item => item.target_period.slice(0,7) === row.target_period.slice(0,7))?.value;

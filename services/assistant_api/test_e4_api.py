@@ -86,6 +86,24 @@ class FakeWriter:
 
 
 class E4ApiTests(unittest.TestCase):
+    def test_selection_flag_read_auth_and_admin_write_boundary(self):
+        route = "/api/forecast/calculations/00000000-0000-4000-8000-000000000100/select"
+        query = f"/api/forecast/current-selection?chain_id={CHAIN}&product_id={PRODUCT}"
+        self.flags.forecast_selection_enabled = False
+        self.assertEqual(self.client.get(query).status_code, 503)
+        self.assertEqual(self.client.post(route, json={"selected_candidate": "ENSEMBLE"}).status_code, 503)
+        self.flags.forecast_selection_enabled = True
+        self.assertEqual(self.client.get(query).status_code, 401)
+        read = self.client.get(query, headers={"Authorization": "Bearer reader"})
+        self.assertEqual(read.status_code, 200)
+        self.assertEqual(read.json(), {"selection": None})
+        self.assertEqual(self.client.post(route, json={"selected_candidate": "ENSEMBLE"}).status_code, 401)
+        self.assertEqual(self.client.post(route, json={"selected_candidate": "ENSEMBLE"},
+            headers={"Authorization": "Bearer reader", "Idempotency-Key": "local-test"}).status_code, 403)
+        self.assertEqual(self.client.post(route, json={"selected_candidate": "ENSEMBLE"},
+            headers={"Authorization": "Bearer admin"}).status_code, 422)
+        self.assertFalse(self.writer.calls)
+
     def test_live_repository_accepts_an_explicit_no_eligible_result_without_a_false_close(self):
         result = {"status": "NO_TEMPORALLY_ELIGIBLE_CALCULATIONS", "evaluations": 0, "learning_events": 0}
         transport = httpx.MockTransport(lambda request: httpx.Response(200, json=result))

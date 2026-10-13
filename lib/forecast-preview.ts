@@ -46,7 +46,8 @@ export type CalculationHorizon = { horizon: number; target_period: string; stati
   band_basis: string; band_observations: number; statistical_model: string | null; ml_model: string | null;
   ensemble_ml_model?: string | null; ensemble_ml_component?: number | null; statistical_weight?: number | null; ml_weight?: number | null };
 export type SelectionEvent = { id: string; calculation_id: string; selected_candidate: "STATISTICAL" | "ML" | "ENSEMBLE";
-  selected_curve: { horizon: number; target_period: string; value: number }[]; selected_at: string; decision_reason: string | null; comment: string | null };
+  selected_curve: { horizon: number; target_period: string; value: number }[]; selected_at: string; selected_by?: string;
+  decision_reason: string | null; comment: string | null };
 export type CalculationDetail = CalculationSummary & { candidate_metrics: Record<string, ProductCandidate | null>; input_snapshot: Record<string, unknown>;
   research_snapshot: Record<string, unknown> | null; data_snapshot_hash: string; preview_id: string; engine_version: string; git_sha: string;
   horizons: CalculationHorizon[]; selection_events: SelectionEvent[]; live_evaluations: Record<string, unknown>[];
