@@ -1,6 +1,7 @@
 """Flag, JWT/scope, idempotency, and E4 route contract tests."""
 from __future__ import annotations
 
+import copy
 import unittest
 import httpx
 from types import SimpleNamespace
@@ -127,6 +128,27 @@ class E4ApiTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/forecast/calculations", json=payload,
             headers={"Authorization": "Bearer admin", "Idempotency-Key": "first"}).status_code, 403)
         self.assertFalse(self.writer.calls)
+
+    def test_legacy_ensemble_provenance_is_rejected_before_any_writer_rpc(self):
+        for field in ("statistical_weight", "ensemble_ml_model", "ml_component"):
+            with self.subTest(field=field):
+                self.preview = preview()
+                self.preview["dataset_hash"] = snapshot_hash(self.source._records)
+                self.preview["selection"]["scope_leader"].update(statistical_weight=.5, ml_model="Scope Forest")
+                candidate = self.preview["selection"]["product_candidates"][2]
+                if field == "ml_component":
+                    for point in candidate["horizons"]:
+                        del point[field]
+                else:
+                    del candidate[field]
+                before = copy.deepcopy(self.preview)
+                response = self.client.post("/api/forecast/calculations", json={"chain_id": CHAIN,
+                    "product_id": PRODUCT, "preview_id": "preview-1"},
+                    headers={"Authorization": "Bearer admin", "Idempotency-Key": "legacy-fixture"})
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.json()["error_code"], "CALCULATION_INVALID")
+                self.assertFalse(self.writer.calls)
+                self.assertEqual(self.preview, before)
 
     def test_create_snapshot_select_and_capture(self):
         headers = {"Authorization": "Bearer admin", "Idempotency-Key": "first"}

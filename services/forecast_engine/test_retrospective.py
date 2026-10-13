@@ -76,6 +76,24 @@ class RetrospectiveClosureTests(unittest.TestCase):
             self.assertLess(fold["train_target_max"], fold["test_target_min"])
             self.assertGreaterEqual(fold["training_samples"], ForecastPolicy().min_train_observations)
 
+    def test_product_ensemble_retains_its_generation_weight_model_and_component(self):
+        candidates = [c for c in self.audit["product_candidates"] if c["family"] == "ensemble"]
+        self.assertTrue(candidates)
+        forecasts = {(r["product_id"], r["horizon"]): r for r in self.chain["forecast_towell"]}
+        for candidate in candidates:
+            weight = candidate["statistical_weight"]
+            self.assertGreaterEqual(weight, 0)
+            self.assertLessEqual(weight, 1)
+            self.assertIn(candidate["ensemble_ml_model"], MODEL_FACTORIES)
+            self.assertEqual(len(candidate["horizons"]), 12)
+            for point in candidate["horizons"]:
+                source = forecasts[(candidate["product_id"], point["horizon"])]
+                self.assertEqual(point["ml_component"], source["ml"])
+                self.assertEqual(candidate["ensemble_ml_model"], source["ml_model"])
+                self.assertEqual(point["target_period"], source["target_period"])
+                self.assertAlmostEqual(point["value"],
+                    source["statistical"] * weight + point["ml_component"] * (1 - weight), delta=.02)
+
     def test_available_at_unchanged_and_PIT_still_rejects(self):
         before = copy.deepcopy(self.rows)
         normalize_retrospective_dataset(self.rows, "2026-07")

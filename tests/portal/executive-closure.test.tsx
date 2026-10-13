@@ -53,6 +53,16 @@ describe("PRD 09.2E.2.2B executive closure", () => {
     expect(within(detail).getAllByText("Croston").length).toBeGreaterThan(0);
     expect(within(detail).getAllByText("H1")).toHaveLength(3);
   });
+  it("renders the E4 snapshot contract while retaining E1 read compatibility", () => {
+    const e4Version = "fixture-operational-preview-4-e4-snapshot";
+    const e4Scope = { ...scope, engine_version: e4Version };
+    const e4Job = { ...job, engine_version: e4Version, scopes: [e4Scope] };
+    expect(currentRetrospectivePreview(e4Job, e4Scope)).toBe(true);
+    expect(currentRetrospectivePreview(e4Job, scope)).toBe(false);
+    render(<PreviewPerformancePanel job={e4Job} scope={e4Scope} productId="product"/>);
+    expect(screen.queryByText(/Vista previa desactualizada/)).toBeNull();
+    expect(screen.getAllByText("68%").length).toBeGreaterThan(0);
+  });
   it("shows no duplicate challenger strategy", () => {
     expect(distinctChallenger(scope.selection?.preview_leader, scope.selection?.preview_challenger)).toBeNull();
     render(<EngineComparison scope={scope}/>);

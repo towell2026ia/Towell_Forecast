@@ -18,7 +18,8 @@ from .cold_start import launch_forecast
 from .supabase_access import PreviewError
 from services.forecast_engine.registry import ChampionRegistry
 
-PREVIEW_ENGINE_VERSION = ENGINE_VERSION + "-operational-preview-3-selection-e1"
+# Cache identity includes the serialized product contract, not just model math.
+PREVIEW_ENGINE_VERSION = ENGINE_VERSION + "-operational-preview-4-e4-snapshot"
 STAGES = ("QUEUED", "READING_DATA", "ELIGIBILITY", "STATISTICAL", "ML", "ENSEMBLE", "QUALITY_GATE", "READY_PREVIEW", "READY_PROVISIONAL", "NOT_ELIGIBLE", "FAILED")
 
 

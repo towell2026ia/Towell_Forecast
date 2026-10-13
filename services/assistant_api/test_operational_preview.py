@@ -7,7 +7,7 @@ import tempfile
 import time
 import unittest
 import threading
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -22,8 +22,8 @@ from services.statistical_engine.engine import MODELS
 from services.assistant_api.api import create_app
 from services.assistant_api.auth import Principal, ROLE_PERMISSIONS, SupabaseAuthProvider
 from services.assistant_api.data_provider import SupabaseDataProvider
-from services.assistant_api.operational_preview import OperationalMultiChainForecastRunner, snapshot_hash
-from services.assistant_api.persistence import LocalPersistenceProvider
+from services.assistant_api.operational_preview import OperationalMultiChainForecastRunner, PREVIEW_ENGINE_VERSION, snapshot_hash
+from services.assistant_api.persistence import LocalPersistenceProvider, content_hash
 from services.assistant_api.settings import Settings
 from services.assistant_api.supabase_access import PreviewError, SupabaseReadClient
 
@@ -308,6 +308,44 @@ class JobTests(unittest.TestCase):
         self.assertEqual(rendered["status"], "NOT_ELIGIBLE")
         self.assertEqual(rendered["scopes"][0]["products"][0]["horizons"], [])
         self.assertEqual(self.runner.latest(self.actor, A)["status"], "NOT_ELIGIBLE")
+
+    def test_e4_contract_has_a_new_cache_identity_and_preserves_legacy_preview(self):
+        def compute(records, cutoff, **kwargs):
+            return {"chains": [{"model_audit": {}, "selection": {}, "aggregates": [],
+                "forecast_towell": [{"product_id": product, "horizon": h,
+                    "target_period": add_month(cutoff, h), "statistical_model": "Naive",
+                    "ml_model": None, "statistical": 1.0, "ml": None, "forecast_towell": 1.0}
+                    for product in sorted({row["product_id"] for row in records}) for h in range(1, 13)]}]}
+        self.runner.compute = compute
+        rows = self.data.records(chain_id=A, mode="RETROSPECTIVE_TRAINING")
+        issue, digest = max(row["period"] for row in rows), snapshot_hash(rows)
+        legacy_version = "prd09.1b-1.0.0-operational-preview-3-selection-e1"
+        legacy_key = content_hash({"dataset_hash": digest, "chain": A, "objective": "Venta",
+            "issue": issue, "mode": "RETROSPECTIVE_TRAINING", "engine": legacy_version,
+            "policy": asdict(self.runner.policy), "environment": self.runner.environment})
+        legacy = {"chain_id": A, "objective": "Venta", "issue_period": issue,
+            "mode": "RETROSPECTIVE_TRAINING", "dataset_hash": digest, "status": "PREVIEW",
+            "engine_version": legacy_version, "products": [], "selection": {"product_candidates": []}}
+        legacy_job = {"job_id": "OPJ-legacy-fixture", "kind": "OPERATIONAL_PREVIEW",
+            "creator_id": USER, "chain_ids": [A], "product_id": PRODUCT, "objective": "Venta",
+            "mode": "RETROSPECTIVE_TRAINING", "status": "READY_PREVIEW", "engine_version": legacy_version,
+            "scopes": [{"chain_id": A, "preview_id": legacy_key, "status": "READY_PREVIEW"}]}
+        self.storage.put("forecast_previews", legacy_key, legacy)
+        self.storage.put("forecast_jobs", legacy_job["job_id"], legacy_job)
+        result = self.wait(self.runner.submit(self.data, self.actor, chain_ids=[A], product_id=PRODUCT))
+        self.assertEqual(result["status"], "READY_PREVIEW", result)
+        self.assertFalse(result["scopes"][0]["reused"])
+        self.assertNotEqual(result["scopes"][0]["preview_id"], legacy_key)
+        current = self.runner.result(result["job_id"], self.actor, PRODUCT)
+        self.assertEqual(current["engine_version"], PREVIEW_ENGINE_VERSION)
+        self.assertEqual(current["scopes"][0]["dataset_hash"], digest)
+        self.assertEqual(len(current["scopes"][0]["products"][0]["horizons"]), 12)
+        self.assertEqual(self.storage.get("forecast_previews", legacy_key), legacy)
+        self.assertEqual(self.storage.get("forecast_jobs", legacy_job["job_id"]), legacy_job)
+        self.assertEqual(self.runner.result(legacy_job["job_id"], self.actor, PRODUCT)["engine_version"], legacy_version)
+        self.assertEqual(len(self.storage.list("forecast_previews")), 2)
+        self.assertEqual(self.storage.list("forecast_vintages"), [])
+        self.assertEqual(self.storage.list("champion_registry"), [])
 
     def test_two_prelaunch_zero_months_do_not_make_five_sales_months_eligible(self):
         class ShortLaunch:

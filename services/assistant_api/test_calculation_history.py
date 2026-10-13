@@ -115,6 +115,22 @@ class CalculationHistoryTests(unittest.TestCase):
         with self.assertRaises(PreviewError):
             snapshot_from_preview(source, product_id=PRODUCT, preview_id="p", actor_id=ACTOR, git_sha="test")
 
+    def test_missing_product_provenance_never_borrows_scope_metadata(self):
+        for field in ("statistical_weight", "ensemble_ml_model", "ml_component"):
+            with self.subTest(field=field):
+                source = preview()
+                source["selection"]["scope_leader"].update(statistical_weight=.5, ml_model="Scope Forest")
+                ensemble = source["selection"]["product_candidates"][2]
+                if field == "ml_component":
+                    for point in ensemble["horizons"]:
+                        del point[field]
+                else:
+                    del ensemble[field]
+                before = copy.deepcopy(source)
+                with self.assertRaisesRegex(PreviewError, "CALCULATION_INVALID"):
+                    snapshot_from_preview(source, product_id=PRODUCT, preview_id="p", actor_id=ACTOR, git_sha="test")
+                self.assertEqual(source, before)
+
     def test_deviation_requires_reason_and_other_requires_comment(self):
         source = calculation()
         with self.assertRaises(PreviewError):

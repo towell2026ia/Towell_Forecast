@@ -34,6 +34,17 @@ La puesta en operación se valida por etapas; las pruebas aisladas no son acepta
 
 Champion, Vintage y publicación oficial permanecen apagados.
 
+## Contrato De Preview E4
+
+El contrato `operational-preview-4-e4-snapshot` separa la identidad de cache de los previews E1.
+Los tres campos de procedencia del Ensemble se incorporaron al motor sin cambiar la version E1;
+por eso un objeto anterior puede seguir siendo READY_PREVIEW, pero no ser apto para guardar C1.
+No completar `statistical_weight`, `ensemble_ml_model` ni `ml_component` a partir de resultados o lideres de scope.
+El motor actual emite esos campos al calcular el candidato individual. Las bandas conservan sus conteos originales.
+Los objetos y jobs E1 permanecen legibles e intactos. La version nueva genera otra clave solo ante una solicitud explicita.
+La reparacion autorizada permite un unico preview de producto FENDI AZUL, corte 2026-07, no un preview de scope ni C1.
+Antes de C1 verificar el nuevo resultado, sus campos de procedencia, hash y 12 horizontes; mantener las otras flags apagadas.
+
 ## Reversión
 
 Si una etapa falla, apagar su flag y detener el avance. La validación fallida de política v2 exige volver a v1.
