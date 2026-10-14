@@ -45,6 +45,24 @@ def presentation_identity(presentation):
     return presentation["group"] or key(presentation["normalized"])
 
 
+def product_type_evidence(description, category_name, rules):
+    for text, source in ((description, "PRODUCT_DESCRIPTION"), (category_name, "CATEGORY_NAME")):
+        if not text:
+            continue
+        normalized = "".join(key(c) if not c.isspace() else c for c in text)
+        if len(normalized) != len(text):
+            continue
+        matches = list(re.finditer(r"(?<!\w)(" + "|".join(re.escape(key(t)) for t in rules["generic_prefixes"]) + r")(?!\w)", normalized))
+        types = {"BATA" if m.group() == "BATAS" else m.group() for m in matches}
+        if len(types) > 1:
+            return {"original": None, "normalized": None, "source": source, "ambiguous": True}
+        if matches:
+            match = matches[0]
+            return {"original": text[match.start():match.end()], "normalized": next(iter(types)),
+                    "source": source, "ambiguous": False}
+    return {"original": None, "normalized": None, "source": None, "ambiguous": False}
+
+
 def prepare(description, rules, category_name=None):
     original = str(description or "")
     # Normalization is an index into the original string, not a replacement label.
@@ -276,6 +294,9 @@ def analyze(catalog, rules):
             problems.add("SAME_SCOPE_IDENTIFIER_COLLISION")
         if chosen.get("color_source") == "CORPUS_CONTRAST_PROPOSAL":
             problems.add("COLOR_CONTRAST_REQUIRES_COMMERCIAL_APPROVAL")
+        product_type = product_type_evidence(product["description"], category_name, rules)
+        if not product_type["normalized"]:
+            problems.add("PRODUCT_TYPE_AMBIGUOUS" if product_type["ambiguous"] else "PRODUCT_TYPE_UNKNOWN")
         problems.add("PRODUCT_MAPPING_APPROVAL_REQUIRED")
         rows.append({"chain_id": product["chain_id"], "chain": chains[product["chain_id"]]["name"],
             "category_id": product.get("category_id"), "category": categories.get(product.get("category_id"), {}).get("name"),
@@ -288,6 +309,8 @@ def analyze(catalog, rules):
             "original_size": size["original"] if size else None,
             "size_source_description": size_source,
             "product_family": "APPAREL" if apparel else "NON_APPAREL",
+            "original_product_type": product_type["original"], "proposed_product_type": product_type["normalized"],
+            "product_type_source": product_type["source"],
             "presentation_group": size["group"] if size else None,
             "model_state": "KNOWN" if model_proposal else "UNKNOWN",
             "color_state": "KNOWN" if chosen["color"] else "UNKNOWN",

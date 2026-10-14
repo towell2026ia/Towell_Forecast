@@ -1,5 +1,5 @@
 {
-  "version": "09.2E5-01B-A.2",
+  "version": "09.2E5-01B-A.3",
   "approval_scope": "PROPOSALS_ONLY",
   "generic_prefixes": ["TOALLA", "TRAPO", "TAPETE", "BATA", "BATAS"],
   "brands": ["TOWELL"],
@@ -7,10 +7,10 @@
   "unresolved_tokens": ["MS", "TW", "BA", "GE", "GG", "OPP", "ST", "STG", "SB"],
   "verified_color_examples": ["AZUL", "OXFORD", "ORQUÍDEA", "ROJO", "BEIGE", "GRIS"],
   "presentations": [
-    {"group": "FACIAL", "name": "Facial", "literals": ["FACIAL"]},
-    {"group": "MEDIO_BANO", "name": "Medio Baño", "literals": ["MEDIO BAÑO", "MB"]},
-    {"group": "BANO", "name": "Baño", "literals": ["BAÑO", "BANO"]},
-    {"group": "PULLMAN", "name": "Pullman", "literals": ["PULLMAN", "PULL"]}
+    {"group": "FACIAL", "name": "FACIAL", "literals": ["FACIAL"]},
+    {"group": "MEDIO_BANO", "name": "MEDIO BAÑO", "literals": ["MEDIO BAÑO", "MB"]},
+    {"group": "BANO", "name": "BAÑO", "literals": ["BAÑO", "BANO"]},
+    {"group": "PULLMAN", "name": "PULLMAN", "literals": ["PULLMAN", "PULL"]}
   ],
   "apparel_presentations": ["EXTRA GRANDE", "UNITALLA", "CH/M", "G/EG", "CH-MED", "CH-M", "GD-EG", "GRANDE", "EXG", "GDE", "XG", "UNI", "CH", "EG", "G", "M"],
   "apparel_full_names": {"UNITALLA": "Unitalla", "GRANDE": "Grande", "EXTRA GRANDE": "Extra Grande"},
@@ -19,6 +19,7 @@
     "User PRD 09.2E5-01B-A: color examples are illustrative, models are not a closed list.",
     "User clarification: preserve Facial, MB/Medio Bano, Bano, Pullman/Pull as four presentation groups globally; no dimensions invented.",
     "User clarification: whole-word generic types and TOWELL brand; TOWEL ambiguous; unresolved retail/season abbreviations are not expanded.",
-    "User correction: MB is Medio Bano, BANO is Bano, PULL is Pullman; the primary size column must display homologated names. Preserve raw labels separately and review robes without treating Bata de Bano as a size."
+    "User correction: MB is Medio Bano, BANO is Bano, PULL is Pullman; the primary size column must display homologated names. Preserve raw labels separately and review robes without treating Bata de Bano as a size.",
+    "User confirmation: display MEDIO BANO, BANO, PULLMAN, FACIAL with original Spanish accents, and BATA/BATAS as the independent product type BATA. Product mapping approval remains separate."
   ]
 }

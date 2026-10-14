@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 import unittest
 
-from services.assistant_api.commercial_catalog import analyze, digest, homologate_size, key, prepare
+from services.assistant_api.commercial_catalog import analyze, digest, homologate_size, key, prepare, product_type_evidence
 
 RULES = json.loads((Path(__file__).resolve().parents[2] / "config/commercial_catalog_rules.json").read_text(encoding="utf-8"))
 
@@ -26,7 +26,7 @@ class CommercialCatalogTests(unittest.TestCase):
 
     def test_fendi_oxford_is_color_not_model(self):
         row = self.packet(["TOALLA MB FENDI OXFORD"])["rows"][0]
-        self.assertEqual((row["proposed_model"], row["proposed_color"], row["proposed_size"]), ("FENDI", "OXFORD", "Medio Baño"))
+        self.assertEqual((row["proposed_model"], row["proposed_color"], row["proposed_size"]), ("FENDI", "OXFORD", "MEDIO BAÑO"))
         self.assertEqual(row["original_size"], "MB")
 
     def test_fendi_blue(self):
@@ -51,7 +51,7 @@ class CommercialCatalogTests(unittest.TestCase):
 
     def test_original_presentation_aliases_preserved(self):
         rows = self.packet(["Toalla Fiore-Mb Gris", "Toalla Fiore-Pull Gris"])["rows"]
-        self.assertEqual({r["proposed_size"] for r in rows}, {"Medio Baño", "Pullman"})
+        self.assertEqual({r["proposed_size"] for r in rows}, {"MEDIO BAÑO", "PULLMAN"})
         self.assertEqual({r["original_size"] for r in rows}, {"Mb", "Pull"})
 
     def test_no_size_is_unknown_not_not_applicable(self):
@@ -208,16 +208,16 @@ class CommercialCatalogTests(unittest.TestCase):
         self.assertIn("METADATA_IDENTITY_REVIEW_REQUIRED", analyze(catalog, RULES)["rows"][0]["ambiguity_reasons"])
 
     def test_user_size_equivalences_are_display_names(self):
-        for literal, expected in [("Mb", "Medio Baño"), ("MEDIO BANO", "Medio Baño"),
-                                  ("BANO", "Baño"), ("baño", "Baño"), ("PULL", "Pullman"),
-                                  ("Pullman", "Pullman"), ("FACIAL", "Facial")]:
+        for literal, expected in [("Mb", "MEDIO BAÑO"), ("MEDIO BANO", "MEDIO BAÑO"),
+                                  ("BANO", "BAÑO"), ("baño", "BAÑO"), ("PULL", "PULLMAN"),
+                                  ("Pullman", "PULLMAN"), ("FACIAL", "FACIAL")]:
             self.assertEqual(homologate_size(literal, RULES), expected)
         self.assertIsNone(homologate_size(None, RULES))
         self.assertIsNone(homologate_size("unverified", RULES))
 
     def test_duplicate_equivalent_literals_do_not_conflict(self):
         row = self.packet(["Toalla MB Medio Baño Fendi Gris"])["rows"][0]
-        self.assertEqual(row["proposed_size"], "Medio Baño")
+        self.assertEqual(row["proposed_size"], "MEDIO BAÑO")
         self.assertNotIn("MULTIPLE_PRESENTATION_LITERALS", row["ambiguity_reasons"])
 
     def test_bata_de_bano_is_type_not_size(self):
@@ -245,13 +245,30 @@ class CommercialCatalogTests(unittest.TestCase):
         catalog = fixture(["Toalla Fendi Gris"])
         catalog["profile_versions"][0]["mapping_json"]["products"][0]["description_aliases"].append("Toalla MB Fendi Gris")
         row = analyze(catalog, RULES)["rows"][0]
-        self.assertEqual(row["proposed_size"], "Medio Baño")
+        self.assertEqual(row["proposed_size"], "MEDIO BAÑO")
         self.assertEqual(row["size_source_description"], "Toalla MB Fendi Gris")
 
     def test_short_garment_tokens_do_not_remove_design_words(self):
         entry = prepare("Toalla MB GRANADA OXFORD", RULES)
         self.assertEqual(entry["cleaned"], "GRANADA OXFORD")
         self.assertEqual(len(entry["presentations"]), 1)
+
+    def test_product_type_is_independent_and_plural_robes_are_homologated(self):
+        row = self.packet(["Batas Kimono Gris Unitalla"])["rows"][0]
+        self.assertEqual(row["original_product_type"], "Batas")
+        self.assertEqual(row["proposed_product_type"], "BATA")
+        self.assertEqual(row["proposed_size"], "Unitalla")
+        self.assertEqual(row["proposed_model"], "Kimono")
+
+    def test_type_without_description_uses_category_or_stays_unknown(self):
+        self.assertEqual(product_type_evidence("Facial Nuevo", "Toalla", RULES)["source"], "CATEGORY_NAME")
+        self.assertIsNone(product_type_evidence("Producto Nuevo", None, RULES)["normalized"])
+        self.assertIsNone(product_type_evidence("Straße", None, RULES)["normalized"])
+
+    def test_multiple_generic_types_are_not_forced(self):
+        row = self.packet(["Set Bata Toalla Nuevo Gris"])["rows"][0]
+        self.assertIsNone(row["proposed_product_type"])
+        self.assertIn("PRODUCT_TYPE_AMBIGUOUS", row["ambiguity_reasons"])
 
 
 if __name__ == "__main__":
