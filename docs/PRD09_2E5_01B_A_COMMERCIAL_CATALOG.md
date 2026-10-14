@@ -43,9 +43,19 @@ No model-name allowlist exists. New designs can be proposed without code changes
 3. MB/Medio Bano, Facial, Bano and Pullman/Pull form four presentation groups,
    globally, including FIORE and GRANADA. Original literal denominations remain
    attached to their product. No conversion to three sizes or physical measures.
+   Rule version `.2` displays the homologated commercial names **Medio Baño**,
+   **Facial**, **Baño**, and **Pullman** in `proposed_size`, while `original_size`
+   and description evidence preserve MB/Mb, BANO/Baño, PULL/Pullman literally.
+   Repeated synonyms within a description do not create a false size conflict.
 4. Apparel denominations are literal proposals, not undocumented equivalences.
    Physical dimensions are recognized only with an explicit unit in the text.
    Opaque SKU/variant codes never supply dimensions.
+   Robe context is detected from the full-word BATA/BATAS description or category.
+   "Bata de baño" is a product type, never the towel presentation Baño. Garment
+   sizes (including CH/M, G/EG, CH, EG, G, M and UNI) are preserved without expanding
+   unapproved abbreviations. Unitalla/Grande/Extra Grande retain their explicit names.
+   An unambiguous size in a documented alias can fill a missing current size, with
+   the exact `size_source_description` recorded; conflicting aliases stay pending.
 5. The six user-supplied color examples bootstrap suffix recognition. Other suffix
    labels are discovered contrastively from the actual corpus. Discovery is not
    proof of color semantics: every discovered label requires commercial review.

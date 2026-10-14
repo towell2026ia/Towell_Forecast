@@ -23,7 +23,29 @@ def words(literal):
     return r"(?<!\w)" + re.escape(key(literal)).replace(r"\ ", r"\s+") + r"(?!\w)"
 
 
-def prepare(description, rules):
+def is_apparel(description, category_name=None):
+    return bool(re.search(r"(?<!\w)BATAS?(?!\w)", key(description) + " " + key(category_name)))
+
+
+def homologate_size(literal, rules, *, apparel=False):
+    if not literal:
+        return None
+    normalized = key(literal)
+    if apparel:
+        if normalized in {key(v) for v in rules.get("apparel_presentations", [])}:
+            return rules.get("apparel_full_names", {}).get(normalized, normalized)
+        return None
+    for group in rules["presentations"]:
+        if normalized in {key(v) for v in group["literals"]}:
+            return group["name"]
+    return None
+
+
+def presentation_identity(presentation):
+    return presentation["group"] or key(presentation["normalized"])
+
+
+def prepare(description, rules, category_name=None):
     original = str(description or "")
     # Normalization is an index into the original string, not a replacement label.
     normalized = "".join(key(c) if not c.isspace() else c for c in original)
@@ -32,19 +54,30 @@ def prepare(description, rules):
     problems = []
     presentations = []
     work = normalized
-    for group in rules["presentations"]:
-        for literal in sorted(group["literals"], key=len, reverse=True):
+    apparel = is_apparel(original, category_name)
+    # In robes, "de bano" describes the product type, not its garment size.
+    if apparel:
+        for match in list(re.finditer(r"(?<!\w)BATAS?\s+(?:DE\s+)?BANO(?!\w)", work)):
+            descriptor_start = match.start() + len(re.match(r"BATAS?", match.group()).group())
+            work = work[:descriptor_start] + " " * (match.end() - descriptor_start) + work[match.end():]
+    for group in ([] if apparel else rules["presentations"]):
+        # Accent-insensitive duplicate spellings must not be extracted twice.
+        literals = {key(v): v for v in group["literals"]}
+        for literal in sorted(literals, key=len, reverse=True):
             for match in list(re.finditer(words(literal), work)):
-                presentations.append({"group": group["group"],
+                presentations.append({"group": group["group"], "normalized": group["name"],
                                       "original": original[match.start():match.end()]})
                 work = work[:match.start()] + " " * (match.end() - match.start()) + work[match.end():]
-    for literal in sorted(rules.get("apparel_presentations", []), key=len, reverse=True):
+    for literal in sorted(rules.get("apparel_presentations", []) if apparel else [], key=len, reverse=True):
         for match in list(re.finditer(words(literal), work)):
-            presentations.append({"group": None, "original": original[match.start():match.end()]})
+            label = original[match.start():match.end()]
+            presentations.append({"group": None, "original": label,
+                                  "normalized": homologate_size(label, rules, apparel=True)})
             work = work[:match.start()] + " " * (match.end() - match.start()) + work[match.end():]
     dimensions = r"(?<!\w)\d+(?:[.,]\d+)?\s*[X×]\s*\d+(?:[.,]\d+)?\s*(?:CM|MM|M)(?!\w)"
     for match in list(re.finditer(dimensions, work)):
-        presentations.append({"group": None, "original": original[match.start():match.end()]})
+        label = original[match.start():match.end()]
+        presentations.append({"group": None, "original": label, "normalized": label})
         work = work[:match.start()] + " " * (match.end() - match.start()) + work[match.end():]
     removable = rules["generic_prefixes"] + rules["brands"] + rules["ambiguous_descriptors"]
     # Strip only verified leading whole words, with literal presentation gaps.
@@ -61,7 +94,7 @@ def prepare(description, rules):
         problems.append("SEASON_CODE_UNVALIDATED")
     if "(" in work or ")" in work:
         problems.append("LEGACY_OR_PARENTHETICAL_NAME")
-    if len({(p["group"], key(p["original"])) for p in presentations}) > 1:
+    if len({presentation_identity(p) for p in presentations}) > 1:
         problems.append("MULTIPLE_PRESENTATION_LITERALS")
     positions = [i for i, c in enumerate(work) if c.strip() and c != "-"]
     start, end = (positions[0], positions[-1] + 1) if positions else (0, 0)
@@ -184,7 +217,8 @@ def analyze(catalog, rules):
             problems.append("MULTIPLE_HISTORICAL_CATEGORIES")
         if product.get("variant_code") or product.get("variant_description"):
             problems.append("VARIANT_EQUIVALENCE_UNVALIDATED")
-        prepared[product["id"]] = {a: prepare(a, rules) for a in sorted(aliases) if a}
+        category_name = category["name"] if category else " ".join(sorted(historical_categories))
+        prepared[product["id"]] = {a: prepare(a, rules, category_name) for a in sorted(aliases) if a}
         evidence[product["id"]] = {"aliases": sorted(aliases), "identifier_mappings":
             [list(p) for p in sorted(pairs, key=lambda p: (p[0] or "", p[1] or ""))],
             "historical_category_names": sorted(historical_categories), "problems": problems,
@@ -197,6 +231,7 @@ def analyze(catalog, rules):
     for product in sorted(products, key=lambda p: (chains[p["chain_id"]]["name"], p["description"], p["id"])):
         proofs = []
         ev = evidence[product["id"]]
+        category_name = categories.get(product.get("category_id"), {}).get("name") or " ".join(ev["historical_category_names"])
         problems = set(ev["problems"])
         for alias, entry in prepared[product["id"]].items():
             model, color = split_color(entry["cleaned"], colors)
@@ -223,13 +258,20 @@ def analyze(catalog, rules):
             problems.add("INSUFFICIENT_MODEL_COLOR_BOUNDARY_EVIDENCE")
         if not chosen["color"]:
             problems.add("COLOR_UNKNOWN_NOT_NOT_APPLICABLE")
-        size_options = {(s["group"], key(s["original"])) for p in proofs for s in p["presentations"]}
-        size_groups = {group or label for group, label in size_options}
+        size_groups = {presentation_identity(s) for p in proofs for s in p["presentations"]}
         if len(size_groups) > 1:
             problems.add("PRESENTATION_ALIAS_CONFLICT")
-        size = chosen["presentations"][0] if len(chosen["presentations"]) == 1 else None
+        current_sizes = {presentation_identity(s) for s in chosen["presentations"]}
+        size = chosen["presentations"][0] if len(current_sizes) == 1 else None
+        size_source = chosen.get("description") if size else None
+        if not chosen["presentations"] and len(size_groups) == 1:
+            source = next(p for p in proofs if p["presentations"])
+            size, size_source = source["presentations"][0], source["description"]
         if not size:
             problems.add("SIZE_APPLICABILITY_UNDOCUMENTED")
+        apparel = is_apparel(product["description"], category_name)
+        if size and apparel and key(size["original"]) not in rules.get("apparel_full_names", {}):
+            problems.add("APPAREL_SIZE_EQUIVALENCE_UNVALIDATED")
         if product["id"] in collision_products:
             problems.add("SAME_SCOPE_IDENTIFIER_COLLISION")
         if chosen.get("color_source") == "CORPUS_CONTRAST_PROPOSAL":
@@ -242,7 +284,10 @@ def analyze(catalog, rules):
             "upc": sorted({p[1] for p in ev["identifier_mappings"] if p[1] is not None and p[1].strip()}),
             "item": sorted({p[0] for p in ev["identifier_mappings"] if p[0] is not None and p[0].strip()}),
             "proposed_model": model_proposal, "tentative_model_boundary": chosen["model"], "proposed_color": chosen["color"],
-            "proposed_size": size["original"] if size else None,
+            "proposed_size": size["normalized"] if size else None,
+            "original_size": size["original"] if size else None,
+            "size_source_description": size_source,
+            "product_family": "APPAREL" if apparel else "NON_APPAREL",
             "presentation_group": size["group"] if size else None,
             "model_state": "KNOWN" if model_proposal else "UNKNOWN",
             "color_state": "KNOWN" if chosen["color"] else "UNKNOWN",

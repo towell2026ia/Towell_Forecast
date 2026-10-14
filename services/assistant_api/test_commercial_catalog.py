@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 import unittest
 
-from services.assistant_api.commercial_catalog import analyze, digest, key, prepare
+from services.assistant_api.commercial_catalog import analyze, digest, homologate_size, key, prepare
 
 RULES = json.loads((Path(__file__).resolve().parents[2] / "config/commercial_catalog_rules.json").read_text(encoding="utf-8"))
 
@@ -26,7 +26,8 @@ class CommercialCatalogTests(unittest.TestCase):
 
     def test_fendi_oxford_is_color_not_model(self):
         row = self.packet(["TOALLA MB FENDI OXFORD"])["rows"][0]
-        self.assertEqual((row["proposed_model"], row["proposed_color"], row["proposed_size"]), ("FENDI", "OXFORD", "MB"))
+        self.assertEqual((row["proposed_model"], row["proposed_color"], row["proposed_size"]), ("FENDI", "OXFORD", "Medio Baño"))
+        self.assertEqual(row["original_size"], "MB")
 
     def test_fendi_blue(self):
         self.assertEqual(self.packet(["TOALLA MB FENDI AZUL"])["rows"][0]["proposed_color"], "AZUL")
@@ -50,7 +51,8 @@ class CommercialCatalogTests(unittest.TestCase):
 
     def test_original_presentation_aliases_preserved(self):
         rows = self.packet(["Toalla Fiore-Mb Gris", "Toalla Fiore-Pull Gris"])["rows"]
-        self.assertEqual({r["proposed_size"] for r in rows}, {"Mb", "Pull"})
+        self.assertEqual({r["proposed_size"] for r in rows}, {"Medio Baño", "Pullman"})
+        self.assertEqual({r["original_size"] for r in rows}, {"Mb", "Pull"})
 
     def test_no_size_is_unknown_not_not_applicable(self):
         row = self.packet(["Toalla Nuevo Gris"])["rows"][0]
@@ -204,6 +206,52 @@ class CommercialCatalogTests(unittest.TestCase):
         catalog["read_counts"]["profiles"] = 1
         catalog["profile_versions"][0]["mapping_json"]["products"][0]["product_code"] = "different"
         self.assertIn("METADATA_IDENTITY_REVIEW_REQUIRED", analyze(catalog, RULES)["rows"][0]["ambiguity_reasons"])
+
+    def test_user_size_equivalences_are_display_names(self):
+        for literal, expected in [("Mb", "Medio Baño"), ("MEDIO BANO", "Medio Baño"),
+                                  ("BANO", "Baño"), ("baño", "Baño"), ("PULL", "Pullman"),
+                                  ("Pullman", "Pullman"), ("FACIAL", "Facial")]:
+            self.assertEqual(homologate_size(literal, RULES), expected)
+        self.assertIsNone(homologate_size(None, RULES))
+        self.assertIsNone(homologate_size("unverified", RULES))
+
+    def test_duplicate_equivalent_literals_do_not_conflict(self):
+        row = self.packet(["Toalla MB Medio Baño Fendi Gris"])["rows"][0]
+        self.assertEqual(row["proposed_size"], "Medio Baño")
+        self.assertNotIn("MULTIPLE_PRESENTATION_LITERALS", row["ambiguity_reasons"])
+
+    def test_bata_de_bano_is_type_not_size(self):
+        rows = self.packet(["Bata De Baño Kimono Gris", "Bata Bano Kimono Gris Unitalla", "Batas De Bano Kimono G Gris"])["rows"]
+        by_description = {r["description"]: r for r in rows}
+        self.assertIsNone(by_description["Bata De Baño Kimono Gris"]["proposed_size"])
+        self.assertEqual(by_description["Bata Bano Kimono Gris Unitalla"]["proposed_size"], "Unitalla")
+        self.assertEqual(by_description["Batas De Bano Kimono G Gris"]["proposed_size"], "G")
+        self.assertTrue(all(r["product_family"] == "APPAREL" for r in rows))
+
+    def test_garment_size_codes_are_not_expanded_or_dimensions(self):
+        rows = self.packet([f"Bata Kimono -{s}- Gris" for s in ["Ch/M", "G/Eg", "Ch-M", "Ch", "Eg", "Uni", "Xg"]])["rows"]
+        self.assertEqual({r["proposed_size"] for r in rows}, {"CH/M", "G/EG", "CH-M", "CH", "EG", "UNI", "XG"})
+        self.assertTrue(all("APPAREL_SIZE_EQUIVALENCE_UNVALIDATED" in r["ambiguity_reasons"] for r in rows))
+        self.assertIsNone(homologate_size("Baño", RULES, apparel=True))
+
+    def test_robe_category_controls_literal_extraction_without_generic_name(self):
+        catalog = fixture(["Kimono G Gris"])
+        catalog["categories"][0]["name"] = "Bata Caballero"
+        row = analyze(catalog, RULES)["rows"][0]
+        self.assertEqual(row["proposed_size"], "G")
+        self.assertEqual(row["proposed_model"], "Kimono")
+
+    def test_size_from_unambiguous_alias_has_traceable_origin(self):
+        catalog = fixture(["Toalla Fendi Gris"])
+        catalog["profile_versions"][0]["mapping_json"]["products"][0]["description_aliases"].append("Toalla MB Fendi Gris")
+        row = analyze(catalog, RULES)["rows"][0]
+        self.assertEqual(row["proposed_size"], "Medio Baño")
+        self.assertEqual(row["size_source_description"], "Toalla MB Fendi Gris")
+
+    def test_short_garment_tokens_do_not_remove_design_words(self):
+        entry = prepare("Toalla MB GRANADA OXFORD", RULES)
+        self.assertEqual(entry["cleaned"], "GRANADA OXFORD")
+        self.assertEqual(len(entry["presentations"]), 1)
 
 
 if __name__ == "__main__":
