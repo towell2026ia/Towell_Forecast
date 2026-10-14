@@ -1,0 +1,22 @@
+{
+  "version": "09.2E5-01B-A.1",
+  "approval_scope": "PROPOSALS_ONLY",
+  "generic_prefixes": ["TOALLA", "TRAPO", "TAPETE", "BATA"],
+  "brands": ["TOWELL"],
+  "ambiguous_descriptors": ["TOWEL"],
+  "unresolved_tokens": ["MS", "TW", "BA", "GE", "GG", "OPP", "ST", "STG", "SB"],
+  "verified_color_examples": ["AZUL", "OXFORD", "ORQUÍDEA", "ROJO", "BEIGE", "GRIS"],
+  "presentations": [
+    {"group": "FACIAL", "literals": ["FACIAL"]},
+    {"group": "MEDIO_BANO", "literals": ["MEDIO BAÑO", "MB"]},
+    {"group": "BANO", "literals": ["BAÑO"]},
+    {"group": "PULLMAN", "literals": ["PULLMAN", "PULL"]}
+  ],
+  "apparel_presentations": ["EXTRA GRANDE", "UNITALLA", "CH/M", "G/EG", "CH-MED", "GD-EG", "GRANDE", "EXG", "GDE", "XG", "UNI"],
+  "unresolved_suffix_terms": ["NAVIDAD", "VARIOS COLORES", "COLORES VARIOS", "COL VARIOS", "BOLSA", "TEÑ", "ALG", "POL", "PACK", "SET", "CON", "C/", "PZA", "SURTIDO"],
+  "rule_evidence": [
+    "User PRD 09.2E5-01B-A: color examples are illustrative, models are not a closed list.",
+    "User clarification: preserve Facial, MB/Medio Bano, Bano, Pullman/Pull as four presentation groups globally; no dimensions invented.",
+    "User clarification: whole-word generic types and TOWELL brand; TOWEL ambiguous; unresolved retail/season abbreviations are not expanded."
+  ]
+}
