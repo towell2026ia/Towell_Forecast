@@ -108,7 +108,7 @@ describe("Session and execution R01–R10", () => {
     await userEvent.click(screen.getByRole("combobox", { name: "Producto" })); await userEvent.click(await screen.findByRole("option", { name: "Producto · code" }));
     await userEvent.click(screen.getByRole("button", { name: "Motores de Forecast" })); await screen.findByText("H12");
     await userEvent.click(screen.getByRole("button", { name: "Estadístico" })); const calls = vi.mocked(api.latest).mock.calls.length;
-    await userEvent.click(screen.getByRole("button", { name: "Histórico" })); await screen.findByText("Histórico operativo");
+    await userEvent.click(screen.getByRole("button", { name: "Histórico" })); await screen.findByText("Matriz histórica comercial");
     await userEvent.click(screen.getByRole("button", { name: "Motores de Forecast" })); expect(screen.getByRole("button", { name: "Estadístico" }).getAttribute("aria-pressed")).toBe("true"); expect(screen.getByTestId("line-statistical")).toBeTruthy(); expect(vi.mocked(api.latest).mock.calls).toHaveLength(calls); expect(api.create).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole("tab", { name: "Motor Estadístico" }));
     await userEvent.click(screen.getByRole("button", { name: "Histórico" }));

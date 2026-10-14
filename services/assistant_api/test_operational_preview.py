@@ -261,6 +261,54 @@ class JobTests(unittest.TestCase):
         self.runner.close()
         self.temp.cleanup()
 
+    def test_saved_proposals_read_only_scope_pagination_and_no_research(self):
+        from unittest.mock import Mock
+
+        proposal = {"model": "Stored cold start", "confidence": "LOW", "research": {"status": "PENDING", "response_id": "private"},
+                    "horizons": [{"horizon": h, "target_period": add_month("2026-07", h), "value": h} for h in range(1, 13)]}
+        for i, chain in enumerate((A, B)):
+            self.storage.put("forecast_jobs", str(i), {"job_id": str(i), "kind": "OPERATIONAL_PREVIEW", "status": "READY_PROVISIONAL", "chain_ids": [chain],
+                "product_id": PRODUCT, "created_at": 1791920498 + i, "engine_version": PREVIEW_ENGINE_VERSION,
+                "scopes": [{"chain_id": chain, "issue_period": "2026-07", "provisional_cold_start": proposal}]})
+        before = copy.deepcopy(self.storage.list("forecast_jobs"))
+        self.runner.researcher = Mock()
+        with patch.object(self.storage, "put", side_effect=AssertionError("read must not write")), \
+                patch.object(self.runner, "submit", side_effect=AssertionError("read must not execute")):
+            first = self.runner.provisional_forecasts(self.actor, limit=1)
+            self.assertEqual(first["next_offset"], 1)
+            second = self.runner.provisional_forecasts(self.actor, offset=1, limit=1)
+            self.assertIsNone(second["next_offset"])
+            reader = replace(self.actor, role="reader", chain_ids=frozenset({A}), execute_chain_ids=frozenset())
+            result = self.runner.provisional_forecasts(reader)
+            self.assertEqual([r["chain_id"] for r in result["rows"]], [A])
+            self.assertNotIn("private", json.dumps(result))
+            self.assertEqual(len(result["rows"][0]["horizons"]), 12)
+            with self.assertRaisesRegex(PreviewError, "SCOPE_FORBIDDEN"):
+                self.runner.provisional_forecasts(reader, B)
+        self.runner.researcher.start.assert_not_called()
+        self.runner.researcher.poll.assert_not_called()
+        self.assertEqual(self.storage.list("forecast_jobs"), before)
+
+    def test_provisional_read_route_auth_scope_bounds_and_method(self):
+        config = replace(Settings(), data_provider="supabase", supabase_enabled=True, operational_preview_enabled=True,
+            supabase_url=URL, supabase_publishable_key=KEY, ai_assistant_api_enabled=False, state_dir=Path(self.temp.name))
+        case = ProviderTests()
+        case.setUp()
+        app = create_app(settings=config, persistence=self.storage, provider=SupabaseDataProvider(case.client), auth_provider=SupabaseAuthProvider(case.client))
+        with TestClient(app) as client:
+            route = "/api/forecast/provisional-forecasts"
+            self.assertEqual(client.get(route).status_code, 401)
+            self.assertEqual(client.get(route, headers={"Authorization": "Bearer invalid"}).status_code, 401)
+            viewer = {"Authorization": "Bearer " + jwt("VIEWER")}
+            response = client.get(route, headers=viewer)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json(), {"rows": [], "next_offset": None})
+            self.assertEqual(client.get(route + "?chain_id=" + B, headers=viewer).status_code, 403)
+            for query in ("offset=-1", "offset=10001", "limit=0", "limit=101"):
+                self.assertIn(client.get(route + "?" + query, headers=viewer).status_code, (400, 422))
+            self.assertEqual(client.get(route + "?chain_id=invalid", headers=viewer).status_code, 403)
+            self.assertEqual(client.post(route, headers=viewer).status_code, 405)
+
     def wait(self, job):
         for _ in range(1600):
             result = self.runner.get_job(job["job_id"], self.actor)

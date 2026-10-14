@@ -1,7 +1,7 @@
 """E2 interactive routes. The same JWT authorizes every GET in Supabase."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Header, Request
+from fastapi import APIRouter, Header, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from .auth import ADMIN, EXECUTE, AuthFailure, authorize
@@ -126,6 +126,17 @@ def mount_preview_routes(app, config, identity, data, runner, limiter, write_rep
         if product_id:
             uuid_value(product_id)
         return runner.latest(principal, chain_id, product_id, mode)
+
+    @router.get("/provisional-forecasts")
+    def provisionals(request: Request, chain_id: str | None = None, product_id: str | None = None,
+                     offset: int = Query(default=0, ge=0, le=10000), limit: int = Query(default=100, ge=1, le=100),
+                     authorization: str | None = Header(default=None)):
+        principal, _ = actor(request, authorization)
+        if chain_id:
+            uuid_value(chain_id)
+        if product_id:
+            uuid_value(product_id)
+        return runner.provisional_forecasts(principal, chain_id, product_id, offset, limit)
 
     @router.get("/quality-gates")
     def quality_gates(request: Request, chain_id: str, authorization: str | None = Header(default=None)):

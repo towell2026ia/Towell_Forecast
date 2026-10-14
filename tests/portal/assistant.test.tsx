@@ -26,7 +26,7 @@ describe("Global authenticated assistant, visual-only phase", () => {
   it("mounts one floating launcher throughout all eight modules while API is OFF", async () => {
     render(<ForecastTowellApp profile={profile} repository={fixture()} onLogout={vi.fn()}/>);
     const original = launcher(); expect(original.className).toMatch(/fixed bottom-5 right-5/);
-    for (const moduleName of ["Inicio", "Histórico", "Motores de Forecast", "Calidad de datos", "Periodos", "Centro de captura", "Usuarios", "Auditoría"]) {
+    for (const moduleName of ["Inicio", "Histórico", "Motores de Forecast", "Calidad de datos", "Periodos", "Centro de captura", "Base de Datos", "Usuarios"]) {
       await userEvent.click(screen.getByRole("button", { name: moduleName }));
       expect(launcher()).toBe(original);
     }

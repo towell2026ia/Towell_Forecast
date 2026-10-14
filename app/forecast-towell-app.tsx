@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { BrainCircuit, CalendarRange, ClipboardCheck, FileClock, History, Home, LogOut, PanelLeft, ShieldCheck, Users } from "lucide-react";
+import { BrainCircuit, CalendarRange, ClipboardCheck, Database, History, Home, LogOut, PanelLeft, ShieldCheck, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -11,7 +11,7 @@ import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupConte
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { logPortalEvent } from "@/lib/supabase/client";
 import { resetForChain } from "@/lib/forecast-data";
-import { emptyFilters, type Cursor, type Filters, type ForecastReadRepository, type Profile } from "@/lib/supabase/types";
+import { emptyFilters, type Filters, type ForecastReadRepository, type Profile } from "@/lib/supabase/types";
 import ForecastAssistant from "./forecast-assistant";
 import ForecastAssistantErrorBoundary from "./forecast-assistant-error-boundary";
 import type { AssistantContext } from "./assistant/assistant-service";
@@ -25,12 +25,15 @@ import { PreviewPerformancePanel } from "@/components/forecast/preview-performan
 import { UserAdministrationView } from "./user-administration-view";
 import { CaptureCenterView } from "./capture-center-view";
 import { selectedForecastHorizons, useCurrentForecastSelection } from "@/lib/forecast-e4-ui";
+import { ForecastPeriodsView } from "./forecast-periods-view";
+import { CommercialHistoryView } from "./commercial-history-view";
+import { DatabaseView } from "./database-view";
 
 const modules = [
   ["inicio", "Inicio", Home], ["historico", "Histórico", History],
   ["motor", "Motores de Forecast", BrainCircuit], ["calidad", "Calidad de datos", ShieldCheck],
   ["periodos", "Periodos", CalendarRange], ["captura", "Centro de captura", ClipboardCheck],
-  ["usuarios", "Usuarios", Users], ["auditoria", "Auditoría", FileClock],
+  ["base-datos", "Base de Datos", Database], ["usuarios", "Usuarios", Users],
 ] as const;
 type ModuleId = typeof modules[number][0];
 export type PreviewView = { key: string; result: PreviewJob | null; job: PreviewJob | null; error: string; loading: boolean };
@@ -41,7 +44,7 @@ export function useForecastFilters() {
   if (!state) throw new Error("filter_provider_required");
   return state;
 }
-function useRead<T>(load: () => Promise<T>) {
+export function useRead<T>(load: () => Promise<T>) {
   const [result, setResult] = useState<{ load: typeof load; data: T | null; error: boolean } | null>(null);
   useEffect(() => {
     let alive = true;
@@ -106,10 +109,10 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
         {active === "historico" && <HistoryView/>}
         {(active === "motor" || motorVisited) && <div hidden={active !== "motor"}><ForecastEnginesView scope={subtitle} onVisit={() => setMotorVisited(true)}/></div>}
         {active === "calidad" && <QualityView/>}
-        {active === "periodos" && <PeriodsView/>}
+        {active === "periodos" && <ForecastPeriodsView/>}
         {active === "usuarios" && profile.global_role === "ADMIN" && <UsersView/>}
         {active === "captura" && <CaptureCenterView key={`${filters.chainId}/${filters.productId}`}/>}
-        {active === "auditoria" && <Unavailable title="Auditoría" copy="La consulta de auditoría operativa se habilitará en una fase posterior. No se muestran eventos simulados."/>}
+        {active === "base-datos" && <DatabaseView/>}
       </main>
     </SidebarInset>
     <ForecastAssistantErrorBoundary><ForecastAssistant authorized={profile.status === "ACTIVE"} uiEnabled apiEnabled={false} voiceEnabled={false} mode="local" context={assistantContext}/></ForecastAssistantErrorBoundary>
@@ -122,7 +125,7 @@ export function GlobalFilters() {
   const chains = useRead(useCallback(() => repository.getVisibleChains(), [repository]));
   const categories = useRead(useCallback(() => repository.getCategories(filters.chainId), [repository, filters.chainId]));
   const products = useRead(useCallback(() => repository.getProducts(filters.chainId, filters.categoryId, filters.search), [repository, filters.chainId, filters.categoryId, filters.search]));
-  const periods = useRead(useCallback(() => repository.getPeriods(filters.chainId), [repository, filters.chainId]));
+  const periods = useRead(useCallback(() => repository.getReportPeriods ? repository.getReportPeriods(filters.chainId) : repository.getPeriods(filters.chainId), [repository, filters.chainId]));
   const chainMap = new Map(chains.data?.map(c => [c.id, c.name]) ?? []);
   const options = (chains.data ?? []).filter(c => c.has_history || showEmpty).map(c => ({ id: c.id, name: `${c.parentId && chainMap.has(c.parentId) ? chainMap.get(c.parentId) + " → " : ""}${c.name}${c.has_history ? "" : " · Sin histórico"}` }));
   return <section aria-label="Filtros globales" className="mb-6 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -203,29 +206,9 @@ function DashboardAllScopesChart({ scopes }: { scopes: import("@/lib/supabase/ty
   </div>;
 }
 export function HistoryView() {
-  const { repository, filters } = useForecastFilters();
-  // Filter changes remount page state; cursors from another scope cannot survive.
-  return <HistoricalPages key={JSON.stringify(filters)} repository={repository} filters={filters}/>;
-}
-function HistoricalPages({ repository, filters }: { repository: ForecastReadRepository; filters: Filters }) {
-  const { preview } = useForecastFilters();
-  const scope = filters.chainId ? preview?.result?.scopes.find(s => s.chain_id === filters.chainId) ?? null : null;
-  const [size, setSize] = useState<50 | 100 | 250>(50);
-  const [cursors, setCursors] = useState<(Cursor | null)[]>([null]);
-  const cursor = cursors.at(-1) ?? null;
-  const page = useRead(useCallback(() => repository.getHistoricalObservations(filters, { size, cursor }), [repository, filters, size, cursor]));
-  return <div><Intro title="Histórico operativo" copy="Pedido, venta y entrega por scope, producto y periodo. Vacío significa sin dato; cero es una cantidad observada."/>
-    {filters.chainId ? <div className="mb-5"><PreviewPerformancePanel job={preview?.result ?? null} scope={scope} productId={filters.productId} historical/></div> : <p className="mb-5 rounded-xl border bg-white p-4 text-sm text-slate-500">Selecciona una cadena para consultar WAPE y Bias sin mezclar scopes. Evaluación retrospectiva rolling-origin. No constituye certificación point-in-time.</p>}
-    <ReadState loading={page.loading} error={page.error} empty={page.data?.rows.length === 0}/>{page.data && page.data.rows.length > 0 && <DataTable headers={["Periodo", "Cadena", "Producto", "UPC", "ITEM", "Pedido", "Venta", "Entrega"]} rows={page.data.rows.map(r => [r.period.slice(0, 7), r.chain, r.product.description, [...new Set(r.product.identifiers.map(i => i[1]).filter(Boolean))].join(" / ") || "Sin dato", r.product.product_code, number(r.ORDER), number(r.SALES), number(r.DELIVERY)])}/>}
-    <div className="mt-4 flex flex-wrap items-end justify-between gap-3"><Picker label="Filas por página" value={String(size)} onChange={v => { setSize(Number(v) as 50 | 100 | 250); setCursors([null]); }} options={[50, 100, 250].map(n => ({ id: String(n), name: String(n) }))} all="50"/><div className="flex items-center gap-3"><Button variant="outline" disabled={cursors.length === 1 || page.loading} onClick={() => setCursors(c => c.slice(0, -1))}>Anterior</Button><span className="text-sm text-slate-500">Página {cursors.length}</span><Button variant="outline" disabled={!page.data?.next || page.loading} onClick={() => setCursors(c => [...c, page.data!.next])}>Siguiente</Button></div></div>
-  </div>;
+  return <CommercialHistoryView/>;
 }
 function QualityView() { return <Unavailable title="Calidad de datos" copy="Esta vista consulta únicamente observaciones publicadas. Los registros pendientes de reconciliación no forman parte del histórico visible. No se muestran alertas demo ni métricas de modelos sin corrida publicada."/>; }
-function PeriodsView() {
-  const { repository, filters } = useForecastFilters();
-  const periods = useRead(useCallback(() => repository.getPeriods(filters.chainId), [repository, filters.chainId]));
-  return <div><Intro title="Periodos disponibles" copy="Periodos derivados de las observaciones visibles. La operación de cierre no está habilitada."/><ReadState loading={periods.loading} error={periods.error} empty={periods.data?.length === 0}/>{periods.data && <DataTable headers={["Periodo", "Disponibilidad"]} rows={periods.data.map(p => [p, "Histórico publicado"])}/>}</div>;
-}
 export function UsersView() {
   const { repository, profile } = useForecastFilters();
   if (profile.global_role !== "ADMIN") return null;

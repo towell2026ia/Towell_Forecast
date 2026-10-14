@@ -138,7 +138,7 @@ describe("Multi-chain read-only UI", () => {
     const repo = fixture(), filters: Filters = { ...emptyFilters, chainId: chain1.id, productId: product.id, periodRange: ["2026-03", "2026-03"] };
     filterHarness(repo, <HistoryView/>, filters); await screen.findByText("Producto desde RLS");
     expect(repo.getHistoricalObservations).toHaveBeenCalledWith(filters, { size: 50, cursor: null });
-    expect(screen.getByText("0")).toBeTruthy(); expect(screen.getByText("Sin dato")).toBeTruthy();
+    expect(screen.getAllByText("0").length).toBeGreaterThan(0); expect(screen.getAllByText("Sin dato").length).toBeGreaterThan(0);
   });
   it("UI14 empty state explicit", () => { render(<ReadState loading={false} error={false} empty/>); expect(screen.getByText("No hay histórico certificado para este filtro.")).toBeTruthy(); });
   it("UI15 controlled error state, no demo", () => { render(<ReadState loading={false} error/>); expect(screen.getByRole("alert").textContent).toBe("No fue posible consultar los datos."); });
@@ -165,7 +165,7 @@ describe("Multi-chain read-only UI", () => {
   });
   it("UI20 failed production read shows error rather than fixture fallback", async () => {
     const repo = fixture(); repo.getHistoricalObservations = vi.fn(async () => { throw new Error("network"); });
-    filterHarness(repo, <HistoryView/>); expect(await screen.findByRole("alert")).toBeTruthy();
+    filterHarness(repo, <HistoryView/>); expect((await screen.findAllByRole("alert")).length).toBeGreaterThan(0);
     expect(screen.queryByText("Producto desde RLS")).toBeNull();
   });
 });

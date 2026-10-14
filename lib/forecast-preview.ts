@@ -43,7 +43,7 @@ export type CalculationSummary = { id: string; chain_id: string; product_id: str
   issue_period: string; status: string; created_at: string; suggested_reference: SuggestedReference | null; recalculation_reason: string | null };
 export type CalculationHorizon = { horizon: number; target_period: string; statistical_value: number; ml_value: number | null;
   ensemble_value: number | null; p10: number | null; p50: number; p90: number | null; p95: number | null;
-  band_basis: string; band_observations: number; statistical_model: string | null; ml_model: string | null;
+  band_basis: string; band_observations: number; band_status?: string; statistical_model: string | null; ml_model: string | null;
   ensemble_ml_model?: string | null; ensemble_ml_component?: number | null; statistical_weight?: number | null; ml_weight?: number | null };
 export type SelectionEvent = { id: string; calculation_id: string; selected_candidate: "STATISTICAL" | "ML" | "ENSEMBLE";
   selected_curve: { horizon: number; target_period: string; value: number }[]; selected_at: string; selected_by?: string;
@@ -62,6 +62,7 @@ export interface PreviewClient {
   vintages?(chainId: string): Promise<VintageSummary[]>;
   vintageDetail?(vintageId: string): Promise<VintageDetail>;
   vintageCapabilities?(): Promise<VintageCapabilities>;
+  provisionalForecasts?(chainId: string | null, productId: string | null): Promise<import("./forecast-reporting").ProvisionalForecast[]>;
   createCandidate?(chainId: string, previewId: string): Promise<string>;
   freezeVintage?(vintageId: string): Promise<string>;
   publishVintage?(vintageId: string, comment: string): Promise<string>;
@@ -194,6 +195,20 @@ export class RailwayPreviewClient implements PreviewClient {
   async calculations(chainId: string, productId: string) {
     const result = await this.e4<{ calculations: CalculationSummary[] }>(`/api/forecast/calculations?chain_id=${encodeURIComponent(chainId)}&product_id=${encodeURIComponent(productId)}`);
     return result.calculations;
+  }
+  async provisionalForecasts(chainId: string | null, productId: string | null) {
+    const rows: import("./forecast-reporting").ProvisionalForecast[] = [];
+    for (let offset = 0; offset < 10000; offset += 100) {
+      const params = new URLSearchParams({ offset: String(offset), limit: "100" });
+      if (chainId) params.set("chain_id", chainId);
+      if (productId) params.set("product_id", productId);
+      const result = await this.e4<{ rows: typeof rows; next_offset: number | null }>(`/api/forecast/provisional-forecasts?${params}`);
+      if (!Array.isArray(result.rows) || result.rows.length > 100 || result.rows.some(r => chainId && r.chain_id !== chainId || productId && r.product_id !== productId || r.horizons.length !== 12)) throw new PreviewReadError("DATA_READ_FAILED");
+      rows.push(...result.rows);
+      if (result.next_offset === null) return rows;
+      if (result.next_offset !== offset + 100) throw new PreviewReadError("DATA_READ_FAILED");
+    }
+    throw new PreviewReadError("DATA_READ_FAILED");
   }
   calculationDetail(calculationId: string) { return this.e4<CalculationDetail>(`/api/forecast/calculations/${encodeURIComponent(calculationId)}`); }
   async createCalculation(chainId: string, productId: string, previewId: string, reason?: string, idempotencyKey?: string) {

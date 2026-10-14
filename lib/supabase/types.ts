@@ -7,10 +7,14 @@ export type Product = { id: string; chain_id: string; category_id: string | null
 export type Filters = { chainId: string | null; productId: string | null; categoryId: string | null; periodRange: [string | null, string | null]; search: string };
 export const emptyFilters: Filters = { chainId: null, productId: null, categoryId: null, periodRange: [null, null], search: "" };
 export type Cursor = { chain_id: string; product_id: string; period: string };
-export type HistoricalRow = Cursor & { product: Product; chain: string; SALES: number | null; ORDER: number | null; DELIVERY: number | null; availability: string };
+export type HistoricalRow = Cursor & { product: Product; chain: string; SALES: number | null; ORDER: number | null; DELIVERY: number | null; availability: string;
+  observations?: Partial<Record<"SALES" | "ORDER" | "DELIVERY", { id: string; version: number; availableAt: string | null }>> };
 export type HistoricalPage = { rows: HistoricalRow[]; next: Cursor | null; observationCount: number };
 export type Summary = { scopeCount: number; productCount: number; observationCount: number; latestPeriod: string | null; byScope: { chain: Chain; observations: number }[] };
 export interface ForecastReadRepository {
+  getReportSnapshot?(filters: Filters): Promise<import("../forecast-reporting").ReportSnapshot>;
+  getReportPeriods?(chainId?: string | null): Promise<string[]>;
+  getDatabasePage?(section: import("../forecast-reporting").DatabaseSection, filters: Filters, page: number, size: 50 | 100 | 250): Promise<import("../forecast-reporting").DatabasePage>;
   getReadDiagnostic?(endpoint: "getPeriods"): { code: string; http_status: number } | null;
   getForecastHistory?(filters: Filters): Promise<import("../forecast-chart-data").HistoricalMonth[]>;
   getCustomerForecast?(filters: Filters, issuePeriod: string): Promise<import("../forecast-chart-data").CustomerMonth[]>;

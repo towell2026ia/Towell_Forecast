@@ -105,15 +105,6 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
   const scopes = current?.job && ["NOT_ELIGIBLE", "FAILED"].includes(current.job.status) ? current.job.scopes : current?.result?.scopes ?? current?.job?.scopes ?? [];
   const selected = filters.chainId ? scopes.find(s => s.chain_id === filters.chainId) ?? null : null;
   const provisional = selected?.provisional_cold_start;
-  useEffect(() => {
-    if (!provisional || provisional.research?.status !== "PENDING" || !client?.research || !jobId) return;
-    let alive = true;
-    const timer = setTimeout(() => { void client.research!(jobId).then(result => {
-      if (alive) setPreview(previous => previous?.key === key && previous.job?.job_id === jobId
-        ? { ...previous, job: result, result, error: "" } : previous);
-    }).catch(() => { /* Research is optional; numeric estimate remains available. */ }); }, 8000);
-    return () => { alive = false; clearTimeout(timer); };
-  }, [provisional, client, jobId, key, setPreview]);
   const stale = Boolean(current?.result && selected?.status === "PREVIEW" && !currentRetrospectivePreview(current.result, selected));
   const cutoff = selected?.issue_period;
   const historyKey = `${JSON.stringify(filters)}/${cutoff ?? ""}`;

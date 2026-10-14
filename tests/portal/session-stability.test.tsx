@@ -93,7 +93,7 @@ describe("SS identity-scoped session stability", () => {
   for (const [cp, label, value] of [["SS05", "Cadena / unidad comercial", chain.name], ["SS06", "Producto", "Producto X"], ["SS07", "Periodo desde", "2026-01"], ["SS07B", "Periodo hasta", "2026-07"], ["SS07C", "Categoría", "Categoría seleccionada"]]) {
     it(`${cp} focus preserves ${label}`, async () => { await mounted(); await historyState(); await focus(); expect(screen.getByRole("combobox", { name: label }).textContent).toContain(value); expectStable(); });
   }
-  it("SS04 focus preserves active module", async () => { await mounted(); await historyState(); await focus(); expect(screen.getByRole("heading", { name: "Histórico operativo" })).toBeTruthy(); expectStable(); });
+  it("SS04 focus preserves active module", async () => { await mounted(); await historyState(); await focus(); expect(screen.getByRole("heading", { name: "Matriz histórica comercial" })).toBeTruthy(); expectStable(); });
   it("SS08 focus preserves page 2 and search without another historical read", async () => {
     await mounted(); await historyState(); const calls = vi.mocked(repos[0].getHistoricalObservations).mock.calls.length;
     await focus(); expect(screen.getByText("Página 2")).toBeTruthy();

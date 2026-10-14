@@ -4,13 +4,14 @@ import { controlledReadCode, logReadDiagnostic, PortalReadError, type PortalRead
 import { RailwayPreviewClient } from "./forecast-preview";
 import { SupabaseUserAdminClient } from "./supabase/user-admin";
 import type { HistoricalMonth, CustomerMonth } from "./forecast-chart-data";
+import { SupabaseReportReader } from "./forecast-report-repository";
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 type ProductMapping = { id: string; identifier_mappings?: [string | null, string | null][] };
 type Mapping = { scope?: { parent_uuid?: string; scope_type?: string }; products?: ProductMapping[] };
 const publishedHistoryView = "portal_monthly_observations_current";
 const publishedPeriodsView = "portal_history_periods";
-type Observation = Cursor & { metric_code: "SALES" | "ORDER" | "DELIVERY"; value: number; availability_source: string; product_code: string; variant_code: string | null; product_description: string; category_id: string | null; chain_name: string };
+type Observation = Cursor & { metric_code: "SALES" | "ORDER" | "DELIVERY"; value: number; availability_source: string; product_code: string; variant_code: string | null; product_description: string; category_id: string | null; chain_name: string; observation_id?: string; version_no?: number; available_at?: string | null };
 
 export function assertActiveProfile(profile: Profile | null, userId: string): Profile {
   if (!profile || profile.id !== userId || profile.status !== "ACTIVE" || !["ADMIN", "EDITOR", "VIEWER"].includes(profile.global_role)) throw new Error("profile_access_denied");
@@ -33,6 +34,7 @@ export function combineObservations(observations: Observation[], products: Map<s
     const value = Number(o.value);
     if (!Number.isFinite(value) || value < 0) throw new Error("invalid_observation_value");
     row[o.metric_code] = value;
+    if (o.observation_id) row.observations = { ...row.observations, [o.metric_code]: { id: o.observation_id, version: o.version_no ?? 1, availableAt: o.available_at ?? null } };
   }
   return [...groups.values()].slice(0, size);
 }
@@ -50,7 +52,14 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
   private readDiagnostics = new Map<PortalReadDiagnostic["endpoint"], PortalReadDiagnostic>();
   readonly previews: RailwayPreviewClient;
   readonly userAdmin: SupabaseUserAdminClient;
-  constructor(private client: SupabaseClient, private userId: string, private onReadFailure?: (diagnostic: PortalReadDiagnostic) => void) { this.previews = new RailwayPreviewClient(client); this.userAdmin = new SupabaseUserAdminClient(client); }
+  private reports: SupabaseReportReader;
+  constructor(private client: SupabaseClient, private userId: string, private onReadFailure?: (diagnostic: PortalReadDiagnostic) => void) {
+    this.previews = new RailwayPreviewClient(client); this.userAdmin = new SupabaseUserAdminClient(client);
+    this.reports = new SupabaseReportReader(client, this, this.controller.signal);
+  }
+  getReportSnapshot(filters: Filters) { return this.reports.snapshot(filters); }
+  getReportPeriods(chainId?: string | null) { return this.reports.periods(chainId ?? null); }
+  getDatabasePage(section: import("./forecast-reporting").DatabaseSection, filters: Filters, page: number, size: 50 | 100 | 250) { return this.reports.databasePage(section, filters, page, size); }
   dispose() { this.controller.abort(); this.previews.dispose(); this.catalog = null; this.chains = null; this.metadata = null; this.chainTask = null; this.mappingTask = null; this.catalogTask = null; this.readDiagnostics.clear(); }
   getReadDiagnostic(endpoint: PortalReadDiagnostic["endpoint"]) { return this.readDiagnostics.get(endpoint) ?? null; }
   private ensureOpen() { if (this.controller.signal.aborted) throw new Error("session_disposed"); }
@@ -140,7 +149,7 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
   }
   private async filtered(filters: Filters, head = false) {
     const selected = await this.getProducts(filters.chainId, filters.categoryId, filters.search);
-    let q = this.client.from(publishedHistoryView).select("chain_id,chain_name,product_id,product_code,variant_code,product_description,category_id,period,metric_code,value,availability_source", { count: "exact", head });
+    let q = this.client.from(publishedHistoryView).select("observation_id,chain_id,chain_name,product_id,product_code,variant_code,product_description,category_id,period,metric_code,value,availability_source,version_no,available_at", { count: "exact", head });
     if (filters.chainId) q = q.eq("chain_id", filters.chainId);
     if (filters.productId) q = q.eq("product_id", filters.productId);
     if (filters.categoryId) q = q.eq("category_id", filters.categoryId);

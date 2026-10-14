@@ -336,6 +336,44 @@ class OperationalMultiChainForecastRunner:
             self.persistence.put("forecast_jobs", job_id, job)
         return self.result(job_id, principal, job.get("product_id"))
 
+    def provisional_forecasts(self, principal, chain_id=None, product_id=None, offset=0, limit=100):
+        """Read existing numeric proposals only; never start or poll research."""
+        from datetime import datetime, timezone
+
+        if chain_id and chain_id not in principal.chain_ids:
+            raise PreviewError("SCOPE_FORBIDDEN", 403)
+        latest = {}
+        for job in self.persistence.list("forecast_jobs"):
+            if job.get("kind") != "OPERATIONAL_PREVIEW" or job.get("status") != "READY_PROVISIONAL":
+                continue
+            if not set(job.get("chain_ids", [])).issubset(principal.chain_ids):
+                continue
+            for scope in job.get("scopes", []):
+                chain = scope.get("chain_id")
+                product = job.get("product_id")
+                proposal = scope.get("provisional_cold_start") or {}
+                if not proposal or chain not in principal.chain_ids or not product:
+                    continue
+                if chain_id and chain != chain_id or product_id and product != product_id:
+                    continue
+                issue = scope.get("issue_period")
+                horizons = proposal.get("horizons", [])
+                if not issue or len(horizons) != 12 or {h.get("horizon") for h in horizons} != set(range(1, 13)):
+                    raise PreviewError("LINEAGE_MISMATCH", 503)
+                if any(h.get("target_period") != add_month(issue, h["horizon"]) or
+                       not isinstance(h.get("value"), (int, float)) or not math.isfinite(h["value"]) or h["value"] < 0 for h in horizons):
+                    raise PreviewError("LINEAGE_MISMATCH", 503)
+                key = (chain, product, issue)
+                row = {"job_id": job["job_id"], "chain_id": chain, "product_id": product, "issue_period": issue,
+                       "created_at": datetime.fromtimestamp(job["created_at"], timezone.utc).isoformat(),
+                       "engine_version": job["engine_version"], "model": proposal["model"],
+                       "confidence": proposal["confidence"],
+                       "horizons": [{k: h[k] for k in ("horizon", "target_period", "value")} for h in horizons]}
+                if key not in latest or row["created_at"] > latest[key]["created_at"]:
+                    latest[key] = row
+        rows = sorted(latest.values(), key=lambda r: (r["chain_id"], r["product_id"], r["issue_period"]))
+        return {"rows": rows[offset:offset + limit], "next_offset": offset + limit if len(rows) > offset + limit else None}
+
     def result(self, job_id, principal, product_id=None):
         job = self.get_job(job_id, principal)
         if job["status"] not in {"READY_PREVIEW", "READY_PROVISIONAL", "NOT_ELIGIBLE"}:
