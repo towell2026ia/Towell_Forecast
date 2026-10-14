@@ -14,8 +14,10 @@ con `security_invoker=true`, SELECT para authenticated y sin acceso public/anon.
 No cambia 008, datos, políticas ni elegibilidad temporal. Véase
 [la corrección del selector de periodos](../../docs/PRD09_2E13_PERIOD_FILTER_READ_FIX.md).
 
-La migration `015` (`202610140015_commercial_catalog.sql`) es una propuesta de
-esquema comercial sin semillas ni backfill. **No aplicar sin autorización expresa
-del esquema.** El mapeo de productos requiere otra autorización independiente;
+La migration `015` (`202610140015_commercial_catalog.sql`) fue corregida y aplicada
+como esquema comercial vacío bajo la autorización PRD 09.2E5-01B-A.1, después del
+preflight. Incluye Tipo de producto independiente; no contiene semillas ni backfill.
+El mapeo de productos requiere otra autorización independiente;
 commit/push de código no autoriza `db push`. Véase
-[el expediente comercial](../../docs/PRD09_2E5_01B_A_COMMERCIAL_CATALOG.md).
+[el expediente comercial](../../docs/PRD09_2E5_01B_A_COMMERCIAL_CATALOG.md) y
+[el control de aplicación A.1](../../docs/PRD09_2E5_01B_A1_SCHEMA_CONTROL.md).

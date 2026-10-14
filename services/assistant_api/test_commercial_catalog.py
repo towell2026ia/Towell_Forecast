@@ -3,6 +3,7 @@ from pathlib import Path
 import unittest
 
 from services.assistant_api.commercial_catalog import analyze, digest, homologate_size, key, prepare, product_type_evidence
+from scripts.prepare_commercial_mapping import prepare as prepare_load, render_sql
 
 RULES = json.loads((Path(__file__).resolve().parents[2] / "config/commercial_catalog_rules.json").read_text(encoding="utf-8"))
 
@@ -240,6 +241,11 @@ class CommercialCatalogTests(unittest.TestCase):
         row = analyze(catalog, RULES)["rows"][0]
         self.assertEqual(row["proposed_size"], "G")
         self.assertEqual(row["proposed_model"], "Kimono")
+        self.assertEqual(row["product_type_state"], "KNOWN")
+        self.assertEqual(row["product_type_evidence"]["literal"], "Bata")
+        self.assertEqual(row["product_type_evidence"]["source"], "CATEGORY_NAME")
+        self.assertEqual(row["classification_status"], "PENDING_CLASSIFICATION")
+        self.assertEqual(self.packet(["Batas Kimono Gris Unitalla"])["inventories"]["product_types"][0]["original_labels"], ["BATA"])
 
     def test_size_from_unambiguous_alias_has_traceable_origin(self):
         catalog = fixture(["Toalla Fendi Gris"])
@@ -259,6 +265,10 @@ class CommercialCatalogTests(unittest.TestCase):
         self.assertEqual(row["proposed_product_type"], "BATA")
         self.assertEqual(row["proposed_size"], "Unitalla")
         self.assertEqual(row["proposed_model"], "Kimono")
+        self.assertEqual(row["product_type_state"], "KNOWN")
+        self.assertEqual(row["product_type_evidence"]["literal"], "Batas")
+        self.assertEqual(row["product_type_evidence"]["source"], "PRODUCT_DESCRIPTION")
+        self.assertEqual(row["classification_status"], "PENDING_CLASSIFICATION")
 
     def test_type_without_description_uses_category_or_stays_unknown(self):
         self.assertEqual(product_type_evidence("Facial Nuevo", "Toalla", RULES)["source"], "CATEGORY_NAME")
@@ -269,6 +279,35 @@ class CommercialCatalogTests(unittest.TestCase):
         row = self.packet(["Set Bata Toalla Nuevo Gris"])["rows"][0]
         self.assertIsNone(row["proposed_product_type"])
         self.assertIn("PRODUCT_TYPE_AMBIGUOUS", row["ambiguity_reasons"])
+        self.assertEqual(row["product_type_state"], "UNKNOWN")
+        self.assertTrue(row["product_type_evidence"]["ambiguous"])
+
+    def test_load_package_is_complete_pending_only_and_keeps_unknowns(self):
+        catalog = fixture(["TOALLA MB FENDI AZUL", "Producto sin evidencia"])
+        catalog['actor'].update(id='00000000-0000-4000-8000-000000000001', global_role='ADMIN')
+        catalog['integrity'].update(product_hash='a'*64, import_batch_hash='b'*64, import_profile_hash='c'*64)
+        packet, payload = prepare_load(catalog, RULES)
+        rows = payload['classifications']
+        self.assertEqual({r['product_id'] for r in rows}, {p['id'] for p in catalog['products']})
+        self.assertTrue(all(r['classification_status'] == 'PENDING_CLASSIFICATION' and
+                            r['approved_by'] is None and r['approved_at'] is None for r in rows))
+        self.assertEqual({r['product_id']:r['product_snapshot'] for r in rows}, {p['id']:p for p in catalog['products']})
+        self.assertEqual(next(r for r in packet['rows'] if r['product_id']=='0')['upc'], ['000'])
+        unknown = next(r for r in rows if r['product_id'] == '1')
+        self.assertEqual(unknown['model_state'], 'UNKNOWN')
+        self.assertIsNone(unknown['model_id'])
+        sql = render_sql(payload)
+        self.assertIn('independent mapping authorization missing', sql)
+        self.assertNotIn('UPDATE public.', sql)
+        self.assertNotIn('DELETE FROM public.', sql)
+        self.assertEqual(payload['mapping_packet_hash'], prepare_load(catalog, RULES)[1]['mapping_packet_hash'])
+
+    def test_load_dictionaries_preserve_distinct_accented_labels(self):
+        catalog = fixture(["Toalla MB CAFE AZUL", "Toalla MB CAFÉ AZUL"])
+        catalog['actor'].update(id='00000000-0000-4000-8000-000000000001', global_role='ADMIN')
+        _, payload = prepare_load(catalog, RULES)
+        self.assertEqual({r['name'] for r in payload['dictionaries']['commercial_models']}, {'CAFE', 'CAFÉ'})
+        self.assertEqual(len({r['model_id'] for r in payload['classifications']}), 2)
 
 
 if __name__ == "__main__":

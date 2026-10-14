@@ -26,7 +26,7 @@ def main():
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         for row in packet["rows"]:
-            values = {f: json.dumps(row[f], ensure_ascii=False) if isinstance(row[f], list) else row[f] for f in fields}
+            values = {f: json.dumps(row[f], ensure_ascii=False) if isinstance(row[f], (list, dict)) else row[f] for f in fields}
             writer.writerow({f: "'" + v if isinstance(v, str) and v.lstrip().startswith(("=", "+", "-", "@")) else v for f, v in values.items()})
     print(json.dumps({"verdict": packet["verdict"], "metrics": packet["metrics"], "mapping_hash": packet["mapping_hash"]}, ensure_ascii=False, indent=2))
 

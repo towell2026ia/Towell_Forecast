@@ -66,11 +66,12 @@ try {
     (select count(*) from public.forecast_selection_events) selections`)
   await check('schema adds no rows', async () => {
     assert.equal((await one('select count(*)::int n from public.product_commercial_classifications')).n, 0)
-    const rows = (await db.query("select relname,relrowsecurity from pg_class where relname in ('commercial_models','commercial_colors','commercial_sizes','product_commercial_classifications')")).rows
-    assert.equal(rows.length, 4)
+    const rows = (await db.query("select relname,relrowsecurity from pg_class where relname in ('commercial_product_types','commercial_models','commercial_colors','commercial_sizes','product_commercial_classifications')")).rows
+    assert.equal(rows.length, 5)
     assert.ok(rows.every(r => r.relrowsecurity))
+    for (const row of rows) assert.equal((await one(`select count(*)::int n from public.${row.relname}`)).n, 0)
   })
-  const tables = ['commercial_models', 'commercial_colors', 'commercial_sizes', 'product_commercial_classifications']
+  const tables = ['commercial_product_types', 'commercial_models', 'commercial_colors', 'commercial_sizes', 'product_commercial_classifications']
   for (const role of ['anon', 'authenticated', 'service_role']) {
     await check(`${role} cannot write even with admin identity`, async () => {
       for (const table of tables) for (const verb of ['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) {
@@ -83,6 +84,7 @@ try {
     })
   }
   await db.exec(`
+    insert into public.commercial_product_types(id,name,evidence_json,created_by) values ('${id(74)}','TOALLA','{"source":"isolated fixture"}','${id(10)}'),('${id(75)}','DELANTAL','{"source":"open type dictionary fixture"}','${id(10)}');
     insert into public.commercial_models(id,name,evidence_json,created_by) values ('${id(70)}','Nuevo','{"source":"isolated fixture"}','${id(10)}'),('${id(71)}','Private B','{"source":"private scope B"}','${id(10)}');
     insert into public.commercial_colors(id,name,evidence_json,created_by) values ('${id(72)}','Gris','{"source":"isolated fixture"}','${id(10)}');
     insert into public.commercial_sizes(id,name,kind,evidence_json,created_by) values ('${id(73)}','MB','PRESENTATION','{"source":"literal MB"}','${id(10)}');
@@ -91,18 +93,22 @@ try {
     const v = { product: 61, chain: 1, category: 21, model: 70, color: 72, size: 73,
       version: 1, predecessor: null, status: 'PENDING_CLASSIFICATION', modelState: 'KNOWN',
       colorState: 'KNOWN', sizeState: 'KNOWN', originalModel: 'Nuevo', originalColor: 'Gris', originalSize: 'MB',
+      productType: 74, productTypeState: 'KNOWN', originalProductType: 'Toalla',
+      productTypeEvidence: { source: 'PRODUCT_DESCRIPTION', literal: 'Toalla' },
       creator: 10, approver: null, at: null, reference: null, snapshot: null, evidence: { source: 'isolated fixture' }, ...overrides }
     const uuid = value => value === null ? 'null' : q(id(value))
     const text = value => value === null ? 'null' : q(value)
     return `insert into public.product_commercial_classifications(chain_id,category_id,product_id,model_id,color_id,size_id,
       model_state,color_state,size_state,original_model,original_color,original_size,classification_status,classification_source,
       classification_version,rules_version,evidence_json,explanation,product_snapshot,mapping_packet_hash,
-      created_by,approved_by,approved_at,approval_reference,supersedes_id) values (
+      created_by,approved_by,approved_at,approval_reference,supersedes_id,
+      product_type_id,product_type_state,original_product_type,product_type_evidence_json) values (
       ${uuid(v.chain)},${uuid(v.category)},${uuid(v.product)},${uuid(v.model)},${uuid(v.color)},${uuid(v.size)},
       ${q(v.modelState)},${q(v.colorState)},${q(v.sizeState)},${text(v.originalModel)},${text(v.originalColor)},${text(v.originalSize)},
       ${q(v.status)},'ISOLATED_TEST',${v.version},'test',${q(JSON.stringify(v.evidence))}::jsonb,'Review required',
       ${v.snapshot ? q(v.snapshot) + '::jsonb' : `(select to_jsonb(p) from public.products p where id='${id(v.product)}')`},
-      '${'a'.repeat(64)}',${uuid(v.creator)},${uuid(v.approver)},${text(v.at)},${text(v.reference)},${text(v.predecessor)}) returning id`
+      '${'a'.repeat(64)}',${uuid(v.creator)},${uuid(v.approver)},${text(v.at)},${text(v.reference)},${text(v.predecessor)},
+      ${uuid(v.productType)},${q(v.productTypeState)},${text(v.originalProductType)},${q(JSON.stringify(v.productTypeEvidence))}::jsonb) returning id`
   }
   await check('scope/category/snapshot cannot be forged', async () => {
     for (const patch of [{ chain: 2 }, { category: 22 }, { category: null }, { snapshot: '{}' }]) await reject(insert(patch), '23514')
@@ -119,6 +125,21 @@ try {
     await reject(insert({ size: null, sizeState: 'UNKNOWN', originalSize: null,
       status: 'APPROVED', approver: 10, at: '2026-01-01', reference: 'isolated-approval' }), '23514')
     await reject(insert({ model: 999 }), '23503')
+  })
+  await check('product type is independent, evidenced and required for approval', async () => {
+    for (const patch of [{ productType: null }, { productTypeState: 'UNKNOWN' },
+      { originalProductType: null }, { productTypeEvidence: {} },
+      { productType: null, productTypeState: 'NOT_APPLICABLE', originalProductType: null },
+      { productType: null, productTypeState: 'UNKNOWN', originalProductType: null,
+        status: 'APPROVED', approver: 10, at: '2026-01-01', reference: 'test-only' }]) {
+      await reject(insert(patch), '23514')
+    }
+    await reject(insert({ productType: 999 }), '23503')
+    await db.exec('begin')
+    await db.exec(insert({ productType: null, productTypeState: 'UNKNOWN', originalProductType: null,
+      productTypeEvidence: { source: 'No unambiguous product type; review required' } }))
+    assert.equal((await one(`select product_type_state from public.product_commercial_classifications_current where product_id='${id(61)}'`)).product_type_state, 'UNKNOWN')
+    await db.exec('rollback')
   })
   let revision
   await check('pending revision append and duplicates rejected', async () => {
@@ -137,13 +158,15 @@ try {
     assert.equal((await one('select count(*)::int n from public.product_commercial_classifications')).n, 3)
     assert.equal((await one(`select classification_status from public.product_commercial_classifications_current where product_id='${id(61)}'`)).classification_status, 'REJECTED')
   })
-  await db.exec(insert({ product: 62, chain: 2, category: 22, model: 71 }))
+  await db.exec(insert({ product: 62, chain: 2, category: 22, model: 71, productType: 75, originalProductType: 'Delantal' }))
   await check('viewer chain isolation and shared color visibility', async () => {
     await as('authenticated', id(11), async () => {
       assert.equal((await one('select count(*)::int n from public.product_commercial_classifications')).n, 3)
       assert.equal((await one('select count(*)::int n from public.product_commercial_classifications_current')).n, 1)
       assert.deepEqual((await db.query('select name from public.commercial_models')).rows, [{ name: 'Nuevo' }])
       assert.deepEqual((await db.query('select name from public.commercial_colors')).rows, [{ name: 'Gris' }])
+      assert.deepEqual((await db.query('select name from public.commercial_product_types')).rows, [{ name: 'TOALLA' }])
+      await reject('select evidence_json from public.commercial_product_types', '42501')
       await reject('select evidence_json from public.commercial_colors', '42501')
     })
   })
@@ -151,12 +174,15 @@ try {
     await as('authenticated', id(12), async () => {
       assert.equal((await one('select count(*)::int n from public.product_commercial_classifications_current')).n, 0)
       assert.equal((await one('select count(*)::int n from public.commercial_models')).n, 0)
+      assert.equal((await one('select count(*)::int n from public.commercial_product_types')).n, 0)
     })
     await as('anon', null, async () => { await reject('select * from public.product_commercial_classifications_current', '42501') })
   })
   await check('admin sees all scopes; dictionary revisions are immutable', async () => {
     await as('authenticated', id(10), async () => { assert.equal((await one('select count(*)::int n from public.product_commercial_classifications_current')).n, 2) })
     await reject("update public.commercial_models set name='Replace'", '23514')
+    await reject("update public.commercial_product_types set name='Replace'", '23514')
+    assert.equal((await one(`select name from public.commercial_product_types where id='${id(75)}'`)).name, 'DELANTAL')
     await reject("insert into public.commercial_models(name,evidence_json,created_by) values ('NUEVO','{\"e\":1}','" + id(10) + "')", '23505')
   })
   await check('new product automatically pending with no fictitious mapping', async () => {
@@ -165,6 +191,8 @@ try {
     const row = await one(`select * from public.product_commercial_classifications_current where product_id='${id(63)}'`)
     assert.equal(row.classification_status, 'PENDING_CLASSIFICATION')
     assert.equal(row.classification_id, null)
+    assert.equal(row.product_type_state, 'UNKNOWN')
+    assert.equal(row.product_type_id, null)
     await db.exec(`delete from public.products where id='${id(63)}'`)
   })
   await check('historical data and products unchanged', async () => {
@@ -192,7 +220,7 @@ try {
   })
   await check('empty schema rollback leaves original tables intact', async () => {
     // Dispose isolated commercial fixtures, never production data.
-    await db.exec('truncate public.product_commercial_classifications,public.commercial_models,public.commercial_colors,public.commercial_sizes')
+    await db.exec('truncate public.product_commercial_classifications,public.commercial_models,public.commercial_colors,public.commercial_sizes,public.commercial_product_types')
     await db.exec(readFileSync('supabase/rollback/202610140015_commercial_catalog.sql', 'utf8'))
     assert.equal((await one('select count(*)::int n from public.products')).n, 2)
     assert.equal((await one("select to_regclass('public.product_commercial_classifications') exists")).exists, null)

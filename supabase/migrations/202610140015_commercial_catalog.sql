@@ -1,5 +1,14 @@
--- PRD 09.2E5-01B-A. SCHEMA ONLY: separate approval required before remote apply.
+-- PRD 09.2E5-01B-A.1. SCHEMA ONLY: guarded preflight required before remote apply.
 -- No seeds, backfill, runtime endpoint, or changes to existing business rows.
+-- Product types are an open dictionary, independent of models and sizes.
+create table public.commercial_product_types (
+  id uuid primary key default gen_random_uuid(),
+  name text not null check (btrim(name) <> ''),
+  name_key text generated always as (regexp_replace(upper(btrim(name)), '[[:space:]]+', ' ', 'g')) stored unique,
+  evidence_json jsonb not null check (jsonb_typeof(evidence_json) = 'object' and evidence_json <> '{}'),
+  created_by uuid not null references public.profiles(id) on delete restrict,
+  created_at timestamptz not null default now()
+);
 create table public.commercial_models (
   id uuid primary key default gen_random_uuid(),
   name text not null check (btrim(name) <> ''),
@@ -31,14 +40,17 @@ create table public.product_commercial_classifications (
   chain_id uuid not null references public.chains(id) on delete restrict,
   category_id uuid,
   product_id uuid not null,
+  product_type_id uuid references public.commercial_product_types(id) on delete restrict,
   model_id uuid references public.commercial_models(id) on delete restrict,
   color_id uuid references public.commercial_colors(id) on delete restrict,
   size_id uuid references public.commercial_sizes(id) on delete restrict,
   model_state text not null check (model_state in ('KNOWN','UNKNOWN')),
   color_state text not null check (color_state in ('KNOWN','UNKNOWN','NOT_APPLICABLE')),
   size_state text not null check (size_state in ('KNOWN','UNKNOWN','NOT_APPLICABLE')),
-  original_model text, original_color text, original_size text,
-  classification_status text not null check (classification_status in ('PROPOSED','APPROVED','PENDING_CLASSIFICATION','REJECTED')),
+  product_type_state text not null check (product_type_state in ('KNOWN','UNKNOWN')),
+  original_model text, original_color text, original_size text, original_product_type text,
+  product_type_evidence_json jsonb not null check (jsonb_typeof(product_type_evidence_json) = 'object' and product_type_evidence_json <> '{}'),
+  classification_status text not null default 'PENDING_CLASSIFICATION' check (classification_status in ('PROPOSED','APPROVED','PENDING_CLASSIFICATION','REJECTED')),
   classification_source text not null check (btrim(classification_source) <> ''),
   classification_version integer not null check (classification_version > 0),
   rules_version text not null check (btrim(rules_version) <> ''),
@@ -64,8 +76,10 @@ create table public.product_commercial_classifications (
       or (color_state in ('UNKNOWN','NOT_APPLICABLE') and color_id is null and original_color is null)),
   check ((size_state='KNOWN' and size_id is not null and nullif(btrim(original_size),'') is not null)
       or (size_state in ('UNKNOWN','NOT_APPLICABLE') and size_id is null and original_size is null)),
+  check ((product_type_state='KNOWN' and product_type_id is not null and nullif(btrim(original_product_type),'') is not null)
+      or (product_type_state='UNKNOWN' and product_type_id is null and original_product_type is null)),
   check ((classification_status='APPROVED' and approved_by is not null and approved_at is not null
-       and nullif(btrim(approval_reference),'') is not null and model_state='KNOWN'
+       and nullif(btrim(approval_reference),'') is not null and model_state='KNOWN' and product_type_state='KNOWN'
        and color_state <> 'UNKNOWN' and size_state <> 'UNKNOWN')
       or (classification_status <> 'APPROVED' and approved_by is null and approved_at is null and approval_reference is null))
 );
@@ -74,6 +88,7 @@ create index commercial_classifications_scope_status
 create index commercial_classifications_model on public.product_commercial_classifications(model_id,chain_id);
 create index commercial_classifications_color on public.product_commercial_classifications(color_id,chain_id);
 create index commercial_classifications_size on public.product_commercial_classifications(size_id,chain_id);
+create index commercial_classifications_product_type on public.product_commercial_classifications(product_type_id,chain_id);
 
 create function private.commercial_classification_guard() returns trigger
 language plpgsql set search_path = '' as $$
@@ -120,7 +135,7 @@ begin
 end $$;
 revoke all on function private.commercial_append_only() from public,anon,authenticated,service_role;
 do $$ declare t text; begin
-  foreach t in array array['commercial_models','commercial_colors','commercial_sizes','product_commercial_classifications'] loop
+  foreach t in array array['commercial_product_types','commercial_models','commercial_colors','commercial_sizes','product_commercial_classifications'] loop
     execute format('create trigger commercial_append_only before update or delete on public.%I for each row execute function private.commercial_append_only()', t);
     execute format('alter table public.%I enable row level security', t);
     -- No browser or backend writer is activated by schema approval.
@@ -130,6 +145,7 @@ end $$;
 -- Shared dictionary evidence can mention multiple chains. Do not expose it to
 -- chain-scoped browser readers even when the dictionary name is shared.
 grant select (id,name,name_key,created_at) on public.commercial_models to authenticated;
+grant select (id,name,name_key,created_at) on public.commercial_product_types to authenticated;
 grant select (id,name,name_key,created_at) on public.commercial_colors to authenticated;
 grant select (id,name,name_key,kind,created_at) on public.commercial_sizes to authenticated;
 grant select on public.product_commercial_classifications to authenticated;
@@ -144,12 +160,15 @@ create policy commercial_colors_read on public.commercial_colors for select to a
 create policy commercial_sizes_read on public.commercial_sizes for select to authenticated using (
   (select private.is_active_admin()) or exists(select 1 from public.product_commercial_classifications c
     where c.size_id=commercial_sizes.id and private.can_chain(c.chain_id,'view')));
+create policy commercial_product_types_read on public.commercial_product_types for select to authenticated using (
+  (select private.is_active_admin()) or exists(select 1 from public.product_commercial_classifications c
+    where c.product_type_id=commercial_product_types.id and private.can_chain(c.chain_id,'view')));
 
 -- Includes future, unmapped products without fabricating classification rows.
 create view public.product_commercial_classifications_current with (security_invoker=true) as
 select p.id as product_id,p.chain_id,p.category_id,p.product_code,p.description,
-  c.id as classification_id,c.model_id,c.color_id,c.size_id,
-  case when c.product_snapshot is distinct from to_jsonb(p) then 'PENDING_CLASSIFICATION'
+  c.id as classification_id,c.model_id,c.color_id,c.size_id,c.product_type_id,
+  case when c.id is null or c.product_snapshot is distinct from to_jsonb(p) then 'PENDING_CLASSIFICATION'
     else c.classification_status end as classification_status,
   case when c.id is null then 'No reviewed commercial classification exists for this product'
     when c.product_snapshot is distinct from to_jsonb(p) then 'Product changed; regenerate and reapprove classification'
@@ -158,6 +177,8 @@ select p.id as product_id,p.chain_id,p.category_id,p.product_code,p.description,
   c.id is not null and c.product_snapshot is distinct from to_jsonb(p) as stale_snapshot,
   coalesce(c.model_state,'UNKNOWN') as model_state,coalesce(c.color_state,'UNKNOWN') as color_state,
   coalesce(c.size_state,'UNKNOWN') as size_state,c.original_model,c.original_color,c.original_size,
+  coalesce(c.product_type_state,'UNKNOWN') as product_type_state,c.original_product_type,
+  c.product_type_evidence_json,
   c.classification_source,c.classification_version,c.rules_version,c.approved_by,c.approved_at,c.created_at
 from public.products p left join lateral (
   select * from public.product_commercial_classifications r

@@ -315,6 +315,11 @@ def analyze(catalog, rules):
             "model_state": "KNOWN" if model_proposal else "UNKNOWN",
             "color_state": "KNOWN" if chosen["color"] else "UNKNOWN",
             "size_state": "KNOWN" if size else "UNKNOWN",
+            "product_type_state": "KNOWN" if product_type["normalized"] else "UNKNOWN",
+            "product_type_evidence": {"source": product_type["source"] or "NO_UNAMBIGUOUS_TYPE_EVIDENCE",
+                                      "literal": product_type["original"],
+                                      "source_text": product["description"] if product_type["source"] == "PRODUCT_DESCRIPTION" else category_name,
+                                      "ambiguous": product_type["ambiguous"], "rules_version": rules["version"]},
             "classification_status": "PENDING_CLASSIFICATION", "proposal_status": "PROPOSED" if model_proposal else "INSUFFICIENT_EVIDENCE",
             "classification_source": "SUPABASE_PRODUCT_AND_VERSIONED_IMPORT_METADATA",
             "classification_version": 1, "rules_version": rules["version"], "approved_by": None, "approved_at": None,
@@ -323,7 +328,8 @@ def analyze(catalog, rules):
     if {r["product_id"] for r in rows} != ids:
         raise ValueError("Analysis coverage is not 100 percent")
     inventory = {}
-    for field, label in (("proposed_model", "models"), ("proposed_color", "colors"), ("proposed_size", "sizes")):
+    for field, label in (("proposed_model", "models"), ("proposed_color", "colors"), ("proposed_size", "sizes"),
+                         ("proposed_product_type", "product_types")):
         groups = defaultdict(list)
         for row in rows:
             if row[field]:
@@ -347,4 +353,5 @@ def analyze(catalog, rules):
                     "models_identified_as_candidates": len(inventory["models"]),
                     "colors_identified_as_candidates": len(inventory["colors"]),
                     "sizes_identified_as_candidates": len(inventory["sizes"]),
+                    "product_types_identified_as_candidates": len(inventory["product_types"]),
                     "reason_counts": dict(sorted(reasons.items()))}}

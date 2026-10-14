@@ -3,7 +3,7 @@
 ## Boundaries and Deliverables
 
 This is a global, multicategory, multichain commercial classification foundation.
-It adds an offline proposal analyzer, configurable business rules, four normalized
+It adds an offline proposal analyzer, configurable business rules, five normalized
 tables, an RLS-aware current view, and isolated regression tests. It does not mount
 an API writer, add forecast features, change comparables, seed commercial rows,
 or change Selection/Capture/LIVE/Champion/Vintage/publication flags.
@@ -89,20 +89,33 @@ input/product/rules/mapping digests and original integrity fingerprints. JSON is
 authoritative; CSV quotes dangerous formula-like input for spreadsheet safety.
 The separately generated review workbook preserves opaque identifiers as text.
 
+`scripts/prepare_commercial_mapping.py` seals a separate JSON payload, complete
+CSV matrix and exact pending-only SQL from that export. Its dictionaries preserve
+accent distinctions; missing attributes remain UNKNOWN/NULL. The SQL aborts unless
+the session contains the exact separately authorized mapping-package hash, then
+checks the full product/import snapshots, empty commercial tables and UUID coverage.
+Preparing or publishing this generator does not authorize running the load SQL.
+
 ## Schema and Referential Integrity
 
-Migration `202610140015_commercial_catalog.sql` is **schema only**. It is not applied
-remotely by this task. There are no data seeds or dependencies on forecast engines.
+Migration `202610140015_commercial_catalog.sql` is **schema only**. PRD
+09.2E5-01B-A.1 authorizes its controlled application after a documented preflight.
+There are no data seeds or dependencies on forecast engines; mapping approval remains separate.
 
 - Global `commercial_models` and `commercial_colors` allow reuse across chains.
 - `commercial_sizes` supports presentations and documented explicit dimensions.
+- `commercial_product_types` is an open dictionary, independent of design and
+  size. TOALLA, TRAPO, TAPETE and BATA are recognized examples, not an enum or seed.
+  BATA/BATAS homologates to type BATA; original literals remain attached to each proposal.
 - `product_commercial_classifications` is append-only, with consecutive per-product
   versions, exact predecessor, administrative creator, optional approval identity,
   evidence, original attribute labels, rules version and mapping-packet digest.
+  Product type has its own FK, KNOWN/UNKNOWN state, original literal and nonempty
+  provenance object, including a review reason when UNKNOWN.
 - Composite FKs bind product/category to chain. An insert trigger checks category
   equality even when NULL and compares the complete product snapshot to the current
   product. A stale approval packet fails; product-row locking serializes revisions.
-- APPROVED requires known model and known or documented not-applicable color/size,
+- APPROVED requires known model and product type, and known or documented not-applicable color/size,
   active administrator, approval reference and nonfuture approval timestamp.
 - A reviewed reversal is a new REJECTED/PENDING revision, not an UPDATE/DELETE.
 - The current view includes new unmapped products as PENDING with an explanation.
@@ -110,7 +123,7 @@ remotely by this task. There are no data seeds or dependencies on forecast engin
 
 ## RLS and Administrative Gate
 
-All four tables have RLS. Classification reads use existing active-profile and
+All five tables have RLS. Classification reads use existing active-profile and
 `private.can_chain(chain_id,'view')` checks. Dictionaries expose only names referenced
 by a visible classification (or all names to an active administrator). Shared
 dictionary evidence/creator columns are not granted to browser identities because
