@@ -12,7 +12,7 @@ export type ReportLive = { id: string; calculation_id: string; chain_id: string;
 export type ProvisionalForecast = { job_id: string; chain_id: string; product_id: string; issue_period: string; created_at: string; engine_version: string; model: string; confidence: string; horizons: { horizon: number; target_period: string; value: number }[] };
 export type CustomerForecast = { id: string; chain_id: string; product_id: string; forecast_version_id: string; issue_period: string; version_no: number; target_period: string; value: number };
 export type ReportSnapshot = { products: Product[]; chains: Chain[]; categories: Category[]; calculations: ReportCalculation[]; horizons: ReportHorizon[]; decisions: ReportDecision[]; live: ReportLive[]; provisionals: ProvisionalForecast[]; customers: CustomerForecast[]; capabilities: VintageCapabilities };
-export type ReportChoice = { version: string | null; issue: string | null; decision: "ALL" | "PENDING" | "ADOPTED" };
+export type ReportChoice = { version: string | null; issue: string | null; decision: "ALL" | "PENDING" | "ADOPTED"; calculationId?: string | null };
 export const emptyReportChoice: ReportChoice = { version: null, issue: null, decision: "ALL" };
 export type ForecastMatrixRow = { product: Product; chain: string; category: string; calculation: ReportCalculation | null; provisional: ProvisionalForecast | null; adopted: ReportDecision | null; values: Record<string, Record<ReportSeries, number | null>> };
 export type DatabaseSection = "history" | "observations" | "catalog" | "calculations" | "models" | "decisions" | "research" | "performance";
@@ -55,7 +55,7 @@ export function chooseCalculations(snapshot: ReportSnapshot, choice: ReportChoic
   const grouped = new Map<string, ReportCalculation>();
   for (const calculation of snapshot.calculations) {
     if (calculation.objective !== "Venta" || !["READY_FOR_DECISION", "DECIDED", "SUPERSEDED"].includes(calculation.status) ||
-      choice.version && calculation.calculation_code !== choice.version || choice.issue && calculation.issue_period.slice(0, 7) !== choice.issue) continue;
+      choice.calculationId && calculation.id !== choice.calculationId || choice.version && calculation.calculation_code !== choice.version || choice.issue && calculation.issue_period.slice(0, 7) !== choice.issue) continue;
     const key = `${calculation.chain_id}/${calculation.product_id}`;
     const prior = grouped.get(key);
     if (!prior || calculation.calculation_no > prior.calculation_no || calculation.calculation_no === prior.calculation_no && calculation.created_at > prior.created_at) grouped.set(key, calculation);
@@ -75,14 +75,19 @@ export function validDecision(snapshot: ReportSnapshot, calculation: ReportCalcu
   return event;
 }
 export function buildForecastMatrix(snapshot: ReportSnapshot, choice: ReportChoice, periodRange: [string | null, string | null]) {
-  const selected = chooseCalculations(snapshot, choice);
-  const issue = choice.issue ?? [...selected.values()].map(c => c.issue_period.slice(0, 7)).sort().at(-1) ?? snapshot.provisionals.map(p => p.issue_period).sort().at(-1) ?? null;
+  let selected = chooseCalculations(snapshot, choice);
+  const anchor = [...selected.values()].sort((a, b) => a.issue_period.localeCompare(b.issue_period) || a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id)).at(-1);
+  const issue = anchor?.issue_period.slice(0, 7) ?? choice.issue ?? snapshot.provisionals.map(p => p.issue_period).sort().at(-1) ?? null;
+  // Product datasets and winners stay separate. Only compatible frozen curves
+  // with the same objective, cut, engine and evidence mode may be consolidated.
+  if (anchor) selected = chooseCalculations({ ...snapshot, calculations: snapshot.calculations.filter(c => c.objective === anchor.objective && c.issue_period.slice(0, 7) === issue && c.engine_version === anchor.engine_version && c.evidence_mode === anchor.evidence_mode) }, choice);
   const months = issue ? Array.from({ length: 12 }, (_, i) => addReportMonth(issue, i + 1)) : [];
   const periods = months.filter(p => (!periodRange[0] || p >= periodRange[0]) && (!periodRange[1] || p <= periodRange[1]));
   const leaf = leafScopeIds(snapshot.chains, new Set(snapshot.products.map(p => p.chain_id)));
   const chains = new Map(snapshot.chains.map(c => [c.id, c.name])), categories = new Map(snapshot.categories.map(c => [c.id, c.name]));
   const rows: ForecastMatrixRow[] = [];
-  for (const product of snapshot.products.filter(p => leaf.has(p.chain_id))) {
+  const uniqueProducts = [...new Map(snapshot.products.map(p => [p.id, p])).values()];
+  for (const product of uniqueProducts.filter(p => leaf.has(p.chain_id))) {
     const found = selected.get(`${product.chain_id}/${product.id}`);
     const calculation = found?.issue_period.slice(0, 7) === issue ? found : null;
     const adopted = calculation ? validDecision(snapshot, calculation) : null;
