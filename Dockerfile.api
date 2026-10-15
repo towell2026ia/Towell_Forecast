@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt && \
     groupadd --system forecast && useradd --system --gid forecast forecast && \
     mkdir -p /var/lib/forecast-towell && chown forecast:forecast /var/lib/forecast-towell
 COPY --chown=forecast:forecast services ./services
+COPY --chown=forecast:forecast config/commercial_catalog_rules.json ./config/commercial_catalog_rules.json
 COPY --chown=forecast:forecast app/data ./app/data
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
     CMD python -c "import os, urllib.request; port=os.environ.get('API_PORT') or os.environ.get('PORT') or '8000'; urllib.request.urlopen(f'http://127.0.0.1:{port}/api/live', timeout=3)" || exit 1

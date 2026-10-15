@@ -53,6 +53,7 @@ export type CalculationDetail = CalculationSummary & { candidate_metrics: Record
   horizons: CalculationHorizon[]; selection_events: SelectionEvent[]; live_evaluations: Record<string, unknown>[];
   actual_sales?: { observation_id: string; period: string; value: number; version_no: number; available_at: string; source_batch_id: string }[] };
 export interface PreviewClient {
+  commercialCatalog?(): Promise<import("./supabase/types").CommercialClassification[]>;
   create(chainId: string | null, productId: string | null, issuePeriod?: string | null): Promise<PreviewJob>;
   status(jobId: string): Promise<PreviewJob>;
   result(jobId: string, productId?: string | null): Promise<PreviewJob>;
@@ -85,6 +86,11 @@ const safeCodes = new Set(["AUTH_REQUIRED", "SCOPE_FORBIDDEN", "REQUEST_001", "P
 export class RailwayPreviewClient implements PreviewClient {
   private controller = new AbortController();
   constructor(private auth: SupabaseClient, private origin = process.env.NEXT_PUBLIC_FORECAST_API_URL ?? "") {}
+  async commercialCatalog() {
+    const data = await this.e4<{ products: import("./supabase/types").CommercialClassification[]; persisted: boolean }>("/api/forecast/commercial-catalog");
+    if (!Array.isArray(data.products) || data.persisted !== false || data.products.some(p => !p.product_id || !p.chain_id || !["APPROVED", "PENDING_CLASSIFICATION"].includes(p.status) || !Array.isArray(p.reasons))) throw new PreviewReadError("DATA_READ_FAILED");
+    return data.products;
+  }
   private async request(path: string, body?: unknown): Promise<PreviewJob> {
     let url: URL;
     try { url = new URL(this.origin); if (url.protocol !== "https:" || url.username || url.password || url.pathname !== "/" || url.search || url.hash) throw new Error(); }

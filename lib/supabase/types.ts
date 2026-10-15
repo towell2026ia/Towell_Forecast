@@ -3,8 +3,9 @@ export type Profile = { id: string; full_name: string; global_role: Role; status
 export type PublicSupabaseConfig = { url: string; key: string; siteUrl?: string };
 export type Chain = { id: string; code: string; name: string; status: string; has_history: boolean; parentId: string | null; scopeType: string | null };
 export type Category = { id: string; chain_id: string; name: string };
-export type Product = { id: string; chain_id: string; category_id: string | null; product_code: string; variant_code: string | null; description: string; identifiers: [string | null, string | null][] };
-export type Filters = { chainId: string | null; productId: string | null; categoryId: string | null; periodRange: [string | null, string | null]; search: string };
+export type CommercialClassification = { product_id: string; chain_id: string; product_type: string | null; model: string | null; color: string | null; size: string | null; not_applicable?: ("color" | "size")[]; status: "APPROVED" | "PENDING_CLASSIFICATION"; source: string; reasons: string[] };
+export type Product = { id: string; chain_id: string; category_id: string | null; product_code: string; variant_code: string | null; description: string; identifiers: [string | null, string | null][]; commercial?: CommercialClassification };
+export type Filters = { chainId: string | null; productId: string | null; categoryId: string | null; periodRange: [string | null, string | null]; search: string; commercialType?: string | null; commercialModel?: string | null; commercialColor?: string | null; commercialSize?: string | null; classificationStatus?: string | null };
 export const emptyFilters: Filters = { chainId: null, productId: null, categoryId: null, periodRange: [null, null], search: "" };
 export type Cursor = { chain_id: string; product_id: string; period: string };
 export type HistoricalRow = Cursor & { product: Product; chain: string; SALES: number | null; ORDER: number | null; DELIVERY: number | null; availability: string;
@@ -12,6 +13,8 @@ export type HistoricalRow = Cursor & { product: Product; chain: string; SALES: n
 export type HistoricalPage = { rows: HistoricalRow[]; next: Cursor | null; observationCount: number };
 export type Summary = { scopeCount: number; productCount: number; observationCount: number; latestPeriod: string | null; byScope: { chain: Chain; observations: number }[] };
 export interface ForecastReadRepository {
+  getCommercialCatalog?(): Promise<CommercialClassification[]>;
+  getReportHistory?(filters: Filters): Promise<HistoricalRow[]>;
   getReportSnapshot?(filters: Filters): Promise<import("../forecast-reporting").ReportSnapshot>;
   getReportPeriods?(chainId?: string | null): Promise<string[]>;
   getDatabasePage?(section: import("../forecast-reporting").DatabaseSection, filters: Filters, page: number, size: 50 | 100 | 250): Promise<import("../forecast-reporting").DatabasePage>;

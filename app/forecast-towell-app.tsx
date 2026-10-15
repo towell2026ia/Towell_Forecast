@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { BrainCircuit, CalendarRange, ClipboardCheck, Database, History, Home, LogOut, PanelLeft, ShieldCheck, Users } from "lucide-react";
+import { BrainCircuit, CalendarRange, ClipboardCheck, Database, History, Home, LogOut, PanelLeft, ShieldCheck, Users, RotateCcw, SlidersHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -28,6 +28,7 @@ import { selectedForecastHorizons, useCurrentForecastSelection } from "@/lib/for
 import { ForecastPeriodsView } from "./forecast-periods-view";
 import { CommercialHistoryView } from "./commercial-history-view";
 import { DatabaseView } from "./database-view";
+import { attachCommercial, changeCommercial, commercialOptions, matchesCommercial, type CommercialFilter } from "@/lib/commercial-filters";
 
 const modules = [
   ["inicio", "Inicio", Home], ["historico", "Histórico", History],
@@ -64,7 +65,7 @@ export function ReadState({ loading, error, empty }: { loading: boolean; error: 
   return null;
 }
 function Picker({ label, value, onChange, options, all = "Todas", disabled = false }: { label: string; value: string | null; onChange: (value: string | null) => void; options: { id: string; name: string }[]; all?: string; disabled?: boolean }) {
-  return <div className="min-w-0 space-y-2"><Label>{label}</Label><Select value={value ?? "all"} onValueChange={v => onChange(v === "all" ? null : v)} disabled={disabled}><SelectTrigger aria-label={label} className="w-full min-w-0 bg-white"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="all">{all}</SelectItem>{options.map(o => <SelectItem value={o.id} key={o.id}>{o.name}</SelectItem>)}</SelectContent></Select></div>;
+  return <div className="min-w-0 space-y-2"><Label>{label}</Label><Select value={value ?? "all"} onValueChange={v => onChange(v === "all" ? null : v)} disabled={disabled}><SelectTrigger aria-label={label} className="w-full min-w-0 bg-white [&>span]:truncate"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="all">{all}</SelectItem>{options.map(o => <SelectItem value={o.id} key={o.id}>{o.name}</SelectItem>)}</SelectContent></Select></div>;
 }
 
 export default function ForecastTowellApp({ profile, repository, onLogout }: { profile: Profile; repository: ForecastReadRepository; onLogout: () => Promise<void> }) {
@@ -104,7 +105,7 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
     </Sidebar>
     <SidebarInset className="min-w-0 bg-[#f7f9fc]">
       <header className="sticky top-0 z-30 flex min-h-16 flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-white/95 px-4 py-2 backdrop-blur md:px-7"><div className="flex min-w-0 items-center gap-3"><SidebarTrigger aria-label="Abrir navegación"><PanelLeft/></SidebarTrigger><div className="h-6 w-px bg-slate-200"/><div className="min-w-0"><p className="truncate text-sm font-semibold text-slate-950">{active === "inicio" ? "FORECAST Towell" : title}</p><p className="truncate text-xs text-slate-500">{subtitle}</p></div></div><div className="flex items-center gap-3"><div><p className="max-w-40 truncate text-sm font-medium">{profile.full_name || "Usuario"}</p><p className="text-xs text-slate-500">{profile.global_role}</p></div><Button variant="outline" size="sm" onClick={() => { setFilters({ ...emptyFilters }); void onLogout(); }}><LogOut className="size-4"/><span className="hidden sm:inline">Cerrar sesión</span><span className="sr-only sm:hidden">Cerrar sesión</span></Button></div></header>
-      <main className="mx-auto w-full max-w-[1480px] p-4 md:p-7"><GlobalFilters/>
+      <main className="mx-auto w-full max-w-[1480px] p-4 md:p-7"><GlobalFilters compact={active === "periodos"}/>
         {active === "inicio" && <Dashboard/>}
         {active === "historico" && <HistoryView/>}
         {(active === "motor" || motorVisited) && <div hidden={active !== "motor"}><ForecastEnginesView scope={subtitle} onVisit={() => setMotorVisited(true)}/></div>}
@@ -119,35 +120,49 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
   </SidebarProvider></ForecastFiltersContext.Provider>;
 }
 
-export function GlobalFilters() {
+export function GlobalFilters({ compact = false }: { compact?: boolean }) {
   const { repository, filters, setFilters, profile } = useForecastFilters();
   const [showEmpty, setShowEmpty] = useState(false);
+  const [opened, setOpened] = useState(false);
   const chains = useRead(useCallback(() => repository.getVisibleChains(), [repository]));
   const categories = useRead(useCallback(() => repository.getCategories(filters.chainId), [repository, filters.chainId]));
   const products = useRead(useCallback(() => repository.getProducts(filters.chainId, filters.categoryId, filters.search), [repository, filters.chainId, filters.categoryId, filters.search]));
+  const commercial = useRead(useCallback(() => repository.getCommercialCatalog?.() ?? Promise.resolve(null), [repository]));
+  const catalog = useMemo(() => {
+    try { return commercial.data && products.data ? attachCommercial(products.data, commercial.data) : products.data ?? []; }
+    catch { return []; }
+  }, [products.data, commercial.data]);
+  const matching = catalog.filter(p => matchesCommercial(p, filters));
+  const selectedProducts = matching.filter(p => !filters.productId || p.id === filters.productId);
   const periods = useRead(useCallback(() => repository.getReportPeriods ? repository.getReportPeriods(filters.chainId) : repository.getPeriods(filters.chainId), [repository, filters.chainId]));
   const chainMap = new Map(chains.data?.map(c => [c.id, c.name]) ?? []);
   const options = (chains.data ?? []).filter(c => c.has_history || showEmpty).map(c => ({ id: c.id, name: `${c.parentId && chainMap.has(c.parentId) ? chainMap.get(c.parentId) + " → " : ""}${c.name}${c.has_history ? "" : " · Sin histórico"}` }));
-  return <section aria-label="Filtros globales" className="mb-6 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+  return <section aria-label="Filtros globales" className="mb-6 rounded-lg border border-slate-200 bg-white p-4">
+    {compact && <div className="flex flex-wrap items-center justify-between gap-3"><div className="min-w-0 text-sm"><strong>{chainMap.get(filters.chainId ?? "") ?? "Todas las cadenas autorizadas"}</strong><p className="mt-1 break-words text-xs text-slate-500">{[filters.commercialType, filters.commercialModel, filters.commercialColor, filters.commercialSize, filters.productId ? products.data?.find(p => p.id === filters.productId)?.description : null].filter(Boolean).join(" · ") || "Todas las categorías y productos"}</p></div><Button variant="outline" size="sm" aria-expanded={opened} aria-controls="commercial-global-controls" onClick={() => setOpened(v => !v)}><SlidersHorizontal className="size-4"/>Filtros</Button></div>}
+    <div id="commercial-global-controls" hidden={compact && !opened} className={compact ? "mt-4" : ""}>
     <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
       <Picker label="Cadena / unidad comercial" value={filters.chainId} onChange={id => setFilters(f => resetForChain(f, id))} options={options} disabled={chains.loading || chains.error} all={profile.global_role === "ADMIN" ? "Todas las cadenas" : "Todas las autorizadas"}/>
-      <Picker label="Categoría" value={filters.categoryId} onChange={id => setFilters(f => ({ ...f, categoryId: id, productId: null }))} options={(categories.data ?? []).map(c => ({ id: c.id, name: !filters.chainId && chainMap.has(c.chain_id) ? `${c.name} · ${chainMap.get(c.chain_id)}` : c.name }))} disabled={categories.loading || categories.error}/>
+      <Picker label="Categoría" value={filters.categoryId} onChange={id => setFilters(f => ({ ...f, categoryId: id, productId: null, commercialType: null, commercialModel: null, commercialColor: null, commercialSize: null }))} options={(categories.data ?? []).map(c => ({ id: c.id, name: !filters.chainId && chainMap.has(c.chain_id) ? `${c.name} · ${chainMap.get(c.chain_id)}` : c.name }))} disabled={categories.loading || categories.error}/>
+      {([["commercialType", "Tipo"], ["commercialModel", "Modelo"], ["commercialColor", "Color"], ["commercialSize", "Tamaño / Presentación"]] as [CommercialFilter, string][]).map(([field, label]) => <Picker key={field} label={label} value={filters[field] ?? null} onChange={id => setFilters(f => changeCommercial(f, field, id))} options={commercialOptions(catalog, filters, field)} disabled={commercial.loading || commercial.error || products.loading || products.error || !commercial.data} all="Todos"/>)}
       <Picker label="Producto" value={filters.productId} onChange={id => setFilters(f => {
         if (!id) return { ...f, productId: null };
-        const selected = products.data?.find(p => p.id === id);
+        const selected = matching.find(p => p.id === id);
         // Product identity includes its chain. A product picked from "Todas"
         // must never be sent to Railway without that exact scope.
-        if (selected && f.chainId !== selected.chain_id) return { ...resetForChain(f, selected.chain_id), productId: id };
+        if (selected && f.chainId !== selected.chain_id) return { ...f, chainId: selected.chain_id, categoryId: selected.category_id, productId: id };
         return { ...f, productId: id };
-      })} options={(products.data ?? []).slice(0, 100).map(p => ({ id: p.id, name: `${p.description} · ${p.product_code}${p.variant_code ? " · " + p.variant_code : ""}` }))} disabled={products.loading || products.error} all="Todos los productos"/>
+      })} options={matching.map(p => ({ id: p.id, name: `${p.description} · ${p.product_code}${p.variant_code ? " · " + p.variant_code : ""}${commercial.data && !filters.chainId ? ` · ${chainMap.get(p.chain_id) ?? p.chain_id}` : ""}` }))} disabled={products.loading || products.error} all={`Todos los productos${commercial.data ? ` (${matching.length})` : ""}`}/>
       <div className="space-y-2"><Label htmlFor="product-search">Buscar producto, ITEM, UPC o variante</Label><Input id="product-search" type="search" maxLength={100} value={filters.search} onChange={e => setFilters(f => ({ ...f, search: e.target.value, productId: null }))} placeholder="Buscar en catálogo autorizado"/></div>
     </div>
-    <div className="mt-4 grid gap-4 sm:grid-cols-3">
+    <div className="mt-4 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <Picker label="Clasificación comercial" value={filters.classificationStatus ?? null} onChange={id => setFilters(f => ({ ...f, classificationStatus: id, productId: null, commercialType: null, commercialModel: null, commercialColor: null, commercialSize: null }))} options={[{ id: "APPROVED", name: "Aprobada" }, { id: "PENDING_CLASSIFICATION", name: "Pendiente de clasificación" }]} disabled={commercial.loading || commercial.error || !commercial.data}/>
       <Picker label="Periodo desde" value={filters.periodRange[0]} onChange={id => setFilters(f => ({ ...f, periodRange: [id, f.periodRange[1] && id && f.periodRange[1] < id ? id : f.periodRange[1]] }))} options={(periods.data ?? []).map(p => ({ id: p, name: p }))} disabled={periods.loading || periods.error} all="Desde el inicio"/>
       <Picker label="Periodo hasta" value={filters.periodRange[1]} onChange={id => setFilters(f => ({ ...f, periodRange: [f.periodRange[0] && id && f.periodRange[0] > id ? id : f.periodRange[0], id] }))} options={(periods.data ?? []).map(p => ({ id: p, name: p }))} disabled={periods.loading || periods.error} all="Hasta el último"/>
-      <div className="flex items-end gap-4 pb-1"><label className="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" checked={showEmpty} onChange={e => setShowEmpty(e.target.checked)}/>Mostrar scopes sin histórico</label><Button variant="ghost" size="sm" onClick={() => setFilters({ ...emptyFilters })}>Limpiar</Button></div>
+      <div className="flex flex-wrap items-end gap-4 pb-1"><label className="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" checked={showEmpty} onChange={e => setShowEmpty(e.target.checked)}/>Scopes sin histórico</label><Button variant="ghost" size="sm" onClick={() => setFilters({ ...emptyFilters })}><RotateCcw className="size-4"/>Limpiar</Button></div>
     </div>
-    {(products.data?.length ?? 0) > 100 && <p className="mt-3 text-sm text-slate-500">{number(products.data!.length)} productos coinciden. Usa la búsqueda para encontrar un producto específico.</p>}
+    </div>
+    {commercial.data && <p className="mt-3 text-xs text-slate-600">{selectedProducts.length} productos coinciden · {selectedProducts.filter(p => p.commercial?.status !== "APPROVED").length} pendientes de clasificación comercial{filters.periodRange.some(Boolean) ? ` · Periodo ${filters.periodRange[0] ?? "inicio"} a ${filters.periodRange[1] ?? "último"}` : ""}</p>}
+    {commercial.error && <p role="alert" className="mt-3 text-sm text-rose-700">No fue posible cargar la clasificación comercial.</p>}
     {[[chains.error, "las cadenas"], [categories.error, "las categorías"], [products.error, "los productos"], [periods.error, "los periodos"]].map(([failed, control]) => failed && <p key={String(control)} role="alert" className="mt-3 text-sm text-rose-700">No fue posible cargar {control}.{control === "los periodos" && repository.getReadDiagnostic?.("getPeriods")?.code ? ` Código ${repository.getReadDiagnostic?.("getPeriods")?.code}.` : ""}</p>)}
   </section>;
 }

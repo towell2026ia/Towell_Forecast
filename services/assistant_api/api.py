@@ -151,6 +151,8 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
                 config.capture_center_enabled,config.live_learning_enabled))) else None
         mount_preview_routes(app, config, identity, data, preview_runner, rate_limiter, write_repository)
         mount_e4_routes(app, config, identity, data, preview_runner, write_repository)
+        from .commercial_api import mount_commercial_routes
+        mount_commercial_routes(app, identity, supabase_client, rate_limiter)
 
     @app.exception_handler(PreviewError)
     async def preview_exception(request: Request, exc: PreviewError):

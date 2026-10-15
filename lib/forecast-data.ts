@@ -1,10 +1,11 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { Category, Chain, Cursor, Filters, ForecastReadRepository, HistoricalPage, HistoricalRow, Product, Profile, Summary } from "./supabase/types";
+import { emptyFilters, type Category, type Chain, type Cursor, type Filters, type ForecastReadRepository, type HistoricalPage, type HistoricalRow, type Product, type Profile, type Summary } from "./supabase/types";
 import { controlledReadCode, logReadDiagnostic, PortalReadError, type PortalReadDiagnostic } from "./portal-read-diagnostic";
 import { RailwayPreviewClient } from "./forecast-preview";
 import { SupabaseUserAdminClient } from "./supabase/user-admin";
 import type { HistoricalMonth, CustomerMonth } from "./forecast-chart-data";
 import { SupabaseReportReader } from "./forecast-report-repository";
+import { filteredProducts, hasCommercialFilters } from "./commercial-filters";
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 type ProductMapping = { id: string; identifier_mappings?: [string | null, string | null][] };
@@ -18,7 +19,7 @@ export function assertActiveProfile(profile: Profile | null, userId: string): Pr
   return profile;
 }
 export function resetForChain(filters: Filters, chainId: string | null): Filters {
-  return { ...filters, chainId, productId: null, categoryId: null, periodRange: [null, null], search: "" };
+  return { ...emptyFilters, chainId, periodRange: [null, null] };
 }
 export function combineObservations(observations: Observation[], products: Map<string, Product>, size: number): HistoricalRow[] {
   const groups = new Map<string, HistoricalRow>();
@@ -49,6 +50,7 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
   private chainTask: Promise<Chain[]> | null = null;
   private mappingTask: Promise<Map<string, Mapping>> | null = null;
   private catalogTask: Promise<Product[]> | null = null;
+  private commercialTask: Promise<import("./supabase/types").CommercialClassification[]> | null = null;
   private readDiagnostics = new Map<PortalReadDiagnostic["endpoint"], PortalReadDiagnostic>();
   readonly previews: RailwayPreviewClient;
   readonly userAdmin: SupabaseUserAdminClient;
@@ -58,6 +60,12 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
     this.reports = new SupabaseReportReader(client, this, this.controller.signal);
   }
   getReportSnapshot(filters: Filters) { return this.reports.snapshot(filters); }
+  getReportHistory(filters: Filters) { return this.reports.history(filters); }
+  getCommercialCatalog() {
+    this.ensureOpen();
+    if (!this.commercialTask) this.commercialTask = this.previews.commercialCatalog().then(rows => { this.ensureOpen(); return rows; }).catch(error => { this.commercialTask = null; throw error; });
+    return this.commercialTask;
+  }
   getReportPeriods(chainId?: string | null) { return this.reports.periods(chainId ?? null); }
   getDatabasePage(section: import("./forecast-reporting").DatabaseSection, filters: Filters, page: number, size: 50 | 100 | 250) { return this.reports.databasePage(section, filters, page, size); }
   dispose() { this.controller.abort(); this.previews.dispose(); this.catalog = null; this.chains = null; this.metadata = null; this.chainTask = null; this.mappingTask = null; this.catalogTask = null; this.readDiagnostics.clear(); }
@@ -148,18 +156,26 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
     catch { this.fail("getProducts", "products", "catalog_filter", "TRANSFORM_FAILED", 200); }
   }
   private async filtered(filters: Filters, head = false) {
-    const selected = await this.getProducts(filters.chainId, filters.categoryId, filters.search);
+    const selected = await filteredProducts(this, filters);
     let q = this.client.from(publishedHistoryView).select("observation_id,chain_id,chain_name,product_id,product_code,variant_code,product_description,category_id,period,metric_code,value,availability_source,version_no,available_at", { count: "exact", head });
     if (filters.chainId) q = q.eq("chain_id", filters.chainId);
     if (filters.productId) q = q.eq("product_id", filters.productId);
     if (filters.categoryId) q = q.eq("category_id", filters.categoryId);
-    if (filters.search) q = selected.length ? q.in("product_id", selected.map(p => p.id)) : q.eq("product_id", "00000000-0000-0000-0000-000000000000");
+    if (filters.search || hasCommercialFilters(filters)) q = selected.length ? q.in("product_id", selected.map(p => p.id)) : q.eq("product_id", "00000000-0000-0000-0000-000000000000");
     if (filters.periodRange[0]) q = q.gte("period", filters.periodRange[0] + "-01");
     if (filters.periodRange[1]) q = q.lte("period", filters.periodRange[1] + "-01");
     return { query: q.abortSignal(this.controller.signal), products: selected };
   }
   async getHistoricalObservations(filters: Filters, pagination: { size: 50 | 100 | 250; cursor?: Cursor | null }): Promise<HistoricalPage> {
     if (![50, 100, 250].includes(pagination.size)) throw new Error("invalid_page_size");
+    if (hasCommercialFilters(filters)) {
+      const rows = (await this.reports.history(filters)).sort((a, b) => a.chain_id.localeCompare(b.chain_id) || a.product_id.localeCompare(b.product_id) || a.period.localeCompare(b.period));
+      const c = pagination.cursor;
+      if (c && (!uuid.test(c.chain_id) || !uuid.test(c.product_id) || !/^\d{4}-\d{2}-01$/.test(c.period))) throw new Error("invalid_cursor");
+      const after = c ? rows.filter(r => r.chain_id > c.chain_id || r.chain_id === c.chain_id && (r.product_id > c.product_id || r.product_id === c.product_id && r.period > c.period)) : rows;
+      const page = after.slice(0, pagination.size), last = page.at(-1);
+      return { rows: page, next: last && after.length > pagination.size ? { chain_id: last.chain_id, product_id: last.product_id, period: last.period } : null, observationCount: rows.reduce((sum, r) => sum + [r.SALES, r.ORDER, r.DELIVERY].filter(v => v !== null).length, 0) };
+    }
     const { query, products } = await this.filtered(filters);
     let q = query;
     const c = pagination.cursor;
@@ -240,7 +256,7 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
     const version = versions[0];
     if (!version) return [];
     if (versions.length !== 1 || version.chain_id !== filters.chainId || !["VALIDATED", "FROZEN"].includes(version.status) || version.issue_period.slice(0, 7) > issuePeriod) throw new Error("customer_version_invalid");
-    const products = await this.getProducts(filters.chainId, filters.categoryId, filters.productId ? "" : filters.search);
+    const products = await filteredProducts(this, filters);
     const allowed = new Set(products.filter(p => !filters.productId || p.id === filters.productId).map(p => p.id));
     if (!allowed.size) return [];
     const months = new Map<string, number>(), seen = new Set<string>();
@@ -263,7 +279,12 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
     throw new Error("customer_forecast_limit");
   }
   async getHistoricalSummary(filters: Filters): Promise<Summary> {
-    const [chains, products] = await Promise.all([this.getVisibleChains(), this.getProducts(filters.chainId, filters.categoryId, filters.search)]);
+    if (hasCommercialFilters(filters)) {
+      const [chains, products, rows] = await Promise.all([this.getVisibleChains(), filteredProducts(this, filters), this.reports.history(filters)]);
+      const byScope = chains.map(chain => ({ chain, observations: rows.filter(r => r.chain_id === chain.id).reduce((n, r) => n + [r.SALES, r.ORDER, r.DELIVERY].filter(v => v !== null).length, 0) })).filter(r => r.observations > 0);
+      return { scopeCount: byScope.length, productCount: products.length, observationCount: byScope.reduce((sum, r) => sum + r.observations, 0), latestPeriod: rows.map(r => r.period.slice(0, 7)).sort().at(-1) ?? null, byScope };
+    }
+    const [chains, products] = await Promise.all([this.getVisibleChains(), filteredProducts(this, filters)]);
     const scoped = chains.filter(c => c.has_history && (!filters.chainId || c.id === filters.chainId));
     const byScope: Summary["byScope"] = [];
     for (const chain of scoped) {

@@ -82,7 +82,7 @@ export function buildForecastMatrix(snapshot: ReportSnapshot, choice: ReportChoi
     }
     rows.push({ product, chain: chains.get(product.chain_id) ?? product.chain_id, category: categories.get(product.category_id ?? "") ?? "Sin categoría", calculation, provisional, adopted, values });
   }
-  return { issue, periods, rows, excludedParentScopes: snapshot.chains.filter(c => !leaf.has(c.id)).length };
+  return { issue, periods, rows, excludedParentScopes: new Set(snapshot.products.filter(p => !leaf.has(p.chain_id)).map(p => p.chain_id)).size };
 }
 export function matrixTotal(rows: ForecastMatrixRow[], period: string, series: ReportSeries) {
   const values = rows.map(row => row.values[period]?.[series] ?? null).filter((v): v is number => v !== null);
