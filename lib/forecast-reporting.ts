@@ -32,7 +32,22 @@ export function temporalLabel(target: string, createdAt: string | null, now = ne
   const timing = createdAt && Date.parse(createdAt) >= Date.parse(month + "-01T00:00:00Z") ? "Emisión retrospectiva" : "Emisión anterior al mes";
   return `${month < current ? "Transcurrido" : month === current ? "En curso" : "Futuro"} · ${createdAt ? timing : "Sin cálculo"}`;
 }
-export function leafScopeIds(chains: Chain[]) {
+export function leafScopeIds(chains: Chain[], selected?: Set<string>) {
+  if (selected) {
+    const byId = new Map(chains.map(c => [c.id, c]));
+    const parents = new Set<string>();
+    for (const id of selected) {
+      const visited = new Set([id]);
+      let parent = byId.get(id)?.parentId;
+      while (parent) {
+        if (visited.has(parent)) throw new Error("report_scope_cycle");
+        visited.add(parent);
+        if (selected.has(parent)) parents.add(parent);
+        parent = byId.get(parent)?.parentId;
+      }
+    }
+    return new Set([...selected].filter(id => !parents.has(id)));
+  }
   const parents = new Set(chains.map(c => c.parentId).filter((id): id is string => id !== null));
   return new Set(chains.filter(c => !parents.has(c.id)).map(c => c.id));
 }
@@ -64,7 +79,7 @@ export function buildForecastMatrix(snapshot: ReportSnapshot, choice: ReportChoi
   const issue = choice.issue ?? [...selected.values()].map(c => c.issue_period.slice(0, 7)).sort().at(-1) ?? snapshot.provisionals.map(p => p.issue_period).sort().at(-1) ?? null;
   const months = issue ? Array.from({ length: 12 }, (_, i) => addReportMonth(issue, i + 1)) : [];
   const periods = months.filter(p => (!periodRange[0] || p >= periodRange[0]) && (!periodRange[1] || p <= periodRange[1]));
-  const leaf = leafScopeIds(snapshot.chains);
+  const leaf = leafScopeIds(snapshot.chains, new Set(snapshot.products.map(p => p.chain_id)));
   const chains = new Map(snapshot.chains.map(c => [c.id, c.name])), categories = new Map(snapshot.categories.map(c => [c.id, c.name]));
   const rows: ForecastMatrixRow[] = [];
   for (const product of snapshot.products.filter(p => leaf.has(p.chain_id))) {

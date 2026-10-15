@@ -1,4 +1,4 @@
-import { buildForecastMatrix, leafScopeIds, matrixTotal, type ForecastMatrixRow, type ReportChoice, type ReportSeries, type ReportSnapshot } from "./forecast-reporting";
+import { buildForecastMatrix, matrixTotal, type ForecastMatrixRow, type ReportChoice, type ReportSeries, type ReportSnapshot } from "./forecast-reporting";
 import type { Filters, HistoricalRow } from "./supabase/types";
 
 export const monthNames = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
@@ -19,8 +19,7 @@ function quantity(values: (number | null)[], eligible: number): Quantity {
 }
 export function periodsDashboard(snapshot: ReportSnapshot, history: HistoricalRow[], choice: ReportChoice, range: Filters["periodRange"], year: number) {
   const matrix = buildForecastMatrix(snapshot, choice, range);
-  const leaf = leafScopeIds(snapshot.chains);
-  const allowed = new Map(matrix.rows.filter(r => leaf.has(r.product.chain_id)).map(r => [r.product.id, r.product.chain_id]));
+  const allowed = new Map(matrix.rows.map(r => [r.product.id, r.product.chain_id]));
   const rows = history.filter(r => allowed.get(r.product_id) === r.chain_id && inRange(r.period.slice(0, 7), range));
   const seen = new Set<string>();
   for (const row of rows) {

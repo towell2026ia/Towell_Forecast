@@ -69,6 +69,13 @@ describe("Two historical years and 9+3 read-only comparison", () => {
     const d = periodsDashboard(s, [history("2026-01"), history("2026-01", 9999, { product_id: "parent", chain_id: "parent" })], emptyReportChoice, [null, null], 2026);
     expect(d.points[0].coverage.actual).toEqual({ value: 10, covered: 1, eligible: 2 }); expect(d.priorComplete).toEqual([0, 0]); expect(d.kpis.sales).toBe(10);
   });
+  it("allows an explicitly isolated parent product but excludes overlapping ancestors transitively", () => {
+    const s = snapshot(); s.chains.push({ ...chain, id: "child", parentId: "c" }, { ...chain, id: "grandchild", parentId: "child" });
+    expect(periodsDashboard(s, [history("2026-01")], emptyReportChoice, [null, null], 2026).kpis.sales).toBe(10);
+    s.products.push({ ...product, id: "g", chain_id: "grandchild" });
+    const d = periodsDashboard(s, [history("2026-01"), history("2026-01", 20, { product_id: "g", chain_id: "grandchild" })], emptyReportChoice, [null, null], 2026);
+    expect(d.kpis.sales).toBe(20); expect(d.matrix.rows.map(r => r.product.id)).toEqual(["g"]);
+  });
   it("synchronizes exact date/product/decision filters, preserves null and aggregates paired Fill Rate", () => {
     const h = [history("2026-01", 0), history("2026-02", null, { ORDER: 100, DELIVERY: 50 }), history("2026-03", 99, { DELIVERY: null })];
     const d = periodsDashboard(snapshot(), h, emptyReportChoice, ["2026-01", "2026-02"], 2026);

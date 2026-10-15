@@ -77,9 +77,11 @@ Indicators show observed January-September Venta, Pedido and Enviado, paired
 Fill Rate, forecast availability and adopted coverage. Fill Rate is the ratio of
 summed paired Enviado/Pedido, not an average of monthly percentages. Null remains
 missing; genuine zero remains zero. The tooltip reports product coverage and
-partial totals. Parent scopes with children in the authorized hierarchy are
-excluded using parent IDs, never chain-name heuristics. Only parents present in
-the filtered catalog contribute to the excluded-scope count.
+partial totals. Overlapping parent scopes are excluded using the selected product
+scope set and authoritative ancestor IDs, never chain-name heuristics. This works
+transitively through intermediate scopes. An explicitly isolated parent product
+remains queryable when its descendants are not selected. Only excluded parents
+present in the filtered catalog contribute to the excluded-scope count.
 
 Per-product detail retains the three candidate WAPEs as retrospective metrics;
 they are not averaged into a fictitious consolidated WAPE or presented as LIVE.
