@@ -45,8 +45,8 @@ function Matrix({ snapshot, history, periods }: { snapshot: ReportSnapshot; hist
     </>}
     {data && data.periods.length > 0 && <>
       <div className="flex flex-wrap items-end justify-between gap-4"><div><h2 className="text-lg font-semibold">Matriz H1–H12</h2><p className="mt-1 text-xs text-slate-500">Forecast almacenado · WAPE retrospectivo en el detalle de cálculo</p></div><ReportSelect label="Comparar series" value={series} onChange={v => setSeries(v as typeof series)} options={[{ value: "COMPARE", label: "Todas las alternativas" }, ...Object.entries(reportSeries).map(([value, label]) => ({ value, label }))]}/></div>
-      <ProductPages key={`${choice.version}/${choice.issue}/${choice.decision}`} rows={data.rows} periods={data.periods} shown={shown} issue={data.issue!}/>
-      <ProductDetail key={`${choice.version}/${choice.issue}/${choice.decision}`} rows={data.rows} periods={data.periods}/>
+      <ProductPages key={`pages/${choice.version}/${choice.issue}/${choice.decision}`} rows={data.rows} periods={data.periods} shown={shown} issue={data.issue!}/>
+      <ProductDetail key={`detail/${choice.version}/${choice.issue}/${choice.decision}`} rows={data.rows} periods={data.periods}/>
       <h2 className="text-lg font-semibold">Totales por categoría, cadena y mes</h2>
       <ReportTable label="Totales de forecast" headers={["Scope", "Serie", ...data.periods]} rows={[{ id: "all", label: "Total consolidado", rows: data.rows }, ...groups].flatMap(g => shown.map(s => ({ id: `${g.id}/${s}`, cells: [g.label, reportSeries[s], ...data.periods.map(p => { const t = matrixTotal(g.rows, p, s); return <div key={p} className="whitespace-nowrap"><strong>{reportNumber(t.value)}</strong><p className="mt-1 text-xs text-slate-500">Cobertura {t.covered}/{t.eligible}{t.covered && t.covered < t.eligible ? " · Total parcial" : ""}</p></div>; })] })))}/>
     </>}
