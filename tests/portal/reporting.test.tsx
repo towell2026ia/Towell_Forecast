@@ -81,11 +81,11 @@ function repository(s = snapshot()): ForecastReadRepository {
 function mount(repo: ForecastReadRepository, children: React.ReactNode) { return render(<ForecastFiltersContext.Provider value={{ repository: repo, filters: emptyFilters, setFilters: vi.fn(), profile: { id: "actor", full_name: "Test", global_role: "ADMIN", status: "ACTIVE" } }}>{children}</ForecastFiltersContext.Provider>); }
 describe("E5 read-only interactive views", () => {
   it("renders all 12 matrix months, comparison and partial coverage without adoption", async () => {
-    const repo = repository(); mount(repo, <ForecastPeriodsView/>); const table = await screen.findByRole("table", { name: "Forecast H1-H12 por producto" });
-    expect(within(table).getAllByRole("columnheader")).toHaveLength(15); expect(within(table).getByText("2026-08")).toBeTruthy(); expect(within(table).getByText("2026-09")).toBeTruthy(); expect(within(table).getByText("2027-07")).toBeTruthy();
-    expect(within(table).getAllByText("Sin decisión")).toHaveLength(2);
-    await userEvent.selectOptions(screen.getByLabelText("Comparar series"), "TOWELL"); expect(within(table).queryByText("ML")).toBeNull();
-    await userEvent.selectOptions(screen.getByLabelText("Estado de decisión"), "ADOPTED"); expect(await screen.findByText("Sin registros para estos filtros.")).toBeTruthy();
+    const repo = repository(); mount(repo, <ForecastPeriodsView/>); const table = await screen.findByRole("table", { name: "Matriz compacta de forecast" });
+    expect(within(table).getAllByRole("columnheader")).toHaveLength(5); expect(within(table).getByText("Ago-26")).toBeTruthy(); expect(within(table).getByText("Sep-26")).toBeTruthy(); expect(within(table).getByText("Jul-27")).toBeTruthy();
+    expect(within(table).getAllByRole("row")).toHaveLength(13); expect(screen.getByText("TOTAL PARCIAL")).toBeTruthy();
+    expect(screen.getByText("Sin decisión", { selector: "dd" })).toBeTruthy();
+    await userEvent.selectOptions(screen.getByLabelText("Estado de decisión"), "ADOPTED"); expect(await screen.findByText("Sin cálculo compatible disponible para los periodos seleccionados.")).toBeTruthy();
     expect(repo.previews!.create).not.toHaveBeenCalled(); expect(repo.previews!.selectCalculation).not.toHaveBeenCalled(); expect(repo.previews!.research).not.toHaveBeenCalled();
   });
   it("commercial matrix shows stored targets with no fabricated observations or LIVE WAPE", async () => {

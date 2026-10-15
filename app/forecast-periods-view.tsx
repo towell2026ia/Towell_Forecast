@@ -1,96 +1,69 @@
 "use client";
 
 import { useCallback, useMemo, useState } from "react";
-import { emptyReportChoice, matrixTotal, reportSeries, temporalLabel, type ForecastMatrixRow, type ReportSeries, type ReportSnapshot } from "@/lib/forecast-reporting";
+import { addReportMonth, emptyReportChoice, matrixTotal, reportSeries, temporalLabel, type ForecastMatrixRow, type ReportSnapshot } from "@/lib/forecast-reporting";
 import type { Filters, HistoricalRow } from "@/lib/supabase/types";
-import { detailMetrics, periodsDashboard } from "@/lib/periods-dashboard";
+import { detailMetrics, periodsDashboard, shortPeriod } from "@/lib/periods-dashboard";
+import { modelKey } from "@/lib/commercial-filters";
 import { PeriodsComparisonChart } from "@/components/forecast/periods-comparison-chart";
 import { useForecastFilters, useRead } from "./forecast-towell-app";
 import { CalculationFilters, ReportPaging, ReportSelect, ReportState, ReportTable, reportNumber, reportPercent } from "./report-controls";
+
+const candidates = ["STATISTICAL", "ML", "ENSEMBLE"] as const;
+const exactNumber = (n: number | null) => n === null ? "Sin dato" : n.toLocaleString("es-MX", { maximumFractionDigits: 20 });
+const modelName = (r: ForecastMatrixRow) => r.product.commercial?.model ? modelKey(r.product.commercial.model) : "Sin identificar";
 
 export function ForecastPeriodsView() {
   const { repository, filters } = useForecastFilters();
   const report = useRead(useCallback(async () => {
     if (!repository.getReportSnapshot) throw new Error("report_unavailable");
-    const [snapshot, history] = await Promise.all([repository.getReportSnapshot(filters), repository.getReportHistory?.(filters) ?? Promise.resolve([])]);
+    // Read the authorized historical comparison years too. The range masks
+    // positions in the presentation; it never changes the calculation's cut.
+    const [snapshot, history] = await Promise.all([repository.getReportSnapshot(filters), repository.getReportHistory?.({ ...filters, periodRange: [null, null] }) ?? Promise.resolve([])]);
     return { snapshot, history };
   }, [repository, filters]));
-  return <section className="min-w-0 space-y-5"><div><h1 className="text-2xl font-semibold text-slate-950">Periodos</h1><p className="mt-1 text-sm text-slate-500">Desempeño comercial y forecast disponible</p></div><ReportState loading={report.loading} error={report.error}/>{report.data && <Matrix key={JSON.stringify(filters)} snapshot={report.data.snapshot} history={report.data.history} periods={filters.periodRange}/>}</section>;
+  return <section className="min-w-0 space-y-5"><div><h1 className="text-2xl font-semibold text-slate-950">Periodos</h1><p className="mt-1 text-sm text-slate-500">Desempeño comercial y forecast almacenado</p></div><ReportState loading={report.loading} error={report.error}/>{report.data && <Matrix key={JSON.stringify(filters)} snapshot={report.data.snapshot} history={report.data.history} periods={filters.periodRange}/>}</section>;
 }
 function Matrix({ snapshot, history, periods }: { snapshot: ReportSnapshot; history: HistoricalRow[]; periods: Filters["periodRange"] }) {
   const [choice, setChoice] = useState({ ...emptyReportChoice });
-  const [series, setSeries] = useState<ReportSeries | "COMPARE">("COMPARE");
-  const years = [...new Set([...history.map(r => Number(r.period.slice(0, 4))), ...snapshot.calculations.map(c => Number(c.issue_period.slice(0, 4)))])].sort((a, b) => b - a);
-  const [year, setYear] = useState(years[0] ?? Number(new Intl.DateTimeFormat("en", { timeZone: "America/Mexico_City", year: "numeric" }).format(new Date())));
   const matrix = useMemo(() => {
-    try { return { data: periodsDashboard(snapshot, history, choice, periods, year), error: false }; }
+    try { return { data: periodsDashboard(snapshot, history, choice, periods), error: false }; }
     catch { return { data: null, error: true }; }
-  }, [snapshot, history, choice, periods, year]);
-  const shown = series === "COMPARE" ? Object.keys(reportSeries) as ReportSeries[] : [series];
-  const dashboard = matrix.data;
-  const data = dashboard?.matrix;
-  const groups = data ? [...new Set(data.rows.map(r => r.product.chain_id))].flatMap(chain => {
-    const rows = data.rows.filter(r => r.product.chain_id === chain);
-    return [{ id: chain, label: rows[0].chain, rows }, ...[...new Set(rows.map(r => r.product.category_id))].map(category => ({ id: `${chain}/${category}`, label: `${rows[0].chain} / ${rows.find(r => r.product.category_id === category)!.category}`, rows: rows.filter(r => r.product.category_id === category) }))];
-  }) : [];
-  return <><div className="grid items-end gap-4 lg:grid-cols-4"><div className="lg:col-span-3"><CalculationFilters snapshot={snapshot} choice={choice} onChange={setChoice} decisions/></div><ReportSelect label="Año comparativo" value={String(year)} onChange={v => setYear(Number(v))} options={(years.length ? years : [year]).map(y => ({ value: String(y), label: String(y) }))}/></div>
+  }, [snapshot, history, choice, periods]);
+  const dashboard = matrix.data, data = dashboard?.matrix;
+  const ready = data?.rows.filter(r => r.calculation) ?? [];
+  const pending = data?.rows.filter(r => !r.calculation) ?? [];
+  return <>
+    <CalculationFilters snapshot={snapshot} choice={choice} onChange={setChoice} decisions/>
+    <ReportSelect label="Cálculo de comparación" value={choice.calculationId ?? "compatible"} onChange={id => setChoice({ ...choice, calculationId: id === "compatible" ? null : id, version: null, issue: null })} options={[{ value: "compatible", label: "Consolidado de cálculos compatibles" }, ...snapshot.calculations.map(c => ({ value: c.id, label: `${c.calculation_code} · ${snapshot.products.find(p => p.id === c.product_id)?.description ?? c.product_id} · Corte ${c.issue_period.slice(0, 7)} · ${c.id}` }))]}/>
     <ReportState loading={false} error={matrix.error}/>
     {dashboard && data && <>
-      <p className="text-xs text-slate-500">Corte {data.issue ?? "Sin cálculo"} · {data.rows.length} productos · {data.excludedParentScopes} scopes padre excluidos</p>
-      <dl aria-label="Indicadores comerciales" className="grid grid-cols-2 gap-y-5 border-y border-slate-200 py-5 lg:grid-cols-6">
-        {[["Venta real ene–sep", reportNumber(dashboard.kpis.sales)], ["Pedido ene–sep", reportNumber(dashboard.kpis.orders)], ["Enviado ene–sep", reportNumber(dashboard.kpis.delivery)], ["Fill Rate", reportPercent(dashboard.kpis.fillRate)], ["Forecast disponible", `${dashboard.available}/${data.rows.length}`], ["Adoptado", `${dashboard.adopted}/${data.rows.length}`]].map(([label, value]) => <div key={label} className="min-w-0 border-l border-slate-200 px-3 first:border-l-0"><dt className="text-xs text-slate-500">{label}</dt><dd className="mt-2 break-words text-xl font-semibold tabular-nums text-slate-950">{value}</dd></div>)}
-      </dl>
-      <PeriodsComparisonChart points={dashboard.points} year={year}/>
-      <div aria-label="Cobertura comercial" className="flex flex-wrap gap-x-6 gap-y-2 text-xs text-slate-600"><span>Real {year}: {dashboard.actualMonths}/9 meses con dato</span><span>{year - 2}: {dashboard.priorComplete[0]}/12 meses completos</span><span>{year - 1}: {dashboard.priorComplete[1]}/12 meses completos</span><span>Fill Rate: {dashboard.kpis.paired} pares Pedido/Enviado</span><span>Sin dato no equivale a cero · Forecast disponible no implica adopción</span></div>
+      <div aria-label="Alcance de Periodos" className="space-y-2"><p className="text-sm font-semibold text-slate-900">{[...new Set(data.rows.map(r => r.chain))].join(" · ") || "Sin productos coincidentes"}</p><p className="text-xs text-slate-600">{dashboard.coverage.length <= 5 ? dashboard.coverage.map(c => c.model).join(" + ") : `${dashboard.coverage.length} modelos`} · {data.rows.length} productos · Corte {dashboard.cutoff ?? "Sin dato"}{!data.issue ? " (histórico; sin cálculo)" : ""}</p><p className="text-xs text-slate-500">{data.excludedParentScopes} scopes padre superpuestos excluidos. Las curvas se consolidan por corte, objetivo, versión de motor y modo de evidencia compatibles.</p></div>
+      <dl aria-label="Indicadores comerciales" className="grid grid-cols-2 gap-y-5 border-y border-slate-200 py-5 lg:grid-cols-6">{[["Venta real · 9 meses", reportNumber(dashboard.kpis.sales)], ["Pedido · 9 meses", reportNumber(dashboard.kpis.orders)], ["Enviado · 9 meses", reportNumber(dashboard.kpis.delivery)], ["Fill Rate", reportPercent(dashboard.kpis.fillRate)], ["Productos con cálculo / Total", `${dashboard.available}/${data.rows.length}`], ["Con decisión / Total", `${dashboard.adopted}/${data.rows.length}`]].map(([label, value]) => <div key={label} className="min-w-0 border-l border-slate-200 px-3 first:border-l-0"><dt className="text-xs text-slate-500">{label}</dt><dd className="mt-2 break-words text-xl font-semibold tabular-nums text-slate-950">{value}</dd></div>)}</dl>
+      {ready.length > 0 && ready.length < data.rows.length && <p role="status" className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"><strong>TOTAL PARCIAL</strong> · Forecast de {ready.length}/{data.rows.length} productos del alcance. No representa el total completo de los modelos seleccionados.</p>}
+      {ready.some(r => r.calculation?.evidence_mode === "RETROSPECTIVE_TRAINING" || data.periods.some(p => temporalLabel(p, r.calculation?.created_at ?? null).includes("Emisión retrospectiva"))) && <p className="text-sm text-amber-800"><strong>Emisión retrospectiva.</strong> Candidatos congelados; referencia sugerida no implica adopción. Los meses emitidos retrospectivamente no generan WAPE LIVE.</p>}
+      <PeriodsComparisonChart points={dashboard.points} cutoff={dashboard.cutoff}/>
+      <div aria-label="Cobertura comercial" className="flex flex-wrap gap-x-6 gap-y-2 text-xs text-slate-600"><span>Real: {dashboard.actualMonths}/9 meses con dato</span><span>Año −2: {dashboard.priorComplete[0]}/12 meses completos</span><span>Año −1: {dashboard.priorComplete[1]}/12 meses completos</span><span>Fill Rate: {dashboard.kpis.paired} pares Pedido/Enviado</span><span>Sin dato no equivale a cero</span></div>
+      {dashboard.cutoff && <p className="text-xs text-slate-500">Año −1: {addReportMonth(dashboard.cutoff, -20)} a {addReportMonth(dashboard.cutoff, -9)} · Año −2: {addReportMonth(dashboard.cutoff, -32)} a {addReportMonth(dashboard.cutoff, -21)}</p>}
+      <details open={dashboard.coverage.length <= 5} className="text-sm"><summary className="cursor-pointer font-medium">Cobertura por modelo ({dashboard.coverage.length})</summary><div className="mt-3"><ReportTable label="Cobertura por modelo" headers={["Modelo", "Con cálculo", "Sin cálculo compatible", "Con decisión", "Sin decisión", "Total"]} rows={dashboard.coverage.map(c => ({ id: c.model, cells: [c.model, c.calculated, c.pending, c.decided, c.undecided, c.total] }))}/></div></details>
+      <CompactMatrix key={JSON.stringify(choice)} rows={ready} scope={data.rows} periods={data.periods} issue={data.issue}/>
+      <PendingProducts key={`pending/${JSON.stringify(choice)}`} rows={pending} snapshot={snapshot}/>
+      <details className="space-y-4 border-t border-slate-200 py-5"><summary className="cursor-pointer text-lg font-semibold">Detalle técnico expandible · C1–Cn</summary><p className="text-xs text-slate-500">Resultados almacenados, ganadores, WAPE, Bias, bandas, corte, emisión, versiones, Dataset Hash y trazabilidad por producto.</p>{snapshot.calculations.map(c => <details key={c.id} className="rounded-md border border-slate-200 bg-white p-3"><summary className="cursor-pointer break-words text-sm">{c.calculation_code} · {snapshot.products.find(p => p.id === c.product_id)?.description ?? c.product_id} · {c.issue_period.slice(0, 7)} · {c.status}</summary><pre className="mt-3 max-h-[36rem] overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify({ calculation: c, horizons: snapshot.horizons.filter(h => h.calculation_id === c.id), decisions: snapshot.decisions.filter(e => e.calculation_id === c.id), classification: snapshot.products.find(p => p.id === c.product_id)?.commercial }, null, 2)}</pre></details>)}{!snapshot.calculations.length && <p className="text-sm text-slate-500">Sin cálculos almacenados para este alcance.</p>}</details>
     </>}
-    {data && data.periods.length > 0 && <>
-      <div className="flex flex-wrap items-end justify-between gap-4"><div><h2 className="text-lg font-semibold">Matriz H1–H12</h2><p className="mt-1 text-xs text-slate-500">Forecast almacenado · WAPE retrospectivo en el detalle de cálculo</p></div><ReportSelect label="Comparar series" value={series} onChange={v => setSeries(v as typeof series)} options={[{ value: "COMPARE", label: "Todas las alternativas" }, ...Object.entries(reportSeries).map(([value, label]) => ({ value, label }))]}/></div>
-      <ProductPages key={`pages/${choice.version}/${choice.issue}/${choice.decision}`} rows={data.rows} periods={data.periods} shown={shown} issue={data.issue!}/>
-      <ProductDetail key={`detail/${choice.version}/${choice.issue}/${choice.decision}`} rows={data.rows} periods={data.periods}/>
-      <h2 className="text-lg font-semibold">Totales por categoría, cadena y mes</h2>
-      <ReportTable label="Totales de forecast" headers={["Scope", "Serie", ...data.periods]} rows={[{ id: "all", label: "Total consolidado", rows: data.rows }, ...groups].flatMap(g => shown.map(s => ({ id: `${g.id}/${s}`, cells: [g.label, reportSeries[s], ...data.periods.map(p => { const t = matrixTotal(g.rows, p, s); return <div key={p} className="whitespace-nowrap"><strong>{reportNumber(t.value)}</strong><p className="mt-1 text-xs text-slate-500">Cobertura {t.covered}/{t.eligible}{t.covered && t.covered < t.eligible ? " · Total parcial" : ""}</p></div>; })] })))}/>
-    </>}
-    {data && !data.periods.length && <p className="border-t border-slate-200 py-5 text-sm text-slate-500">Sin forecast almacenado para estos periodos. El histórico comercial permanece disponible.</p>}
   </>;
 }
-function ProductDetail({ rows, periods }: { rows: ForecastMatrixRow[]; periods: string[] }) {
-  const [id, setId] = useState("");
+function CompactMatrix({ rows, scope, periods, issue }: { rows: ForecastMatrixRow[]; scope: ForecastMatrixRow[]; periods: string[]; issue: string | null }) {
+  const [id, setId] = useState(rows.length === 1 ? rows[0].product.id : "all");
   const row = rows.find(r => r.product.id === id);
-  return <section className="space-y-4 border-t border-slate-200 py-5"><h2 className="text-lg font-semibold">Detalle por producto</h2><ReportSelect label="Producto del detalle" value={id} onChange={setId} options={[{ value: "", label: "Elegir producto" }, ...rows.map(r => ({ value: r.product.id, label: `${r.product.description} · ${r.chain} · ${r.product.product_code}` }))]}/>{row && <>
-    <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm"><span>{row.chain} / {row.category}</span><span>{row.calculation?.calculation_code ?? "Sin cálculo"}</span><span>{row.product.commercial?.status === "APPROVED" ? "Clasificación aprobada" : "PENDING_CLASSIFICATION"}</span></div>
-    <dl className="grid gap-3 sm:grid-cols-3">{detailMetrics(row).map(m => <div key={m.family}><dt className="text-xs text-slate-500">WAPE retrospectivo · {reportSeries[m.family]}</dt><dd className="text-lg font-semibold">{reportPercent(m.wape)}</dd></div>)}</dl>
-    <ReportTable label="Detalle de alternativas por producto" headers={["Periodo", "H", ...Object.values(reportSeries)]} rows={periods.map(p => ({ id: p, cells: [p, row.calculation ? (Number(p.slice(0, 4)) - Number(row.calculation.issue_period.slice(0, 4))) * 12 + Number(p.slice(5)) - Number(row.calculation.issue_period.slice(5, 7)) : "Sin dato", ...Object.keys(reportSeries).map(s => reportNumber(row.values[p][s as ReportSeries]))] }))}/>
-    <p className="break-all text-xs text-slate-500">Product ID: {row.product.id} · Calculation ID: {row.calculation?.id ?? "Sin dato"} · Referencia sugerida: {row.calculation?.suggested_reference?.model ?? "Sin dato"}</p>
-  </>}</section>;
+  const selected = row ? [row] : scope;
+  return <section className="min-w-0 space-y-4 border-t border-slate-200 py-5"><div><h2 className="text-lg font-semibold">Matriz compacta H1–H12</h2><p className="mt-1 text-xs text-slate-500">Tres candidatos congelados · valores almacenados · sin adopción automática</p></div>
+    {rows.length > 1 && <ReportSelect label="Producto de la matriz" value={id} onChange={setId} options={[{ value: "all", label: "Total compatible · ver cobertura del alcance" }, ...rows.map(r => ({ value: r.product.id, label: `${r.chain} · ${r.product.description} · ${r.calculation!.calculation_code}` }))]}/>}
+    {row && <><dl aria-label="Identidad del cálculo" className="grid gap-x-5 gap-y-3 rounded-md bg-slate-50 p-4 text-sm sm:grid-cols-2 lg:grid-cols-3">{[["Cadena", row.chain], ["Modelo", modelName(row)], ["Color", row.product.commercial?.color ?? "Sin identificar"], ["Producto", row.product.description], ["Calculation Code", row.calculation!.calculation_code], ["Issue Period", row.calculation!.issue_period], ["Created At", row.calculation!.created_at], ["Estado del cálculo", row.calculation!.status], ["Referencia sugerida", row.calculation!.suggested_reference?.model ?? "Sin referencia almacenada"], ["Estado de decisión", row.adopted ? `Adoptado · ${row.adopted.selected_candidate}` : "Sin decisión"]].map(([label, value]) => <div key={label} className="min-w-0"><dt className="text-xs text-slate-500">{label}</dt><dd className="mt-1 break-words font-medium">{value}</dd></div>)}</dl><dl className="grid gap-3 sm:grid-cols-3">{detailMetrics(row).map(m => <div key={m.family}><dt className="text-xs text-slate-500">WAPE retrospectivo · {reportSeries[m.family]}</dt><dd className="text-lg font-semibold">{reportPercent(m.wape)}</dd></div>)}</dl></>}
+    {rows.length > 0 && periods.length > 0 ? <ReportTable label="Matriz compacta de forecast" headers={["Periodo", "Horizonte", "Estadístico", "Machine Learning", "Ensemble", ...(selected.some(r => r.adopted) ? ["Towell adoptado"] : [])]} rows={periods.map(p => ({ id: p, cells: [<span key="period" title={p}>{shortPeriod(p)}</span>, `H${(Number(p.slice(0, 4)) - Number(issue!.slice(0, 4))) * 12 + Number(p.slice(5, 7)) - Number(issue!.slice(5, 7))}`, ...[...candidates, ...(selected.some(r => r.adopted) ? ["TOWELL" as const] : [])].map(s => { const q = matrixTotal(selected, p, s); return <span key={s} title={`Cobertura ${q.covered}/${q.eligible}`} className="whitespace-nowrap tabular-nums">{exactNumber(q.value)}</span>; })] }))}/> : <p className="text-sm text-slate-500">Sin cálculo compatible disponible para los periodos seleccionados.</p>}
+    {row && <p className="break-all text-xs text-slate-500">Product ID: {row.product.id} · Calculation ID: {row.calculation!.id} · {row.product.commercial?.status ?? "PENDING_CLASSIFICATION"}</p>}
+  </section>;
 }
-function ProductPages({ rows, periods, shown, issue }: { rows: ForecastMatrixRow[]; periods: string[]; shown: ReportSeries[]; issue: string }) {
+function PendingProducts({ rows, snapshot }: { rows: ForecastMatrixRow[]; snapshot: ReportSnapshot }) {
   const [page, setPage] = useState(1), [size, setSize] = useState<50 | 100 | 250>(50);
-  const horizon = (period: string) => (Number(period.slice(0, 4)) - Number(issue.slice(0, 4))) * 12 + Number(period.slice(5, 7)) - Number(issue.slice(5, 7));
-  const headers = ["Producto / Código", "Cadena / Categoría", "Cálculo / Evidencia", ...periods.map(p => <div key={p}>{p}<p className="mt-1 text-xs font-normal text-slate-500">H{horizon(p)} · {temporalLabel(p, null).split(" · ")[0]}</p></div>)];
-  const records = rows.slice((page - 1) * size, page * size).map(r => {
-    const reference = r.calculation?.suggested_reference;
-    const family = reference?.family?.toUpperCase() as ReportSeries | undefined;
-    return { id: `${r.product.chain_id}/${r.product.id}`, cells: [
-      <div key="product" className="min-w-48 max-w-64 break-words"><strong>{r.product.description}</strong><p className="mt-1 text-xs">{r.product.product_code}{r.product.variant_code ? ` / ${r.product.variant_code}` : ""}</p></div>,
-      <div key="scope" className="min-w-40">{r.chain}<p className="mt-1 text-xs text-slate-500">{r.category}</p></div>,
-      <div key="lineage" className="min-w-56 max-w-72 break-words">
-        <strong>{r.calculation?.calculation_code ?? (r.provisional ? "Cold Start provisional" : "Sin cálculo")}</strong>
-        <p className="text-xs">Corte {r.calculation?.issue_period.slice(0, 7) ?? r.provisional?.issue_period ?? "Sin dato"}</p>
-        <p className="text-xs">Creado {r.calculation?.created_at ?? r.provisional?.created_at ?? "Sin dato"}</p>
-        <p className="text-xs">{r.adopted ? `Adoptado ${r.adopted.selected_at}` : "Sin decisión"}</p>
-        <details className="mt-2 text-xs"><summary className="cursor-pointer">Trazabilidad y WAPE retrospectivo</summary>
-          <p className="mt-2 break-all">{r.calculation?.id ?? r.provisional?.job_id ?? "Sin dato"}</p>
-          {(["STATISTICAL", "ML", "ENSEMBLE"] as const).map(f => <p key={f}>{reportSeries[f]}: {reportPercent(r.calculation?.candidate_metrics[f]?.wape)}</p>)}
-          <p>Referencia sugerida: {family ? reportSeries[family] : "Sin dato"}{reference?.model ? ` · ${reference.model}` : ""}</p>
-        </details>
-      </div>,
-      ...periods.map(p => <div key={p} className="min-w-44">
-        <dl className="space-y-2">{shown.map(s => <div key={s}><dt className="text-xs text-slate-500">{reportSeries[s]}</dt><dd className="font-medium tabular-nums">{reportNumber(r.values[p][s])}</dd></div>)}</dl>
-        <p className="mt-3 max-w-44 text-xs text-slate-500">{temporalLabel(p, r.calculation?.created_at ?? r.provisional?.created_at ?? null)}</p>
-      </div>),
-    ] };
-  });
-  return <><ReportState loading={false} error={false} empty={!rows.length}/>{rows.length > 0 && <ReportTable label="Forecast H1-H12 por producto" headers={headers} rows={records}/>}
-    <ReportPaging page={page} previous={() => setPage(p => p - 1)} next={() => setPage(p => p + 1)} hasMore={rows.length > page * size} loading={false} size={size} setSize={v => { setSize(v); setPage(1); }}/>
-  </>;
+  return <details className="space-y-4 border-t border-slate-200 py-5"><summary className="cursor-pointer text-lg font-semibold">Productos pendientes de cálculo ({rows.length})</summary><p className="text-xs text-slate-500">Permanecen en el alcance. Cambiar filtros no ejecuta motores.</p><ReportTable label="Productos pendientes de cálculo" headers={["Producto", "Modelo", "Color", "Tamaño", "Estado", "Motivo"]} rows={rows.slice((page - 1) * size, page * size).map(r => ({ id: r.product.id, cells: [<div key="product">{r.product.description}<p className="mt-1 text-xs text-slate-500">{r.chain} · {r.product.product_code} · {r.product.id}</p></div>, modelName(r), r.product.commercial?.color ?? "Sin identificar", r.product.commercial?.size ?? (r.product.commercial?.not_applicable?.includes("size") ? "No aplica (documentado)" : "Sin identificar"), r.product.commercial?.status ?? "PENDING_CLASSIFICATION", snapshot.calculations.some(c => c.product_id === r.product.id && c.chain_id === r.product.chain_id) ? "Cálculo almacenado fuera del grupo compatible seleccionado" : "Sin cálculo almacenado en la lectura autorizada"] }))}/><ReportPaging page={page} previous={() => setPage(p => p - 1)} next={() => setPage(p => p + 1)} hasMore={rows.length > page * size} loading={false} size={size} setSize={v => { setSize(v); setPage(1); }}/></details>;
 }

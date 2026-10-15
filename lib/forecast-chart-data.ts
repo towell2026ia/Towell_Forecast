@@ -1,5 +1,6 @@
 import type { Filters } from "./supabase/types";
 import type { PreviewAggregate, PreviewHorizon, PreviewScope } from "./forecast-preview";
+import { hasCommercialFilters } from "./commercial-filters";
 
 export type HistoricalMonth = { period: string; sale: number | null; order: number | null; delivery: number | null };
 export type CustomerMonth = { period: string; value: number };
@@ -35,7 +36,7 @@ export function scopeHorizons(scope: PreviewScope | null, filters: Filters): Hor
   // A product-scoped run cannot masquerade as the full category/chain aggregate.
   let rows: Horizon[];
   if (filters.productId) rows = scope.products?.find(p => p.product_id === filters.productId && (!filters.categoryId || p.category_id === filters.categoryId))?.horizons ?? [];
-  else if (filters.search.trim()) rows = [];
+  else if (filters.search.trim() || hasCommercialFilters(filters)) rows = [];
   else rows = scope.aggregates?.filter(r => r.level === (filters.categoryId ? "category" : "chain") && r.key === (filters.categoryId ?? filters.chainId)) ?? [];
   // Dates and numbers remain backend values; malformed/partial results are not repaired.
   if (rows.length !== 12 || new Set(rows.map(r => r.horizon)).size !== 12 || rows.some(r => r.horizon < 1 || r.horizon > 12 || r.target_period !== addMonth(scope.issue_period!, r.horizon) || !Number.isFinite(r.forecast_towell))) return [];
