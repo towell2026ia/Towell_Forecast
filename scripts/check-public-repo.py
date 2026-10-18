@@ -6,6 +6,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from check_annual_template_public import OFFICIAL, audit_template
+
 ROOT = Path(__file__).resolve().parents[1]
 FORBIDDEN = {".xlsx", ".xls", ".db", ".sqlite", ".sqlite3", ".pem", ".key"}
 TEXT_SUFFIXES = {".py", ".ts", ".tsx", ".js", ".mjs", ".json", ".yaml", ".yml", ".md", ".txt", ".example"}
@@ -21,6 +23,9 @@ def main() -> None:
             continue
         name = raw.decode("utf-8")
         path = ROOT / name
+        if name == OFFICIAL:
+            problems.extend(f"unsafe_official_template:{p}" for p in audit_template(path))
+            continue
         if path.suffix.lower() in FORBIDDEN or path.name.startswith(".env") and path.name != ".env.example":
             problems.append(f"forbidden_tracked_file:{name}")
             continue

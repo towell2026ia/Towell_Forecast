@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.0.0",
+  "estado_general": "ERROR",
+  "cadena_declarada": null,
+  "anio": null,
+  "registros": {
+    "01_CONTROL_CARGA": 0,
+    "02_PRODUCTOS": 0,
+    "03_HISTORICO_MENSUAL": 0,
+    "04_FORECAST_CLIENTE": 0,
+    "05_FUENTES": 0,
+    "06_DICCIONARIOS": 9
+  },
+  "productos_registrados": 0,
+  "modelos_registrados": 0,
+  "colores_registrados": 0,
+  "presentaciones_registradas": 0,
+  "meses_con_informacion": 0,
+  "registros_historicos": 0,
+  "errores": 10,
+  "advertencias": 1,
+  "registros_con_error": 2,
+  "duplicados": 0,
+  "productos_sin_identidad_suficiente": 0,
+  "productos_sin_clasificacion": 0,
+  "fuentes_no_identificadas": 0,
+  "campos_faltantes": {
+    "01_CONTROL_CARGA.anio": 1,
+    "01_CONTROL_CARGA.codigo_cadena": 1,
+    "01_CONTROL_CARGA.fecha_corte_fuente": 1,
+    "01_CONTROL_CARGA.fuente_principal": 1,
+    "01_CONTROL_CARGA.nombre_cadena": 1,
+    "01_CONTROL_CARGA.responsable": 1,
+    "01_CONTROL_CARGA.version_archivo": 1
+  },
+  "diferencias": {}
+}

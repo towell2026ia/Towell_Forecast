@@ -1,0 +1,643 @@
+{
+  "schema_version": "1.0.0",
+  "prd": "09.2E5-02A.0",
+  "filename": "FORECAST_Towell_Plantilla_Carga_Anual.xlsx",
+  "encoding": "Unicode NFC para comparación; identidad textual exacta",
+  "minimum_year": 2024,
+  "maximum_year": 9999,
+  "max_decimal_places": 3,
+  "max_quantity": "999999999999999.999",
+  "sheets": [
+    {
+      "name": "00_INSTRUCCIONES",
+      "table": "T_Instrucciones",
+      "role": "reference",
+      "header_row": 1,
+      "columns": [
+        {
+          "name": "seccion",
+          "type": "text",
+          "required": false,
+          "description": "Campo de consulta automática; no llenar manualmente."
+        },
+        {
+          "name": "campo",
+          "type": "text",
+          "required": false,
+          "description": "Campo de consulta automática; no llenar manualmente."
+        },
+        {
+          "name": "obligatoriedad",
+          "type": "text",
+          "required": false,
+          "description": "Campo de consulta automática; no llenar manualmente."
+        },
+        {
+          "name": "instruccion",
+          "type": "text",
+          "required": false,
+          "description": "Campo de consulta automática; no llenar manualmente."
+        },
+        {
+          "name": "formato_ejemplo",
+          "type": "text",
+          "required": false,
+          "description": "Campo de consulta automática; no llenar manualmente."
+        }
+      ]
+    },
+    {
+      "name": "01_CONTROL_CARGA",
+      "table": "T_Control",
+      "role": "input",
+      "header_row": 1,
+      "columns": [
+        {
+          "name": "codigo_cadena",
+          "type": "text",
+          "required": true,
+          "description": "Código verificado de una sola cadena; no es su UUID. Mayúsculas, números, guion o guion bajo.",
+          "supabase": "chains.code -> chain_id (conciliación)"
+        },
+        {
+          "name": "nombre_cadena",
+          "type": "text",
+          "required": true,
+          "description": "Nombre de la cadena declarada; no usar el nombre para inferir equivalencias.",
+          "supabase": "chains.name (verificación)"
+        },
+        {
+          "name": "anio",
+          "type": "integer",
+          "required": true,
+          "description": "Año del histórico, entero desde 2024 hasta 9999. Un archivo por cadena y año.",
+          "supabase": "sin columna directa; ámbito anual de importación"
+        },
+        {
+          "name": "version_archivo",
+          "type": "text",
+          "required": true,
+          "description": "Versión documental del archivo; conservar las versiones anteriores.",
+          "supabase": "sin columna directa; metadatos documentales de evidencia/mapping"
+        },
+        {
+          "name": "responsable",
+          "type": "text",
+          "required": true,
+          "description": "Persona responsable de preparar esta carga local.",
+          "supabase": "sin equivalencia directa a auth.users; actor autenticado en etapa futura"
+        },
+        {
+          "name": "fecha_corte_fuente",
+          "type": "date",
+          "required": true,
+          "description": "Fecha real de corte documental; no acredita disponibilidad histórica.",
+          "supabase": "sin equivalencia directa a available_at ni evidence_date"
+        },
+        {
+          "name": "fuente_principal",
+          "type": "text",
+          "required": true,
+          "description": "fuente_id que existe en 05_FUENTES.",
+          "supabase": "source_evidence.id (conciliación de clave local)"
+        },
+        {
+          "name": "observaciones",
+          "type": "text",
+          "required": false,
+          "description": "Notas y evidencia adicional; no contiene fórmulas ni credenciales.",
+          "supabase": "metadatos de evidencia/mapping; sin columna directa universal"
+        }
+      ]
+    },
+    {
+      "name": "02_PRODUCTOS",
+      "table": "T_Productos",
+      "role": "input",
+      "header_row": 1,
+      "columns": [
+        {
+          "name": "codigo_producto_origen",
+          "type": "text",
+          "required": true,
+          "description": "Clave textual de la fuente. Junto con variante_codigo identifica la fila; no se asume product_code.",
+          "supabase": "products.product_code sólo tras mapping explícito; nunca asumir equivalencia"
+        },
+        {
+          "name": "producto_id_supabase",
+          "type": "uuid",
+          "required": false,
+          "description": "UUID opcional, sólo con correspondencia verificada externamente. No generar uno nuevo.",
+          "supabase": "products.id sólo tras conciliación"
+        },
+        {
+          "name": "item",
+          "type": "text",
+          "required": false,
+          "description": "Identificador ITEM como texto; conservar ceros iniciales. No equivale automáticamente a product_code.",
+          "supabase": "import_profile_versions.mapping_json identificadores; sin columna products.item"
+        },
+        {
+          "name": "upc",
+          "type": "text",
+          "required": false,
+          "description": "Identificador UPC como texto; conservar ceros iniciales. No equivale automáticamente a product_code.",
+          "supabase": "import_profile_versions.mapping_json identificadores; sin columna products.upc"
+        },
+        {
+          "name": "descripcion_original",
+          "type": "text",
+          "required": true,
+          "description": "Descripción literal de la fuente, sin reemplazarla por la homologación.",
+          "supabase": "products.description"
+        },
+        {
+          "name": "categoria",
+          "type": "text",
+          "required": false,
+          "description": "Nombre comercial de categoría, pendiente de conciliar con categories.id y code.",
+          "supabase": "categories.name -> categories.id/code tras conciliación"
+        },
+        {
+          "name": "tipo_producto",
+          "type": "text",
+          "required": false,
+          "description": "Tipo comercial abierto. BATA/BATAS es tipo de producto, nunca tamaño.",
+          "supabase": "commercial_product_types.name y original_product_type; UUID tras conciliación"
+        },
+        {
+          "name": "modelo",
+          "type": "text",
+          "required": false,
+          "description": "Nombre abierto, admite modelos nuevos y varias palabras. NFC, mayúsculas y espacios sólo para comparación.",
+          "supabase": "commercial_models.name y original_model; UUID tras conciliación"
+        },
+        {
+          "name": "color",
+          "type": "text",
+          "required": false,
+          "description": "Color original abierto. VARIOS o AMBIGUO requiere revisión; no se inventan equivalencias.",
+          "supabase": "commercial_colors.name y original_color; UUID tras conciliación"
+        },
+        {
+          "name": "tamano_presentacion",
+          "type": "text",
+          "required": false,
+          "description": "Presentación original. Sólo MB, BANO y PULL tienen equivalencias confirmadas por este PRD.",
+          "supabase": "commercial_sizes.name y original_size; UUID tras conciliación"
+        },
+        {
+          "name": "variante_codigo",
+          "type": "text",
+          "required": false,
+          "description": "Código textual de variante, opcional; vacío participa como variante vacía en las claves.",
+          "supabase": "products.variant_code tras mapping explícito"
+        },
+        {
+          "name": "estado_clasificacion",
+          "type": "text",
+          "required": false,
+          "description": "Estado declarado: PROPOSED, APPROVED, PENDING_CLASSIFICATION o REJECTED. No aprueba en Supabase.",
+          "enum": [
+            "PROPOSED",
+            "APPROVED",
+            "PENDING_CLASSIFICATION",
+            "REJECTED"
+          ],
+          "supabase": "product_commercial_classifications.classification_status; requiere evidencias/actor/aprobación fuera de este PRD"
+        },
+        {
+          "name": "fuente_id",
+          "type": "text",
+          "required": true,
+          "description": "Clave documental local; no es UUID. Referenciar la misma clave en todas las hojas.",
+          "supabase": "clave local -> source_evidence.id; no UUID generado"
+        },
+        {
+          "name": "observaciones",
+          "type": "text",
+          "required": false,
+          "description": "Notas y evidencia adicional; no contiene fórmulas ni credenciales.",
+          "supabase": "metadatos de evidencia/mapping; sin columna directa universal"
+        }
+      ]
+    },
+    {
+      "name": "03_HISTORICO_MENSUAL",
+      "table": "T_Historico",
+      "role": "input",
+      "header_row": 1,
+      "columns": [
+        {
+          "name": "codigo_producto_origen",
+          "type": "text",
+          "required": true,
+          "description": "Clave textual de la fuente. Junto con variante_codigo identifica la fila; no se asume product_code.",
+          "supabase": "products.product_code sólo tras mapping explícito; nunca asumir equivalencia"
+        },
+        {
+          "name": "variante_codigo",
+          "type": "text",
+          "required": false,
+          "description": "Código textual de variante, opcional; vacío participa como variante vacía en las claves.",
+          "supabase": "products.variant_code tras mapping explícito"
+        },
+        {
+          "name": "periodo",
+          "type": "period",
+          "required": true,
+          "description": "Mes textual YYYY-MM del año declarado. No crear filas por meses que no tienen datos.",
+          "supabase": "monthly_observations.period; YYYY-MM -> primer día como clave mensual"
+        },
+        {
+          "name": "venta_real",
+          "type": "quantity",
+          "required": false,
+          "description": "Cantidad realmente vendida; número no negativo hasta 3 decimales. Vacío es ausencia, 0 es cero confirmado.",
+          "supabase": "monthly_observations.metric_code=SALES / value"
+        },
+        {
+          "name": "pedido",
+          "type": "quantity",
+          "required": false,
+          "description": "Cantidad solicitada; número no negativo hasta 3 decimales; sin fórmulas.",
+          "supabase": "monthly_observations.metric_code=ORDER / value"
+        },
+        {
+          "name": "enviado",
+          "type": "quantity",
+          "required": false,
+          "description": "Cantidad entregada; número no negativo hasta 3 decimales; sin fórmulas.",
+          "supabase": "monthly_observations.metric_code=DELIVERY / value"
+        },
+        {
+          "name": "fuente_id",
+          "type": "text",
+          "required": true,
+          "description": "Clave documental local; no es UUID. Referenciar la misma clave en todas las hojas.",
+          "supabase": "clave local -> source_evidence.id; no UUID generado"
+        },
+        {
+          "name": "observaciones",
+          "type": "text",
+          "required": false,
+          "description": "Notas y evidencia adicional; no contiene fórmulas ni credenciales.",
+          "supabase": "metadatos de evidencia/mapping; sin columna directa universal"
+        }
+      ]
+    },
+    {
+      "name": "04_FORECAST_CLIENTE",
+      "table": "T_Cliente",
+      "role": "optional_input",
+      "header_row": 1,
+      "columns": [
+        {
+          "name": "codigo_producto_origen",
+          "type": "text",
+          "required": true,
+          "description": "Clave textual de la fuente. Junto con variante_codigo identifica la fila; no se asume product_code.",
+          "supabase": "products.product_code sólo tras mapping explícito; nunca asumir equivalencia"
+        },
+        {
+          "name": "variante_codigo",
+          "type": "text",
+          "required": false,
+          "description": "Código textual de variante, opcional; vacío participa como variante vacía en las claves.",
+          "supabase": "products.variant_code tras mapping explícito"
+        },
+        {
+          "name": "version_forecast_cliente",
+          "type": "integer",
+          "required": true,
+          "description": "Número entero positivo de versión del Forecast Cliente. No usar C1, C2 o Champion.",
+          "supabase": "customer_forecast_versions.version_no"
+        },
+        {
+          "name": "periodo_emision",
+          "type": "period",
+          "required": true,
+          "description": "Mes textual YYYY-MM de emisión del cliente; no es el periodo objetivo.",
+          "supabase": "customer_forecast_versions.issue_period (clave mensual)"
+        },
+        {
+          "name": "periodo_objetivo",
+          "type": "period",
+          "required": true,
+          "description": "Mes textual YYYY-MM pronosticado; puede ser posterior al año del histórico.",
+          "supabase": "customer_forecast_rows.target_period (clave mensual)"
+        },
+        {
+          "name": "cantidad_forecast_cliente",
+          "type": "quantity",
+          "required": true,
+          "description": "Cantidad del cliente numérica no negativa hasta 3 decimales. No es forecast Towell.",
+          "supabase": "customer_forecast_rows.value"
+        },
+        {
+          "name": "fecha_recepcion",
+          "type": "date",
+          "required": true,
+          "description": "Fecha documental de recepción, ISO YYYY-MM-DD o fecha Excel; nunca inventar disponibilidad.",
+          "supabase": "customer_forecast_versions.received_at; zona/hora documental deben resolverse sin inventarlas"
+        },
+        {
+          "name": "estado_documento",
+          "type": "text",
+          "required": false,
+          "description": "Estado documental: DRAFT, VALIDATED, FROZEN o SUPERSEDED. No valida ni congela en Supabase.",
+          "enum": [
+            "DRAFT",
+            "VALIDATED",
+            "FROZEN",
+            "SUPERSEDED"
+          ],
+          "supabase": "customer_forecast_versions.status; no certifica validated_at/frozen_at"
+        },
+        {
+          "name": "fuente_id",
+          "type": "text",
+          "required": true,
+          "description": "Clave documental local; no es UUID. Referenciar la misma clave en todas las hojas.",
+          "supabase": "clave local -> source_evidence.id; no UUID generado"
+        },
+        {
+          "name": "observaciones",
+          "type": "text",
+          "required": false,
+          "description": "Notas y evidencia adicional; no contiene fórmulas ni credenciales.",
+          "supabase": "metadatos de evidencia/mapping; sin columna directa universal"
+        }
+      ]
+    },
+    {
+      "name": "05_FUENTES",
+      "table": "T_Fuentes",
+      "role": "input",
+      "header_row": 1,
+      "columns": [
+        {
+          "name": "fuente_id",
+          "type": "text",
+          "required": true,
+          "description": "Clave documental local; no es UUID. Referenciar la misma clave en todas las hojas.",
+          "supabase": "clave local -> source_evidence.id; no UUID generado"
+        },
+        {
+          "name": "nombre_archivo",
+          "type": "text",
+          "required": true,
+          "description": "Nombre del archivo fuente real. La existencia se comprueba sólo si se facilita --source-dir.",
+          "supabase": "source_evidence.source_name / import_batches.filename"
+        },
+        {
+          "name": "tipo_fuente",
+          "type": "text",
+          "required": true,
+          "description": "Tipo documental abierto, por ejemplo XLSX, CSV, PDF, SISTEMA o CORREO.",
+          "supabase": "source_evidence.evidence_type"
+        },
+        {
+          "name": "fecha_corte",
+          "type": "date",
+          "required": false,
+          "description": "Fecha documental real si consta; dejar vacía cuando no exista evidencia.",
+          "supabase": "sin equivalencia automática a disponibilidad o fecha de evidencia"
+        },
+        {
+          "name": "origen_documental",
+          "type": "text",
+          "required": true,
+          "description": "Ubicación o referencia de la fuente, sin credenciales.",
+          "supabase": "source_evidence.storage_path/description tras revisión"
+        },
+        {
+          "name": "responsable_fuente",
+          "type": "text",
+          "required": true,
+          "description": "Responsable de la fuente documental.",
+          "supabase": "metadato documental; no asigna validated_by"
+        },
+        {
+          "name": "observaciones",
+          "type": "text",
+          "required": false,
+          "description": "Notas y evidencia adicional; no contiene fórmulas ni credenciales.",
+          "supabase": "metadatos de evidencia/mapping; sin columna directa universal"
+        }
+      ]
+    },
+    {
+      "name": "06_DICCIONARIOS",
+      "table": "T_Diccionarios",
+      "role": "rules",
+      "header_row": 1,
+      "columns": [
+        {
+          "name": "atributo",
+          "type": "text",
+          "required": true,
+          "description": "TIPO_PRODUCTO, MODELO, COLOR o TAMANO_PRESENTACION.",
+          "enum": [
+            "TIPO_PRODUCTO",
+            "MODELO",
+            "COLOR",
+            "TAMANO_PRESENTACION"
+          ]
+        },
+        {
+          "name": "valor_original",
+          "type": "text",
+          "required": true,
+          "description": "Texto original de la equivalencia; no sustituye el valor de las hojas de captura."
+        },
+        {
+          "name": "valor_homologado",
+          "type": "text",
+          "required": false,
+          "description": "Equivalencia documentada; requerida sólo si está CONFIRMADA."
+        },
+        {
+          "name": "estado_equivalencia",
+          "type": "text",
+          "required": true,
+          "description": "CONFIRMADA, PENDIENTE o RECHAZADA. No constituye aprobación de productos.",
+          "enum": [
+            "CONFIRMADA",
+            "PENDIENTE",
+            "RECHAZADA"
+          ]
+        },
+        {
+          "name": "fuente_regla",
+          "type": "text",
+          "required": true,
+          "description": "Referencia que sustenta la regla. No completar por semejanza de nombres."
+        },
+        {
+          "name": "observaciones",
+          "type": "text",
+          "required": false,
+          "description": "Notas y evidencia adicional; no contiene fórmulas ni credenciales.",
+          "supabase": "metadatos de evidencia/mapping; sin columna directa universal"
+        }
+      ]
+    },
+    {
+      "name": "07_VALIDACIONES",
+      "table": "T_Validaciones",
+      "role": "calculated",
+      "header_row": 1,
+      "columns": [
+        {
+          "name": "indicador",
+          "type": "text",
+          "required": false,
+          "description": "Campo de consulta automática; no llenar manualmente."
+        },
+        {
+          "name": "valor",
+          "type": "text",
+          "required": false,
+          "description": "Campo de consulta automática; no llenar manualmente."
+        },
+        {
+          "name": "estado",
+          "type": "text",
+          "required": false,
+          "description": "Campo de consulta automática; no llenar manualmente."
+        },
+        {
+          "name": "detalle",
+          "type": "text",
+          "required": false,
+          "description": "Campo de consulta automática; no llenar manualmente."
+        }
+      ]
+    }
+  ],
+  "unique_keys": {
+    "02_PRODUCTOS": [
+      [
+        "codigo_producto_origen",
+        "variante_codigo"
+      ],
+      [
+        "producto_id_supabase"
+      ]
+    ],
+    "03_HISTORICO_MENSUAL": [
+      [
+        "codigo_producto_origen",
+        "variante_codigo",
+        "periodo"
+      ]
+    ],
+    "04_FORECAST_CLIENTE": [
+      [
+        "codigo_producto_origen",
+        "variante_codigo",
+        "version_forecast_cliente",
+        "periodo_emision",
+        "periodo_objetivo"
+      ]
+    ],
+    "05_FUENTES": [
+      [
+        "fuente_id"
+      ]
+    ],
+    "06_DICCIONARIOS": [
+      [
+        "atributo",
+        "valor_original"
+      ]
+    ]
+  },
+  "relationships": {
+    "fuente_id": "05_FUENTES.fuente_id",
+    "fuente_principal": "05_FUENTES.fuente_id",
+    "historico_y_cliente": [
+      "02_PRODUCTOS.codigo_producto_origen",
+      "02_PRODUCTOS.variante_codigo"
+    ]
+  },
+  "validations": [
+    "exact_headers",
+    "one_control_row",
+    "chain_code_pattern",
+    "integer_year_2024_9999",
+    "text_identifiers",
+    "optional_uuid_format_not_existence",
+    "no_input_formulas",
+    "nonnegative_numeric_18_3",
+    "same_historical_year",
+    "product_and_source_references",
+    "unique_composite_keys",
+    "forecast_version_metadata_consistency",
+    "classification_pending_preserved",
+    "explicit_ambiguous_labels",
+    "no_macros_external_links_or_connections"
+  ],
+  "confirmed_equivalences": [
+    [
+      "TAMANO_PRESENTACION",
+      "MB",
+      "MEDIO BAÑO"
+    ],
+    [
+      "TAMANO_PRESENTACION",
+      "MEDIO BAÑO",
+      "MEDIO BAÑO"
+    ],
+    [
+      "TAMANO_PRESENTACION",
+      "BANO",
+      "BAÑO"
+    ],
+    [
+      "TAMANO_PRESENTACION",
+      "BAÑO",
+      "BAÑO"
+    ],
+    [
+      "TAMANO_PRESENTACION",
+      "PULL",
+      "PULLMAN"
+    ],
+    [
+      "TAMANO_PRESENTACION",
+      "PULLMAN",
+      "PULLMAN"
+    ],
+    [
+      "TAMANO_PRESENTACION",
+      "FACIAL",
+      "FACIAL"
+    ],
+    [
+      "TIPO_PRODUCTO",
+      "BATA",
+      "BATA"
+    ],
+    [
+      "TIPO_PRODUCTO",
+      "BATAS",
+      "BATA"
+    ]
+  ],
+  "read_only_validation_sheet": {
+    "live_prechecks": "control, productos con código y registros históricos con código; no sustituyen validación Python",
+    "complete_results": "--report-workbook genera una copia de consulta con 07_VALIDACIONES completa; el original no cambia"
+  },
+  "unresolved_for_future_import": [
+    "conciliar cadena/categoría/producto sin inferir por nombre",
+    "mapear ITEM/UPC y código de origen explícitamente",
+    "crear perfil/version/batch y actores autenticados bajo otro PRD",
+    "granularidad import_batches.period mensual para fuente anual",
+    "certificar fechas de disponibilidad sólo con evidencia",
+    "conciliar diccionarios y aprobación comercial sin promover estados",
+    "preservar versiones y metadatos de forecast cliente",
+    "no existe importador productivo en este PRD"
+  ]
+}

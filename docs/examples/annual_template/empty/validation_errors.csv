@@ -1,0 +1,12 @@
+﻿estado,codigo,hoja,fila,columna,mensaje,valor_original,valor_homologado
+ERROR,CONTROL_CARGA_UNICO,01_CONTROL_CARGA,2,,Debe existir exactamente una fila de control: una cadena y un año.,,
+ERROR,CAMPO_OBLIGATORIO,01_CONTROL_CARGA,2,codigo_cadena,Campo obligatorio sin dato.,,
+ERROR,CAMPO_OBLIGATORIO,01_CONTROL_CARGA,2,nombre_cadena,Campo obligatorio sin dato.,,
+ERROR,CAMPO_OBLIGATORIO,01_CONTROL_CARGA,2,anio,Campo obligatorio sin dato.,,
+ERROR,CAMPO_OBLIGATORIO,01_CONTROL_CARGA,2,version_archivo,Campo obligatorio sin dato.,,
+ERROR,CAMPO_OBLIGATORIO,01_CONTROL_CARGA,2,responsable,Campo obligatorio sin dato.,,
+ERROR,CAMPO_OBLIGATORIO,01_CONTROL_CARGA,2,fecha_corte_fuente,Campo obligatorio sin dato.,,
+ERROR,CAMPO_OBLIGATORIO,01_CONTROL_CARGA,2,fuente_principal,Campo obligatorio sin dato.,,
+ERROR,CADENA_INVALIDA,01_CONTROL_CARGA,2,codigo_cadena,"Declare un único código de cadena verificado con letras mayúsculas, números, guion o guion bajo.",,
+ERROR,CATALOGO_VACIO,02_PRODUCTOS,2,codigo_producto_origen,No hay productos registrados.,,
+ADVERTENCIA,HISTORICO_VACIO,03_HISTORICO_MENSUAL,2,,El archivo no aporta observaciones históricas.,,

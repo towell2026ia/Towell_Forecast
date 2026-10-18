@@ -1,0 +1,3 @@
+﻿estado,codigo,hoja,fila,columna,mensaje,valor_original,valor_homologado
+ADVERTENCIA,CLASIFICACION_PENDIENTE,02_PRODUCTOS,2,estado_clasificacion,Clasificación provisional o incompleta. No se promueve a APPROVED.,,
+ADVERTENCIA,HOMOLOGACION_PROPUESTA,02_PRODUCTOS,2,tamano_presentacion,Diferencia de escritura informativa; el archivo original no se modifica.,MB,MEDIO BAÑO

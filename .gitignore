@@ -37,6 +37,7 @@ yarn-error.log*
 *.sqlite
 *.sqlite3
 *.xlsx
+!templates/FORECAST_Towell_Plantilla_Carga_Anual.xlsx
 *.xls
 *.log
 *.bak

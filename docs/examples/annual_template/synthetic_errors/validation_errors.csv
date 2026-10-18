@@ -1,0 +1,6 @@
+﻿estado,codigo,hoja,fila,columna,mensaje,valor_original,valor_homologado
+ERROR,CANTIDAD_NEGATIVA,03_HISTORICO_MENSUAL,3,venta_real,Las cantidades no pueden ser negativas.,,
+ERROR,DUPLICADO,03_HISTORICO_MENSUAL,3,codigo_producto_origen+variante_codigo+periodo,Clave repetida. No se fusionan ni suman registros.,,
+ERROR,FUENTE_INEXISTENTE,03_HISTORICO_MENSUAL,3,fuente_id,Falta la referencia o no existe en 05_FUENTES.,,
+ADVERTENCIA,CLASIFICACION_PENDIENTE,02_PRODUCTOS,2,estado_clasificacion,Clasificación provisional o incompleta. No se promueve a APPROVED.,,
+ADVERTENCIA,HOMOLOGACION_PROPUESTA,02_PRODUCTOS,2,tamano_presentacion,Diferencia de escritura informativa; el archivo original no se modifica.,MB,MEDIO BAÑO

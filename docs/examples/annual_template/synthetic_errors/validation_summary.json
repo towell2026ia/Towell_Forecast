@@ -1,0 +1,31 @@
+{
+  "schema_version": "1.0.0",
+  "estado_general": "ERROR",
+  "cadena_declarada": "SYNTH_CHAIN",
+  "anio": 2024,
+  "registros": {
+    "01_CONTROL_CARGA": 1,
+    "02_PRODUCTOS": 1,
+    "03_HISTORICO_MENSUAL": 2,
+    "04_FORECAST_CLIENTE": 0,
+    "05_FUENTES": 1,
+    "06_DICCIONARIOS": 9
+  },
+  "productos_registrados": 1,
+  "modelos_registrados": 1,
+  "colores_registrados": 1,
+  "presentaciones_registradas": 1,
+  "meses_con_informacion": 1,
+  "registros_historicos": 2,
+  "errores": 3,
+  "advertencias": 2,
+  "registros_con_error": 1,
+  "duplicados": 1,
+  "productos_sin_identidad_suficiente": 0,
+  "productos_sin_clasificacion": 1,
+  "fuentes_no_identificadas": 1,
+  "campos_faltantes": {},
+  "diferencias": {
+    "tamano_presentacion": 1
+  }
+}

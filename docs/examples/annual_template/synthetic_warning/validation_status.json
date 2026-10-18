@@ -1,0 +1,12 @@
+{
+  "estado": "ADVERTENCIA",
+  "schema_version": "1.0.0",
+  "input_sha256": "c33169826ee0fc4d9488e50c2654ee084cb0f1a9c3a0efb10faf224a0ceb1267",
+  "input_sha256_after": "c33169826ee0fc4d9488e50c2654ee084cb0f1a9c3a0efb10faf224a0ceb1267",
+  "original_sin_modificar": true,
+  "validated_at_utc": "2026-10-18T21:42:00.396178+00:00",
+  "supabase_connected": false,
+  "productive_import_implemented": false,
+  "source_hashes": [],
+  "example_kind": "isolated_synthetic_data"
+}
