@@ -272,7 +272,9 @@ class Audit:
                 self.issue("EQUIVALENCIA_PENDIENTE", "06_DICCIONARIOS", row, "estado_equivalencia", "Equivalencia pendiente; no se aplica.", "ADVERTENCIA")
         confirmed_sizes = {comparison_key(a): b for attr, a, b in SCHEMA["confirmed_equivalences"] if attr == "TAMANO_PRESENTACION"}
         for row, record in self.rows["02_PRODUCTOS"]:
-            if any(blank(record[c]) for c in ["codigo_producto_origen", "descripcion_original"]):
+            if (any(not isinstance(record[c], str) or blank(record[c]) for c in ["codigo_producto_origen", "descripcion_original"])
+                    or isinstance(record["codigo_producto_origen"], str) and record["codigo_producto_origen"] != record["codigo_producto_origen"].strip()
+                    or not blank(record["variante_codigo"]) and (not isinstance(record["variante_codigo"], str) or record["variante_codigo"] != record["variante_codigo"].strip())):
                 self.insufficient_identity.add(row)
             if record["estado_clasificacion"] != "APPROVED" or any(blank(record[c]) for c in ["categoria", "tipo_producto", "modelo", "color", "tamano_presentacion"]):
                 self.unclassified.add(row)

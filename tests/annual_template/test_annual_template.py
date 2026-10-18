@@ -200,6 +200,9 @@ class AnnualTemplateTests(unittest.TestCase):
         result = self.edit(invalid)
         self.assertTrue({"CAMPO_OBLIGATORIO", "UUID_INVALIDO", "FECHA_INVALIDA", "PRODUCTO_INEXISTENTE"}.issubset(self.codes(result)))
         self.assertEqual(result[0]["productos_sin_identidad_suficiente"], 1)
+        result = self.edit(lambda wb: set_row(wb, "02_PRODUCTOS", codigo_producto_origen=123))
+        self.assertIn("IDENTIFICADOR_NUMERICO", self.codes(result))
+        self.assertEqual(result[0]["productos_sin_identidad_suficiente"], 1)
 
     def test_forecast_duplicate_negative_and_version_metadata(self):
         def invalid(wb):
