@@ -24,9 +24,9 @@ for (const spec of sheets) {
   sheet.getRange(`A1:${col(width)}${height}`).format.font.size=10;
   sheet.getRange(`A1:${col(width)}${height}`).format.rowHeight=22;
   sheet.getRange(`A1:${col(width)}${height}`).format.columnWidth=18;
-  sheet.mergeCells(`A2:${col(Math.min(width,8))}2`);sheet.getRange('A2').values=[[spec.title]];
+  sheet.mergeCells(`A2:${col(Math.min(width,7))}2`);sheet.getRange('A2').values=[[spec.title]];
   sheet.getRange('A2').format.font.size=17;sheet.getRange('A2').format.font.bold=true;
-  sheet.mergeCells(`A3:${col(Math.min(width,10))}3`);sheet.getRange('A3').values=[[spec.note]];
+  sheet.mergeCells(`A3:${col(Math.min(width,7))}3`);sheet.getRange('A3').values=[[spec.note]];
   sheet.getRange('A3').format.wrapText=true;sheet.getRange('A3').format.rowHeight=44;
   sheet.getRange(`A5:${col(width)}5`).values=[spec.headers];
   if(spec.rows.length)sheet.getRange(`A6:${col(width)}${height}`).values=spec.rows.map(r=>r.map(literal));
@@ -50,10 +50,18 @@ for (const spec of sheets) {
     const h=spec.headers[j]; const range=sheet.getRange(`${col(j+1)}6:${col(j+1)}${height}`);
     if(/^(?:Real |Champion |Original |Revisión )?20\d\d-\d\d$|WAPE retrospectivo|Propuesta original|^Piezas$/.test(h))range.setNumberFormat('#,##0.00####');
     if(/Motivo|Interpretación|Evidencia|Descripción|Artículo|Color|Unidad|Referencia|Estado|Cobertura|Anomalías|Empaques/.test(h)) {range.format.columnWidth=38;range.format.wrapText=true;}
+    if(/Barras|Código|Variante|Celda|Hash/.test(h))range.setNumberFormat('@');
+    if(h==='Barras'){range.setNumberFormat('0;0;0;@');range.format.columnWidth=24;range.format.horizontalAlignment='left';}
+    if(/Variante|Hash/.test(h)){range.format.columnWidth=32;range.format.wrapText=true;}
+    if(h==='Emisión'){range.setNumberFormat('yyyy-mm-dd hh:mm:ss.000 "UTC"');range.format.columnWidth=34;}
   }
-  sheet.getRange(`A6:${col(width)}${height}`).format.rowHeight=spec.name==='Historico_por_color'?54:78;
+  sheet.getRange(`A6:${col(width)}${height}`).format.rowHeight=60;
+  sheet.getRange(`A1:${col(width)}${height}`).format.verticalAlignment='center';
   sheet.getRange(`A1:A${height}`).format.columnWidth=32;
-  if(spec.name==='Guia_y_control'){sheet.getRange(`A1:A${height}`).format.columnWidth=38;sheet.getRange(`B1:B${height}`).format.columnWidth=110;sheet.getRange(`B6:B${height}`).format.wrapText=true;sheet.getRange(`A6:B${height}`).format.rowHeight=42;}
+  if(spec.name==='Guia_y_control'){
+    sheet.getRange(`A1:A${height}`).format.columnWidth=38;sheet.getRange(`B1:B${height}`).format.columnWidth=110;sheet.getRange(`B6:B${height}`).format.wrapText=true;sheet.getRange(`A6:B${height}`).format.rowHeight=42;
+    for(let i=0;i<spec.rows.length;i++)if(spec.rows[i][0]==='Fecha real de emisión')sheet.getRange(`B${i+6}`).setNumberFormat('yyyy-mm-dd hh:mm:ss.000 "UTC"');else if(spec.rows[i][0]==='Fecha de confirmación')sheet.getRange(`B${i+6}`).setNumberFormat('yyyy-mm-dd');
+  }
 }
 workbook.recalculate();
 const inspected=await workbook.inspect({kind:'match',searchTerm:'#REF!|#DIV/0!|#VALUE!|#NAME\\?|#NUM!|#SPILL!',options:{useRegex:true,maxResults:20},summary:'Formula errors'});
@@ -66,4 +74,5 @@ for(const spec of sheets){
   await fs.writeFile(path.join(qa,spec.name+'.png'),new Uint8Array(await preview.arrayBuffer()));
 }
 await fs.writeFile(output+'.verification.json',JSON.stringify({version:version.id,hash:version.hash,sheets:sheets.map(s=>({name:s.name,rows:s.rows.length,columns:s.headers.length})),shared_projection:'lib/planning-results.ts'},null,2));
+await fs.writeFile(output+'.expected.json',JSON.stringify(sheets));
 console.log('XLSX exported; private visual checks available.');
