@@ -5,10 +5,15 @@ import { emptyReportChoice, matrixTotal, reportSeries, temporalLabel, type Forec
 import type { Filters, HistoricalRow } from "@/lib/supabase/types";
 import { detailMetrics, periodsDashboard } from "@/lib/periods-dashboard";
 import { PeriodsComparisonChart } from "@/components/forecast/periods-comparison-chart";
+import { PlanningPeriods } from "@/components/forecast/planning-periods";
 import { useForecastFilters, useRead } from "./forecast-towell-app";
 import { CalculationFilters, ReportPaging, ReportSelect, ReportState, ReportTable, reportNumber, reportPercent } from "./report-controls";
 
 export function ForecastPeriodsView() {
+  const [privatePilot, setPrivatePilot] = useState(false);
+  return <><button type="button" className="mb-4 text-sm underline" onClick={() => setPrivatePilot(v => !v)}>{privatePilot ? "Volver a cálculos almacenados" : "Abrir planeación privada"}</button>{privatePilot ? <PlanningPeriods/> : <StoredPeriods/>}</>;
+}
+function StoredPeriods() {
   const { repository, filters } = useForecastFilters();
   const report = useRead(useCallback(async () => {
     if (!repository.getReportSnapshot) throw new Error("report_unavailable");

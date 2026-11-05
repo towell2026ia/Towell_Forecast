@@ -6,17 +6,18 @@ import { dashboardSeries, type DashboardPoint, type DashboardSeries } from "@/li
 import { reportNumber } from "@/app/report-controls";
 
 const initial = new Set<DashboardSeries>(["previous2", "previous1", "actual", "STATISTICAL", "ML", "ENSEMBLE", "TOWELL"]);
-export function PeriodsComparisonChart({ points, year }: { points: DashboardPoint[]; year: number }) {
-  const [shown, setShown] = useState(initial);
-  const label = (key: DashboardSeries) => key === "previous2" ? `Venta ${year - 2}` : key === "previous1" ? `Venta ${year - 1}` : `${dashboardSeries[key].label} ${year}`;
+export function PeriodsComparisonChart({ points, year, planning }: { points: DashboardPoint[]; year: number; planning?: { unit: string; provisional: boolean } }) {
+  const available: DashboardSeries[] = planning ? ["previous2", "previous1", "actual", ...(planning.provisional ? ["STATISTICAL" as const] : [])] : Object.keys(dashboardSeries) as DashboardSeries[];
+  const [shown, setShown] = useState(new Set([...initial].filter(k => available.includes(k))));
+  const label = (key: DashboardSeries) => planning ? ({ previous2: "Venta año −2", previous1: "Venta año −1", actual: "Venta Towell", STATISTICAL: "Estadístico provisional" }[key as string] ?? dashboardSeries[key].label) : key === "previous2" ? `Venta ${year - 2}` : key === "previous1" ? `Venta ${year - 1}` : `${dashboardSeries[key].label} ${year}`;
   const records = points.map(p => ({ ...p, ...p.values }));
   return <section aria-label="Gráfica comparativa comercial" className="min-w-0 border-y border-slate-200 bg-white py-5">
-    <div className="flex flex-wrap items-center justify-between gap-2 px-4"><h2 className="text-lg font-semibold text-slate-950">Comparativo comercial</h2><span className="text-xs text-slate-500">Unidades · Ene–Sep real / Oct–Dic forecast disponible</span></div>
+    <div className="flex flex-wrap items-center justify-between gap-2 px-4"><h2 className="text-lg font-semibold text-slate-950">Comparativo comercial</h2><span className="text-xs text-slate-500">{planning ? `${planning.unit} · Nueve meses hasta el corte y tres posteriores` : "Unidades · Ene–Sep real / Oct–Dic forecast disponible"}</span></div>
     <div className="mt-4 h-[360px] min-w-0 sm:h-[420px]" data-testid="periods-chart">
       <ResponsiveContainer width="100%" height="100%" minWidth={0} initialDimension={{ width: 900, height: 420 }}>
         <ComposedChart data={records} margin={{ top: 12, right: 18, bottom: 8, left: 4 }} accessibilityLayer>
           <CartesianGrid stroke="#e8edf2" vertical={false}/><XAxis dataKey="month" tickLine={false} axisLine={false} tick={{ fontSize: 12 }}/><YAxis width={60} tickLine={false} axisLine={false} tick={{ fontSize: 11 }} tickFormatter={v => Intl.NumberFormat("es-MX", { notation: "compact" }).format(v)}/>
-          <ReferenceArea x1="Oct" x2="Dic" fill="#e4f0e9" fillOpacity={0.55} label={{ value: "Forecast", position: "insideTop", fontSize: 11, fill: "#52665a" }}/>
+          <ReferenceArea x1={planning ? points[9]?.month : "Oct"} x2={planning ? points[11]?.month : "Dic"} fill="#e4f0e9" fillOpacity={0.55} label={{ value: planning ? planning.provisional ? "Provisional" : "Champion" : "Forecast", position: "insideTop", fontSize: 11, fill: "#52665a" }}/>
           <Tooltip content={({ active, label: month, payload }) => {
             if (!active || !payload?.length) return null;
             const point = points.find(p => p.month === month);
@@ -30,6 +31,6 @@ export function PeriodsComparisonChart({ points, year }: { points: DashboardPoin
         </ComposedChart>
       </ResponsiveContainer>
     </div>
-    <fieldset className="flex flex-wrap gap-x-5 gap-y-3 px-4 pt-3"><legend className="sr-only">Series de la gráfica</legend>{(Object.keys(dashboardSeries) as DashboardSeries[]).map(key => <label key={key} className="flex min-h-8 items-center gap-2 text-xs text-slate-700"><input type="checkbox" aria-label={label(key)} checked={shown.has(key)} onChange={() => setShown(previous => { const next = new Set(previous); if (next.has(key)) next.delete(key); else next.add(key); return next; })}/><span className="h-2 w-4 rounded-sm" style={{ background: dashboardSeries[key].color }}/>{label(key)}</label>)}</fieldset>
+    <fieldset className="flex flex-wrap gap-x-5 gap-y-3 px-4 pt-3"><legend className="sr-only">Series de la gráfica</legend>{available.map(key => <label key={key} className="flex min-h-8 items-center gap-2 text-xs text-slate-700"><input type="checkbox" aria-label={label(key)} checked={shown.has(key)} onChange={() => setShown(previous => { const next = new Set(previous); if (next.has(key)) next.delete(key); else next.add(key); return next; })}/><span className="h-2 w-4 rounded-sm" style={{ background: dashboardSeries[key].color }}/>{label(key)}</label>)}</fieldset>
   </section>;
 }
