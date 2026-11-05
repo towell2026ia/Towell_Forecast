@@ -1,6 +1,8 @@
 "use client";
 import { useMemo, useState } from "react";
-import { canonicalLabel, piecesChartRows, filterPlanning, nextWindow, noPlanningFilters, parsePiecesPlanning, piecesPlanningSheets, projectionAt, scopeKey, type PlanningBundle, type PlanningFilters } from "@/lib/planning-results";
+import { canonicalLabel, piecesChartRows, filterPlanning, nextWindow, noPlanningFilters, parsePiecesPlanning, projectionAt, scopeKey, type PlanningBundle, type PlanningFilters } from "@/lib/planning-results";
+import { operationalPlanningSheets } from "@/lib/planning-operations";
+import { planningXlsx } from "@/lib/planning-xlsx";
 import { dashboardSeries, type DashboardPoint, type DashboardSeries } from "@/lib/periods-dashboard";
 import { PeriodsComparisonChart } from "./periods-comparison-chart";
 
@@ -15,15 +17,23 @@ export function PlanningPeriods({ initialBundle }: { initialBundle?: PlanningBun
   const [filters,setFilters] = useState<PlanningFilters>(noPlanningFilters), [view,setView] = useState("Por color"), [window,setWindow] = useState<2|3>(2), [page,setPage] = useState(0);
   const version = bundle?.versions.find(v=>v.id===selected);
   const products = useMemo(()=>version ? filterPlanning(version,filters):[],[version,filters]);
-  const sheets=useMemo(()=>bundle&&version?piecesPlanningSheets(bundle,version,filters):[],[bundle,version,filters]);
-  const viewSheets: Record<string,string> = {"Productos":"Productos","Por color":"Champion_por_color","Histórico":`Historico_${source}`,"Por modelo":"Plan_anual_por_modelo","Provisionales":"Pronostico_provisional","Revisiones":"Revisiones_y_reales","WAPE":"Metricas_y_cobertura"};
+  const sheets=useMemo(()=>bundle&&version?operationalPlanningSheets(bundle,version,filters):[],[bundle,version,filters]);
+  const viewSheets: Record<string,string> = {"Productos":"Productos","Por color":"Champion_por_color","Histórico":`Historico_${source}`,"Por modelo":"Plan_anual_por_modelo","Provisionales":"Pronostico_provisional","Revisiones":"Revisiones_y_reales","WAPE":"Metricas_y_cobertura","Anual por color":"Plan_anual_por_color","Inventario por color":"Inventario_PV_color","Inventario por modelo":"Inventario_por_modelo","Series comerciales":"Series_comerciales"};
   const sheet = sheets.find(s=>s.name===viewSheets[view]);
-  const mode = view==="Por modelo" ? "model" : view==="Provisionales" ? "provisional" : "color";
+  const mode = view==="Por modelo" ? "model" : (view==="Provisionales" || view==="Anual por color") ? "provisional" : "color";
   const points = useMemo(()=>version ? piecesChartRows(products,version.cutoff,mode,source).map(r=>{
     const values = Object.fromEntries(Object.keys(dashboardSeries).map(k=>[k,null])) as DashboardPoint["values"];
     Object.assign(values,{previous2:r.previous2,previous1:r.previous1,actual:r.actual,STATISTICAL:r.forecast});
     return {month:r.period,period:r.period,values,coverage:{...Object.fromEntries(Object.entries(values).map(([key,value])=>[key,{value,covered:0,eligible:products.length}])),...r.coverage} as Record<DashboardSeries,{value:number|null;covered:number;eligible:number}>};
   }):[],[products,version,mode,source]);
+  function download() {
+    try {
+      const bytes=planningXlsx(sheets);
+      const url=URL.createObjectURL(new Blob([bytes as BlobPart],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}));
+      const a=document.createElement("a");a.href=url;a.download=`FORECAST_Towell_V03_${selected.replace(/[^a-zA-Z0-9_-]/g,"_")}_consulta.xlsx`;a.click();
+      setTimeout(()=>URL.revokeObjectURL(url),1000);
+    } catch(err){setError(err instanceof Error?err.message:"No se pudo descargar el XLSX");}
+  }
   function change(key: keyof PlanningFilters, value: string[]) {
     setFilters(f=>({...f,[key]:value,...(key==="scopes"?{models:[],colors:[],sizes:[],products:[]}:key==="models"?{colors:[],sizes:[],products:[]}:key==="colors"||key==="sizes"?{products:[]}: {})}));setPage(0);
   }
@@ -41,6 +51,8 @@ export function PlanningPeriods({ initialBundle }: { initialBundle?: PlanningBun
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5"><Multi label="Cadena / formato" values={filters.scopes} options={opts(version.products.map(scopeKey))} onChange={v=>change("scopes",v)}/><Multi label="Modelo / artículo–tamaño" values={filters.models} options={opts(scoped.map(p=>canonicalLabel(p.model)))} onChange={v=>change("models",v)}/><Multi label="Color / surtido" values={filters.colors} options={opts(modeled.map(p=>canonicalLabel(p.color)))} onChange={v=>change("colors",v)}/><Multi label="Tamaño / presentación" values={filters.sizes} options={opts(modeled.map(p=>canonicalLabel(p.size)))} onChange={v=>change("sizes",v)}/><Multi label="Producto" values={filters.products} options={colored.map(p=>({value:p.id,label:`${p.description} · ${p.barcode} · ${p.account} / ${p.format}`}))} onChange={v=>change("products",v)}/></div>
       <p className="text-sm">{products.length} variantes · {products.filter(p=>p.status==="PROVISIONAL").length} con proyección provisional · Sin Champion acreditado. Las clasificaciones conservan sus pendientes.</p>
       <p data-testid="unit-summary" className="rounded bg-slate-50 p-3 text-sm">PIEZAS · {products.filter(p=>p.projection.some(h=>h.value!==null)).length} productos con pronóstico · {products.filter(p=>!p.projection.some(h=>h.value!==null)).length} sin pronóstico. Cobertura: {products.reduce((n,p)=>n+p.projection.filter(h=>h.value!==null).length,0)}/{products.length*14} producto-meses. {products.filter(p=>!p.commercial_code).length} sin código comercial: agrupación individual.</p>
+      <p className="rounded bg-slate-50 p-3 text-sm" data-testid="inventory-status">Inventario en punto de venta: Sin dato. Estructura preparada; sin carga de existencias. Fcst Cliente y Entrega: Sin dato. Cliente histórico permanece como referencia independiente.</p>
+      <button type="button" className="rounded border border-slate-300 px-4 py-2 text-sm" onClick={download}>Descargar XLSX de esta consulta</button>
       <label className="block text-sm">Vista <select aria-label="Vista de planeación" value={view} onChange={e=>{setView(e.target.value);setPage(0);}}>{Object.keys(viewSheets).map(v=><option key={v}>{v}</option>)}</select></label>
       <label className="block text-sm">Serie histórica <select aria-label="Serie histórica" value={source} onChange={e=>{setSource(e.target.value as typeof source);setPage(0);}}><option>Towell</option><option>Cliente</option><option>Pedidos</option></select></label>
       <PeriodsComparisonChart key={`${selected}/${mode}/${source}`} points={points} year={Number(version.cutoff.slice(0,4))} planning={{unit:"PIEZAS",source,provisional:mode!=="color"}}/>

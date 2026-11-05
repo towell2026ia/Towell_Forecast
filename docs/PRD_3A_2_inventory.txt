@@ -1,0 +1,54 @@
+PRD 3A.2 — local presentation and inventory structure
+
+Scope clarification: inventory is structure only, per user confirmation. No stock
+was supplied, inferred from price/PV columns, or loaded. No production migration,
+write endpoint, ingestion role or deployment is enabled by this work.
+
+Existing public monthly_observations supports SALES/ORDER/DELIVERY at monthly
+product grain. It has no stores. Customer forecasts have their own version/row
+tables. The inventory migration is additive and does not change those contracts.
+
+pos_inventory_snapshots fixes chain, account, day, immutable version and expected
+store set. Observations reference snapshot and chain-compatible product, with one
+quantity in PIEZAS per product/store. Missing rows are unknown; zero is a real
+value. Duplicate stores/observations, incompatible chains, negative/nonfinite
+quantities and row updates/deletes are rejected. Read RLS uses private.can_chain.
+Runtime roles including service_role have no write privileges. A future ingestion
+PRD must authenticate the uploader, map source accounts/stores/product IDs to the
+catalog and finalize an atomic immutable snapshot before exposing it. There is no
+automatic mapping from the private account|barcode identity to a Supabase UUID.
+DB owner access remains administrative and is outside the runtime permissions.
+
+The pure inventorySummary helper requires an explicit single date/version and
+product/store scope, rejects mixed scopes and duplicates, and labels incomplete
+Cartesian coverage. It is not fed fabricated rows and is not an ingestion route.
+Inventario_PV_color and Inventario_por_modelo contain catalog coverage markers,
+not stock observations; quantities, stores and dates remain blank.
+
+Forecasts: operationalPlanningSheets reuses piecesPlanningSheets and
+piecesModelRows. No engine call or model-level fit is added. All model totals
+retain account, chain, format, presentation and commercial code boundaries;
+missing codes remain isolated. Existing forecasts, original emission dates,
+reviews, WAPE and Champion states are untouched. V03 is a presentation version,
+not a new forecast issuance. Revision creation is still explicit in the existing
+pilot workflow; merely opening or downloading does not create a revision.
+
+Series are independent: existing Towell history is Venta, Pedidos is Pedido;
+Fcst Towell provisional comes from the frozen forecast. Cliente history remains
+Cliente referencia. Fcst Cliente and Entrega have no accredited source in this
+pilot and remain blank. No series are summed together. Raw history sheets keep
+all original observations; Series_comerciales accredits reals only through close.
+
+Private package preparation (Node 24):
+ node scripts/prepare-operational-plan.mjs PRIVATE_V02.json NEW_PRIVATE_V03.json
+The output paths must be new. XLSX authoring uses the existing bundled-runtime
+export-pieces-plan script with the prepared tables. UI imports the same package
+locally. The browser download uses the exact shared tables for selected filters
+and version, with numeric cells and literal text (no formula interpretation),
+offline OOXML ZIP, header freeze and autofilters. The formatted deliverable and
+browser export may differ in formatting/header row placement, not business values.
+
+Rollback: revert the application commit for local UI. For a separately approved
+database migration, the supplied manual rollback refuses to drop nonempty tables.
+No existing SQL migration is modified. Never run rollback on production without
+separate review and authorization.
