@@ -1,0 +1,80 @@
+FORECAST Towell — Fase 3A / equivalencias locales
+
+ALCANCE
+El motor Python, sus pronósticos, SQL, bases productivas y publicaciones no cambian.
+La versión base sigue siendo inmutable. Las conversiones son una vista desechable
+en memoria, no un nuevo pronóstico ni un Champion. No se persiste en el navegador.
+Los WAPE existentes conservan su interpretación retrospectiva y su unidad original;
+importar equivalencias no recalcula WAPE ni acredita LIVE.
+
+CATÁLOGO
+scripts/export-unit-catalog.mjs crea tres hojas: Equivalencias, Conflictos y Guia.
+Usa exclusivamente una base privada existente. Una fila inicial por identidad
+comercial y fuente (Towell, Cliente, Pedidos). No rellena unidades, factores,
+vigencias, evidencia ni responsables. El destino solicitado es piezas.
+Los campos de empaque son referencias informativas, no evidencia del histórico.
+La columna Identidad conserva cuenta|código de barras; el código permanece texto.
+
+PREPARACIÓN E IMPORTACIÓN (desde la raíz del repositorio)
+Python requiere openpyxl; Node >=22.13 y las dependencias del repositorio.
+
+python scripts/import-unit-catalog.py --catalog RUTA_PRIVADA/Catalogo_Equivalencias_Resurtibles.xlsx --base RUTA_PRIVADA/PILOTO_V01.json --output RUTA_PRIVADA/equivalencias_V02.json
+
+No utilizar rutas públicas ni guardar los archivos comerciales en el checkout.
+El importador abre el Excel en modo de lectura, sin actualizar vínculos externos.
+Rechaza fórmulas/errores en las filas de datos, códigos de barras numéricos,
+encabezados cambiados y catálogos vinculados a otra versión/hash.
+No sobrescribe salidas existentes. Cada importación debe tener un nombre nuevo.
+El JSON normalizado conserva evidencia, vigencias, estado, responsable y fecha.
+
+VALIDACIÓN COMPARTIDA
+lib/unit-equivalences.ts es la misma implementación en CLI y en el navegador.
+Exige correspondencia exacta de fuente, cuenta, cadena, formato, código y atributos
+con la base. Ninguna fuente/producto de la base puede omitirse. Las nuevas vigencias
+se agregan como filas de la misma identidad; no crear productos nuevos.
+El factor, cuando se proporciona, debe ser finito y positivo. Validado requiere
+unidad explícita, destino piezas, evidencia documental, responsable y fecha no
+futura. Planeación debe verificar realmente el documento y la autoridad del
+responsable: el archivo local no es un sistema de firma o aprobación autenticada.
+Un texto que declare sólo una referencia de empaque/propuesta se rechaza.
+Pendiente y Rechazado jamás se aplican. No se permiten filas duplicadas ni
+intervalos de aprobación superpuestos, incluso si los factores coinciden.
+
+VIGENCIAS Y CONVERSIÓN
+Se usan meses completos: inicio primer día y fin último día. Se exige fin explícito;
+no se prorratea una observación mensual. Una regla nunca se toma de otra fuente.
+Los históricos se convierten sólo en su mes acreditado. Para los pronósticos ya
+calculados se exige además la misma unidad y factor para todas las observaciones
+Towell utilizadas desde training_start hasta el corte, para el corte y para el mes
+objetivo. Si faltan o cambian, el pronóstico nativo permanece disponible y sus
+piezas quedan vacías. No se modifica ni se vuelve a entrenar el modelo.
+Cambios de unidad que exijan recalibración quedan fuera de esta fase.
+Se conservan decimales y ceros; vacío continúa vacío. Se rechaza overflow numérico.
+Versiones anteriores con atributos incompatibles no reciben equivalencias nuevas.
+
+PERÍODOS LOCAL
+Abrir /planeacion-privada y cargar primero el JSON V01. Importar después el JSON
+normalizado del catálogo. No se suben archivos ni se llama a servicios externos.
+Unidades presenta ambas cantidades, fuente, periodo, factor, evidencia y motivo.
+Provisionales conserva las cifras nativas y añade columnas de piezas acreditadas.
+La gráfica existente permite elegir piezas; con varias variantes sólo consolida
+piezas acreditadas. Por modelo exige además código comercial, conserva grupos por
+cuenta/formato/artículo/código y reporta cobertura parcial. Los indicadores cuentan
+productos con al menos un mes convertible; no implican cobertura completa anual.
+El denominador de cobertura incluye las 14 posiciones esperadas de cada producto,
+incluidos los productos sin pronóstico. Los vacíos nunca se presentan como cero.
+Las vistas histórico, revisiones y WAPE mantienen sus etiquetas de unidad de origen.
+
+REVERSIÓN
+Quitar equivalencias o recargar la página elimina la vista derivada. Reabrir V01
+restaura la consulta original. No hay migraciones, cambios de flags ni rollback SQL.
+No reexportar el objeto derivado como paquete de pronósticos: sus id/hash identifican
+la base, no un cálculo nuevo. El JSON del catálogo y los reportes se versionan aparte.
+
+VERIFICACIÓN
+node node_modules/vitest/vitest.mjs run --no-file-parallelism --maxWorkers=1
+python scripts/test_import_unit_catalog.py
+node node_modules/typescript/bin/tsc --noEmit
+Los tests positivos utilizan exclusivamente identidades y evidencia sintéticas.
+La conciliación del catálogo real y SHA256 de los archivos privados queda en el
+informe privado de la entrega; nunca se incorpora la información comercial a Git.

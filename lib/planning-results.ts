@@ -64,8 +64,8 @@ export function modelRows(products: PlanningProduct[], months: string[]) {
     months: months.map(month => { const values = rows.map(p => p.commercial_code ? projectionAt(p, month, true) : null).filter((x): x is number => x !== null); return { period: month, value: values.length ? values.reduce((s, x) => s + x, 0) : null, covered: values.length }; }),
   }));
 }
-export function chartRows(products: PlanningProduct[], cutoff: string, mode: "color" | "provisional" | "model") {
-  const single = products.length === 1 && mode !== "model";
+export function chartRows(products: PlanningProduct[], cutoff: string, mode: "color" | "provisional" | "model", pieces = false) {
+  const single = products.length === 1 && mode !== "model" && !pieces;
   const total = (values: (number | null)[]) => ({ value: values.some(x => x !== null) ? values.reduce<number>((s, x) => s + (x ?? 0), 0) : null, covered: values.filter(x=>x!==null).length, eligible: products.length });
   return Array.from({ length: 12 }, (_, i) => {
     const period = addPlanningMonth(cutoff, i - 8);

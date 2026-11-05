@@ -17,11 +17,11 @@ export function PeriodsComparisonChart({ points, year, planning }: { points: Das
       <ResponsiveContainer width="100%" height="100%" minWidth={0} initialDimension={{ width: 900, height: 420 }}>
         <ComposedChart data={records} margin={{ top: 12, right: 18, bottom: 8, left: 4 }} accessibilityLayer>
           <CartesianGrid stroke="#e8edf2" vertical={false}/><XAxis dataKey="month" tickLine={false} axisLine={false} tick={{ fontSize: 12 }}/><YAxis width={60} tickLine={false} axisLine={false} tick={{ fontSize: 11 }} tickFormatter={v => Intl.NumberFormat("es-MX", { notation: "compact" }).format(v)}/>
-          <ReferenceArea x1={planning ? points[9]?.month : "Oct"} x2={planning ? points[11]?.month : "Dic"} fill="#e4f0e9" fillOpacity={0.55} label={{ value: planning ? planning.provisional ? "Provisional" : "Champion" : "Forecast", position: "insideTop", fontSize: 11, fill: "#52665a" }}/>
+          <ReferenceArea x1={planning ? points[9]?.month : "Oct"} x2={planning ? points[11]?.month : "Dic"} fill="#e4f0e9" fillOpacity={0.55} label={{ value: planning ? planning.provisional ? "Provisional" : "Sin Champion" : "Forecast", position: "insideTop", fontSize: 11, fill: "#52665a" }}/>
           <Tooltip content={({ active, label: month, payload }) => {
             if (!active || !payload?.length) return null;
             const point = points.find(p => p.month === month);
-            return <div className="max-w-72 rounded-md border border-slate-200 bg-white p-3 text-xs shadow-md"><strong>{month} · {year}</strong>{point && [...shown].map(key => {
+            return <div className="max-w-72 rounded-md border border-slate-200 bg-white p-3 text-xs shadow-md"><strong>{planning ? month : `${month} · ${year}`}</strong>{point && [...shown].map(key => {
               const q = point.coverage[key];
               return <p key={key} className="mt-2"><span style={{ color: dashboardSeries[key].color }}>{label(key)}</span>: {reportNumber(q.value)}<span className="block text-slate-500">Cobertura {q.covered}/{q.eligible}{q.covered && q.covered < q.eligible ? " · Parcial" : ""}</span></p>;
             })}</div>;
