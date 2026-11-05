@@ -1,8 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { unitSources, unitView, validateUnitCatalog, unitCoverageRows, type UnitCatalog, type UnitRule } from "../../lib/unit-equivalences";
 import { chartRows, modelRows, type PlanningBundle, type PlanningProduct } from "../../lib/planning-results";
-import { PlanningPeriods } from "../../components/forecast/planning-periods";
 vi.mock("../../components/forecast/periods-comparison-chart",()=>({PeriodsComparisonChart:()=> <div>Shared chart</div>}));
 
 function fixture(): PlanningBundle {
@@ -59,15 +57,10 @@ describe("Fase 3A equivalences (synthetic evidence only)",()=>{
     c.rows[0].status="Validado";const previous=structuredClone(b.versions[0]);previous.products[0].barcode="different";b.versions.unshift(previous);expect(unitView(b,c).versions[0].products[0].projection[0].pieces).toBeNull();
   });
   it("rejects numeric overflow rather than showing infinite pieces",()=>{const b=fixture(),c=catalog(b);approve(c.rows[0],Number.MAX_VALUE);expect(()=>unitView(b,c)).toThrow(/rango/);});
-  it("imports in memory, shows accredited coverage, removes it and makes no network requests",async()=>{
+  it("retains archived Fase 3A conversion as a detached function without network requests",()=>{
     const b=fixture(),c=catalog(b);approve(c.rows[0]);const fetcher=vi.spyOn(globalThis,"fetch");
-    render(<PlanningPeriods initialBundle={b}/>);
-    expect(screen.getByTestId("unit-summary").textContent).toContain("0 productos con pronóstico convertible");
-    fireEvent.change(screen.getByLabelText("Importar equivalencias validadas"),{target:{files:[{size:100,text:async()=>JSON.stringify(c)}]}});
-    await waitFor(()=>expect(screen.getByTestId("unit-summary").textContent).toContain("1 productos con pronóstico convertible"));
-    fireEvent.change(screen.getByLabelText("Vista de planeación"),{target:{value:"Unidades"}});
-    expect(screen.getByText("Cantidad original")).toBeTruthy();expect(screen.getByText("Piezas acreditadas",{selector:"th"})).toBeTruthy();
-    fireEvent.click(screen.getByText("Quitar equivalencias"));expect(screen.getByTestId("unit-summary").textContent).toContain("0 productos con pronóstico convertible");
+    expect(unitView(b,c).versions[0].products[0].projection[0].pieces).toBe(2.25);
+    expect(b.versions[0].products[0].projection[0].pieces).toBeNull();
     expect(fetcher).not.toHaveBeenCalled();fetcher.mockRestore();
   });
 });

@@ -1,0 +1,72 @@
+PRD 3A.1 — Planeación privada exclusivamente en piezas
+
+La confirmación expresa de negocio sustituye la interpretación de unidades de
+Fase 3A: Towell, Cliente y Pedidos son tres series independientes en PIEZAS.
+La vista de planeación ya no importa equivalencias ni consulta factores de
+empaque. Las herramientas anteriores permanecen disponibles para auditoría de
+versiones antiguas, fuera del flujo operativo actual.
+
+Preparación reproducible, sin invocar el motor:
+  node --experimental-strip-types scripts/prepare-pieces-plan.mjs
+    original.json confirmacion.json nuevo.json
+
+Los tres argumentos deben ir en una misma línea. confirmacion.json contiene
+prd=3A.1, unit=PIEZAS, sources=[Towell,Cliente,Pedidos], statement,
+confirmed_by, recorded_at (ISO UTC) y presentation_version.
+El preparador incorpora SHA256 del archivo original y referencias id/hash de
+las versiones. Conserva íntegramente versions, incluidos los valores originales
+y los campos de empaque para auditoría. No multiplica cantidades, no entrena y
+no cambia las fechas reales de emisión ni los hashes del cálculo.
+Rechaza sobrescribir el JSON o las tablas existentes.
+
+El JSON nuevo incluye pieces_confirmation y puede abrirse en
+/planeacion-privada, únicamente en memoria del navegador. No hay envío al
+servidor, importación productiva, selección ni publicación de Champion.
+V02-PIEZAS es una versión de presentación; no una nueva emisión del pronóstico.
+
+Exportación con el runtime de hojas de cálculo:
+  node scripts/export-pieces-plan.mjs nuevo.json.tables.json nuevo.xlsx
+    ruta-al-runtime-node
+También requiere una sola línea. Usa @oai/artifact-tool del runtime y rechaza
+sobrescritura. Los archivos comerciales deben quedar fuera del repositorio.
+Se crean trece hojas, tres históricos independientes y vistas que comparten
+piecesPlanningSheets con Períodos. Los totales anuales usan SUM por fila; no se
+suman las hojas de fuentes ni la ventana de consulta nuevamente al plan anual.
+
+Identidad y consolidación:
+- Una fila por id comercial en Productos y en cada histórico independiente.
+- Duplicados de identidad se rechazan; códigos de barras permanecen como texto.
+- Se homologan mayúsculas y espacios sólo en las claves de filtro/agrupación.
+- Grupo: cuenta, cadena, formato, modelo, tamaño y código comercial.
+- Si falta código comercial se aísla por identidad; no se oculta su pronóstico.
+- Los colores y tamaños distintos conservan sus identidades. Los surtidos
+  permanecen como surtidos, sin distribución artificial.
+- La cobertura indica variantes presentes/esperadas por mes. Ausencia no es cero.
+
+Champion y revisiones:
+El contrato del piloto contiene champion=null. Por color muestra Sin Champion;
+las proyecciones se consultan en Provisionales. No hay adopción automática.
+Las revisiones existentes se muestran por identidad, mes y emisión, junto al
+plan original y los tres reales. No se inventan revisiones futuras. La
+persistencia/agenda automática de revisiones bimestrales no forma parte de este
+flujo local; requiere un trabajo posterior autorizado.
+
+WAPE:
+Se calcula cada fuente por separado, en piezas. LIVE exige el mismo producto,
+real no vacío con periodo <= último cierre confirmado y una emisión anterior
+al primer día del mes evaluado. Se utiliza una sola emisión previa por mes,
+la más reciente con cobertura. Un denominador cero no genera WAPE numérico.
+No se promedian porcentajes entre productos. Retrospectivo conserva la evidencia
+guardada; declarar piezas no crea pares retrospectivos que V01 no almacenó.
+
+Pruebas:
+tests/portal/pieces-planning.test.tsx cubre la confirmación, conservación,
+factores ignorados, null/cero/decimales, fuentes independientes, agrupación sin
+doble conteo, código ausente, ventanas, revisiones y fechas de WAPE LIVE.
+planning-pilot.test.tsx y unit-equivalences.test.tsx conservan regresión de los
+contratos archivados. La validación del catálogo real y las seis muestras vive
+exclusivamente en datos_privados, junto a la exportación.
+
+Protección: no modificaciones al motor Python, SQL, tablas, histórico productivo
+ni C1. Ningún despliegue o publicación está incluido. Para revertir la consulta
+cerrar el paquete; los archivos V01 originales permanecen independientes.

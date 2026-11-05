@@ -58,7 +58,8 @@ describe("private replenishment pilot",()=>{
   });
   it("shows unadopted state and switches annual views without a network write",()=>{
     const fetcher=vi.spyOn(globalThis,"fetch");
-    render(<PlanningPeriods initialBundle={fixture()}/>);
+    const bundle=fixture();bundle.pieces_confirmation={prd:"3A.1",unit:"PIEZAS",sources:["Towell","Cliente","Pedidos"],statement:"Synthetic unit confirmation",confirmed_by:"Synthetic reviewer",recorded_at:"2026-11-05T12:00:00Z",presentation_version:"TEST-PIECES",base_versions:bundle.versions.map(v=>({id:v.id,hash:v.hash})),source_file_sha256:"0".repeat(64)};
+    render(<PlanningPeriods initialBundle={bundle}/>);
     fireEvent.change(screen.getByLabelText("Vista de planeación"),{target:{value:"Provisionales"}});
     expect(screen.getByRole("table",{name:"Matriz de planeación"})).toBeTruthy();
     expect(screen.getByLabelText("Modelo / artículo–tamaño").querySelectorAll("option")).toHaveLength(2);

@@ -6,10 +6,11 @@ import { dashboardSeries, type DashboardPoint, type DashboardSeries } from "@/li
 import { reportNumber } from "@/app/report-controls";
 
 const initial = new Set<DashboardSeries>(["previous2", "previous1", "actual", "STATISTICAL", "ML", "ENSEMBLE", "TOWELL"]);
-export function PeriodsComparisonChart({ points, year, planning }: { points: DashboardPoint[]; year: number; planning?: { unit: string; provisional: boolean } }) {
+export function PeriodsComparisonChart({ points, year, planning }: { points: DashboardPoint[]; year: number; planning?: { unit: string; provisional: boolean; source?: "Towell"|"Cliente"|"Pedidos" } }) {
   const available: DashboardSeries[] = planning ? ["previous2", "previous1", "actual", ...(planning.provisional ? ["STATISTICAL" as const] : [])] : Object.keys(dashboardSeries) as DashboardSeries[];
   const [shown, setShown] = useState(new Set([...initial].filter(k => available.includes(k))));
-  const label = (key: DashboardSeries) => planning ? ({ previous2: "Venta año −2", previous1: "Venta año −1", actual: "Venta Towell", STATISTICAL: "Estadístico provisional" }[key as string] ?? dashboardSeries[key].label) : key === "previous2" ? `Venta ${year - 2}` : key === "previous1" ? `Venta ${year - 1}` : `${dashboardSeries[key].label} ${year}`;
+  const historyLabel=planning?.source==="Pedidos"?"Pedido Towell":planning?.source==="Cliente"?"Cliente":"Venta Towell";
+  const label = (key: DashboardSeries) => planning ? ({ previous2: `${historyLabel} año −2`, previous1: `${historyLabel} año −1`, actual: historyLabel, STATISTICAL: "Estadístico provisional" }[key as string] ?? dashboardSeries[key].label) : key === "previous2" ? `Venta ${year - 2}` : key === "previous1" ? `Venta ${year - 1}` : `${dashboardSeries[key].label} ${year}`;
   const records = points.map(p => ({ ...p, ...p.values }));
   return <section aria-label="Gráfica comparativa comercial" className="min-w-0 border-y border-slate-200 bg-white py-5">
     <div className="flex flex-wrap items-center justify-between gap-2 px-4"><h2 className="text-lg font-semibold text-slate-950">Comparativo comercial</h2><span className="text-xs text-slate-500">{planning ? `${planning.unit} · Nueve meses hasta el corte y tres posteriores` : "Unidades · Ene–Sep real / Oct–Dic forecast disponible"}</span></div>
