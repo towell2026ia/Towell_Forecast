@@ -3,13 +3,14 @@
 import { useState } from "react";
 import { Bar, CartesianGrid, ComposedChart, Line, ReferenceArea, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { dashboardSeries, type DashboardPoint, type DashboardSeries } from "@/lib/periods-dashboard";
+import { planningSourceLabels } from "@/lib/planning-source-audit";
 import { reportNumber } from "@/app/report-controls";
 
 const initial = new Set<DashboardSeries>(["previous2", "previous1", "actual", "STATISTICAL", "ML", "ENSEMBLE", "TOWELL"]);
 export function PeriodsComparisonChart({ points, year, planning }: { points: DashboardPoint[]; year: number; planning?: { unit: string; provisional: boolean; source?: "Towell"|"Cliente"|"Pedidos" } }) {
   const available: DashboardSeries[] = planning ? ["previous2", "previous1", "actual", ...(planning.provisional ? ["STATISTICAL" as const] : [])] : Object.keys(dashboardSeries) as DashboardSeries[];
   const [shown, setShown] = useState(new Set([...initial].filter(k => available.includes(k))));
-  const historyLabel=planning?.source==="Pedidos"?"Pedido Towell":planning?.source==="Cliente"?"Cliente":"Venta Towell";
+  const historyLabel=planningSourceLabels[planning?.source ?? "Towell"];
   const label = (key: DashboardSeries) => planning ? ({ previous2: `${historyLabel} año −2`, previous1: `${historyLabel} año −1`, actual: historyLabel, STATISTICAL: "Estadístico provisional" }[key as string] ?? dashboardSeries[key].label) : key === "previous2" ? `Venta ${year - 2}` : key === "previous1" ? `Venta ${year - 1}` : `${dashboardSeries[key].label} ${year}`;
   const records = points.map(p => ({ ...p, ...p.values }));
   return <section aria-label="Gráfica comparativa comercial" className="min-w-0 border-y border-slate-200 bg-white py-5">

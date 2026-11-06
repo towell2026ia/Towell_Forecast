@@ -38,6 +38,7 @@ jobs:
       - run: python -m unittest services.forecast_engine.test_engine -q
       - run: python -m unittest services.forecast_engine.test_retrospective -q
       - run: python -m unittest services.forecast_engine.test_selection_policy -q
+      - run: python -m unittest services.inventory_preflight.test_validator services.inventory_preflight.test_reconciliation -q
       - run: python -m unittest services.planning_pilot.test_engine -q
       - run: python scripts/test_import_unit_catalog.py
       - run: python scripts/audit_forecast_engine.py

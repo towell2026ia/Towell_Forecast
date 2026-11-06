@@ -1,7 +1,7 @@
 "use client";
 import { useMemo, useState } from "react";
 import { canonicalLabel, piecesChartRows, filterPlanning, nextWindow, noPlanningFilters, parsePiecesPlanning, projectionAt, scopeKey, type PlanningBundle, type PlanningFilters } from "@/lib/planning-results";
-import { operationalPlanningSheets } from "@/lib/planning-operations";
+import { auditedPlanningSheets, planningSourceLabels, sourceAuditNotice } from "@/lib/planning-source-audit";
 import { planningXlsx } from "@/lib/planning-xlsx";
 import { dashboardSeries, type DashboardPoint, type DashboardSeries } from "@/lib/periods-dashboard";
 import { PeriodsComparisonChart } from "./periods-comparison-chart";
@@ -17,7 +17,7 @@ export function PlanningPeriods({ initialBundle }: { initialBundle?: PlanningBun
   const [filters,setFilters] = useState<PlanningFilters>(noPlanningFilters), [view,setView] = useState("Por color"), [window,setWindow] = useState<2|3>(2), [page,setPage] = useState(0);
   const version = bundle?.versions.find(v=>v.id===selected);
   const products = useMemo(()=>version ? filterPlanning(version,filters):[],[version,filters]);
-  const sheets=useMemo(()=>bundle&&version?operationalPlanningSheets(bundle,version,filters):[],[bundle,version,filters]);
+  const sheets=useMemo(()=>bundle&&version?auditedPlanningSheets(bundle,version,filters):[],[bundle,version,filters]);
   const viewSheets: Record<string,string> = {"Productos":"Productos","Por color":"Champion_por_color","Histórico":`Historico_${source}`,"Por modelo":"Plan_anual_por_modelo","Provisionales":"Pronostico_provisional","Revisiones":"Revisiones_y_reales","WAPE":"Metricas_y_cobertura","Anual por color":"Plan_anual_por_color","Inventario por color":"Inventario_PV_color","Inventario por modelo":"Inventario_por_modelo","Series comerciales":"Series_comerciales"};
   const sheet = sheets.find(s=>s.name===viewSheets[view]);
   const mode = view==="Por modelo" ? "model" : (view==="Provisionales" || view==="Anual por color") ? "provisional" : "color";
@@ -30,7 +30,7 @@ export function PlanningPeriods({ initialBundle }: { initialBundle?: PlanningBun
     try {
       const bytes=planningXlsx(sheets);
       const url=URL.createObjectURL(new Blob([bytes as BlobPart],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}));
-      const a=document.createElement("a");a.href=url;a.download=`FORECAST_Towell_V03_${selected.replace(/[^a-zA-Z0-9_-]/g,"_")}_consulta.xlsx`;a.click();
+      const a=document.createElement("a");a.href=url;a.download=`FORECAST_Towell_Consulta_3A3_${selected.replace(/[^a-zA-Z0-9_-]/g,"_")}_consulta.xlsx`;a.click();
       setTimeout(()=>URL.revokeObjectURL(url),1000);
     } catch(err){setError(err instanceof Error?err.message:"No se pudo descargar el XLSX");}
   }
@@ -51,10 +51,10 @@ export function PlanningPeriods({ initialBundle }: { initialBundle?: PlanningBun
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5"><Multi label="Cadena / formato" values={filters.scopes} options={opts(version.products.map(scopeKey))} onChange={v=>change("scopes",v)}/><Multi label="Modelo / artículo–tamaño" values={filters.models} options={opts(scoped.map(p=>canonicalLabel(p.model)))} onChange={v=>change("models",v)}/><Multi label="Color / surtido" values={filters.colors} options={opts(modeled.map(p=>canonicalLabel(p.color)))} onChange={v=>change("colors",v)}/><Multi label="Tamaño / presentación" values={filters.sizes} options={opts(modeled.map(p=>canonicalLabel(p.size)))} onChange={v=>change("sizes",v)}/><Multi label="Producto" values={filters.products} options={colored.map(p=>({value:p.id,label:`${p.description} · ${p.barcode} · ${p.account} / ${p.format}`}))} onChange={v=>change("products",v)}/></div>
       <p className="text-sm">{products.length} variantes · {products.filter(p=>p.status==="PROVISIONAL").length} con proyección provisional · Sin Champion acreditado. Las clasificaciones conservan sus pendientes.</p>
       <p data-testid="unit-summary" className="rounded bg-slate-50 p-3 text-sm">PIEZAS · {products.filter(p=>p.projection.some(h=>h.value!==null)).length} productos con pronóstico · {products.filter(p=>!p.projection.some(h=>h.value!==null)).length} sin pronóstico. Cobertura: {products.reduce((n,p)=>n+p.projection.filter(h=>h.value!==null).length,0)}/{products.length*14} producto-meses. {products.filter(p=>!p.commercial_code).length} sin código comercial: agrupación individual.</p>
-      <p className="rounded bg-slate-50 p-3 text-sm" data-testid="inventory-status">Inventario en punto de venta: Sin dato. Estructura preparada; sin carga de existencias. Fcst Cliente y Entrega: Sin dato. Cliente histórico permanece como referencia independiente.</p>
+      <p className="rounded bg-slate-50 p-3 text-sm" data-testid="inventory-status">{sourceAuditNotice}</p>
       <button type="button" className="rounded border border-slate-300 px-4 py-2 text-sm" onClick={download}>Descargar XLSX de esta consulta</button>
       <label className="block text-sm">Vista <select aria-label="Vista de planeación" value={view} onChange={e=>{setView(e.target.value);setPage(0);}}>{Object.keys(viewSheets).map(v=><option key={v}>{v}</option>)}</select></label>
-      <label className="block text-sm">Serie histórica <select aria-label="Serie histórica" value={source} onChange={e=>{setSource(e.target.value as typeof source);setPage(0);}}><option>Towell</option><option>Cliente</option><option>Pedidos</option></select></label>
+      <label className="block text-sm">Serie histórica <select aria-label="Serie histórica" value={source} onChange={e=>{setSource(e.target.value as typeof source);setPage(0);}}>{Object.entries(planningSourceLabels).map(([key,label])=><option key={key} value={key}>{label}</option>)}</select></label>
       <PeriodsComparisonChart key={`${selected}/${mode}/${source}`} points={points} year={Number(version.cutoff.slice(0,4))} planning={{unit:"PIEZAS",source,provisional:mode!=="color"}}/>
       <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
         <div className="min-w-0"><h3 className="font-semibold">{sheet?.title}</h3><p className="mb-3 text-xs text-slate-500">{sheet?.note}</p><div className="max-h-[600px] overflow-auto"><table className="w-full text-sm" aria-label="Matriz de planeación"><thead className="sticky top-0 bg-slate-100"><tr>{sheet?.headers.map((h,i)=><th key={i} className="min-w-32 border-b p-2 text-left">{h}</th>)}</tr></thead><tbody>{sheet?.rows.slice(page*25,(page+1)*25).map((r,i)=><tr key={i}>{r.map((c,j)=><td key={j} className="border-b p-2">{number(c)}</td>)}</tr>)}</tbody></table></div><div className="flex gap-4 py-3"><button disabled={!page} onClick={()=>setPage(p=>p-1)}>Anterior</button><span>{page+1} / {Math.max(1,Math.ceil((sheet?.rows.length??0)/25))}</span><button disabled={(page+1)*25>=(sheet?.rows.length??0)} onClick={()=>setPage(p=>p+1)}>Siguiente</button></div></div>

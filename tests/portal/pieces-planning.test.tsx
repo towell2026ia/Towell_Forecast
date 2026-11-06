@@ -66,7 +66,7 @@ describe("PRD 3A.1 pieces only",()=>{
    expect(screen.queryByLabelText('Importar equivalencias validadas')).toBeNull();expect(screen.queryByLabelText('Unidad de la gráfica')).toBeNull();
    expect(screen.getByTestId('unit-summary').textContent).toContain('PIEZAS');
    fireEvent.change(screen.getByLabelText('Vista de planeación'),{target:{value:'Histórico'}});fireEvent.change(screen.getByLabelText('Serie histórica'),{target:{value:'Pedidos'}});
-   expect(screen.getByText('Histórico Pedidos · PIEZAS')).toBeTruthy();expect(screen.getByRole('table').querySelectorAll('tbody tr')).toHaveLength(1);
+   expect(screen.getByText('Pedido real · PIEZAS')).toBeTruthy();expect(screen.getByRole('table').querySelectorAll('tbody tr')).toHaveLength(1);
    fireEvent.change(screen.getByLabelText('Vista de planeación'),{target:{value:'Por color'}});expect(screen.getByText('Sin Champion',{selector:'td'})).toBeTruthy();expect(fetcher).not.toHaveBeenCalled();fetcher.mockRestore();
  });
 });

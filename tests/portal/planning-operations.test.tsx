@@ -61,3 +61,38 @@ describe("PRD 3A.2 additive inventory structure",()=>{
   expect(screen.getByRole('table').textContent).toContain('Tienda');
  });
 });
+
+
+import { auditedPlanningSheets, planningSourceLabels } from "../../lib/planning-source-audit";
+describe("PRD 3A.3 accredited source semantics",()=>{
+ it("separates forecasts from actuals without changing any frozen value or WAPE",()=>{
+  const b=fixture(),v=b.versions[0];
+  v.products[0].history.Cliente["2026-11"]={...v.products[0].history.Cliente["2026-10"],value:123.45};
+  const before=JSON.stringify(b);
+  const old=operationalPlanningSheets(b,v),current=auditedPlanningSheets(b,v);
+  expect(JSON.stringify(b)).toBe(before);
+  const s=current.find(s=>s.name==="Series_comerciales")!,r=s.rows.find(r=>r[9]==="2026-10")!;
+  expect(r.slice(10)).toEqual([null,5.25,30,20,null,null,"Sin Champion"]);
+  expect(s.rows.find(r=>r[9]==="2026-11")![12]).toBe(123.45);
+  const zero=s.rows.find(r=>r[9]==="2026-09")!;
+  expect(zero[s.headers.indexOf("Fcst Towell histórico")]).toBe(0);
+  expect(zero[s.headers.indexOf("Venta real")]).toBeNull();
+  const oldMetrics=old.find(s=>s.name==="Metricas_y_cobertura")!;
+  expect(current.find(s=>s.name==="Metricas_y_cobertura")!.rows).toEqual(oldMetrics.rows);
+  expect(current.find(s=>s.name==="Metricas_y_cobertura")!.title).toContain("heredado");
+  const revisions=current.find(s=>s.name==="Revisiones_y_reales")!;
+  expect(revisions.headers).toContain(planningSourceLabels.Towell);
+  expect(revisions.rows.every(r=>r.slice(-2).every(c=>c===null))).toBe(true);
+  for(const name of ["Plan_anual_por_color","Plan_anual_por_modelo","Pronostico_provisional"])
+   expect(current.find(s=>s.name===name)!.rows).toEqual(old.find(s=>s.name===name)!.rows);
+ });
+ it("uses the same audited matrix for screen and downloadable sheets",()=>{
+  const b=fixture();render(<PlanningPeriods initialBundle={b}/>);
+  fireEvent.change(screen.getByLabelText("Vista de planeación"),{target:{value:"Series comerciales"}});
+  const table=screen.getByRole("table");
+  expect(table.textContent).toContain("Fcst Cliente recibido");
+  expect(table.textContent).toContain("Venta real");
+  expect(screen.getByTestId("inventory-status").textContent).toContain("bloqueada");
+  expect(screen.getByRole("option",{name:"Fcst Towell histórico"})).toBeTruthy();
+ });
+});
