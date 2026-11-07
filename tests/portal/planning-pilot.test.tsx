@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { PlanningPeriods } from "../../components/forecast/planning-periods";
-import { addPlanningMonth, chartRows, filterPlanning, modelRows, nextWindow, noPlanningFilters, parsePlanning, planningSheets, type PlanningBundle, type PlanningProduct } from "../../lib/planning-results";
+import { addPlanningMonth, chartRows, filterPlanning, modelRows, nextWindow, noPlanningFilters, parsePlanning, piecesChartRows, planningSheets, type PlanningBundle, type PlanningProduct } from "../../lib/planning-results";
+import { auditedPlanningSheets } from "../../lib/planning-source-audit";
 vi.mock("../../components/forecast/periods-comparison-chart",()=>({PeriodsComparisonChart:()=> <div>Shared chart</div>}));
 function product(id="A", model="Model"): PlanningProduct {
   return {id,account:"account",chain:"chain",format:"format",barcode:id,description:"Synthetic "+id,model,color:"BLUE",size:"size",commercial_code:"commercial",history:{Towell:{"2026-10":{value:11.125,original:11.125,cell:"Synthetic!A1",pack_factor:12,unit:"pieza",pieces:11.125,unit_evidence:"Synthetic specification"}},Pedidos:{},Cliente:{}},issues:[],champion:null,champion_reason:"Sin Champion",proposal:null,method:"Naive",projection:Array.from({length:14},(_,i)=>({period:addPlanningMonth("2026-10",i+1),horizon:i+1,value:20+i,pieces:20+i,reason:"Synthetic test"})),status:"PROVISIONAL",reason:"Provisional",unit:"pieza",pieces_factor:1,retrospective:{}};
@@ -60,6 +61,16 @@ describe("private replenishment pilot",()=>{
     const fetcher=vi.spyOn(globalThis,"fetch");
     const bundle=fixture();bundle.pieces_confirmation={prd:"3A.1",unit:"PIEZAS",sources:["Towell","Cliente","Pedidos"],statement:"Synthetic unit confirmation",confirmed_by:"Synthetic reviewer",recorded_at:"2026-11-05T12:00:00Z",presentation_version:"TEST-PIECES",base_versions:bundle.versions.map(v=>({id:v.id,hash:v.hash})),source_file_sha256:"0".repeat(64)};
     render(<PlanningPeriods initialBundle={bundle}/>);
+    expect(screen.getByText(/Origen: paquete privado V03 · PROVISIONAL/)).toBeTruthy();
+    expect(screen.getByText("Estadístico por color · Plan anual provisional")).toBeTruthy();
+    expect(screen.getByRole("table",{name:"Matriz de planeación"}).textContent).toContain("Sin Champion");
+    expect(piecesChartRows([bundle.versions[0].products[0]],"2026-10","provisional")[9].forecast).toBe(20);
+    const filtered={...noPlanningFilters,products:["A"]};
+    const sheets=auditedPlanningSheets(bundle,bundle.versions[0],filtered);
+    const annual=sheets.find(s=>s.name==="Plan_anual_por_color")!;
+    expect(annual.rows).toHaveLength(1);
+    expect(annual.rows[0][annual.headers.indexOf("2027-01")]).toBe(22);
+    expect(sheets.find(s=>s.name==="Pronostico_provisional")!.rows[0][11]).toBe(piecesChartRows([bundle.versions[0].products[0]],"2026-10","provisional")[9].forecast);
     fireEvent.change(screen.getByLabelText("Vista de planeación"),{target:{value:"Provisionales"}});
     expect(screen.getByRole("table",{name:"Matriz de planeación"})).toBeTruthy();
     expect(screen.getByLabelText("Modelo / artículo–tamaño").querySelectorAll("option")).toHaveLength(2);
