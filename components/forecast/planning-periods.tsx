@@ -18,7 +18,7 @@ export function PlanningPeriods({ initialBundle }: { initialBundle?: PlanningBun
   const version = bundle?.versions.find(v=>v.id===selected);
   const products = useMemo(()=>version ? filterPlanning(version,filters):[],[version,filters]);
   const sheets=useMemo(()=>bundle&&version?auditedPlanningSheets(bundle,version,filters):[],[bundle,version,filters]);
-  const viewSheets: Record<string,string> = {"Productos":"Productos","Por color":"Plan_anual_por_color","Histórico":`Historico_${source}`,"Por modelo":"Plan_anual_por_modelo","Provisionales":"Pronostico_provisional","Champion por color":"Champion_por_color","Revisiones":"Revisiones_y_reales","WAPE":"Metricas_y_cobertura","Inventario por color":"Inventario_PV_color","Inventario por modelo":"Inventario_por_modelo","Series comerciales":"Series_comerciales"};
+  const viewSheets: Record<string,string> = {"Productos":"Productos","Por color":"Plan_anual_por_color","Histórico":`Historico_${source}`,"Por modelo":"Plan_anual_por_modelo","Provisionales":"Pronostico_provisional","Champion por color":"Champion_por_color","Revisiones":"Revisiones_y_reales","WAPE":"Metricas_y_cobertura","Anual por color":"Plan_anual_por_color","Inventario por color":"Inventario_PV_color","Inventario por modelo":"Inventario_por_modelo","Series comerciales":"Series_comerciales"};
   const sheet = sheets.find(s=>s.name===viewSheets[view]);
   const mode = view==="Por modelo" ? "model" : view==="Champion por color" ? "color" : "provisional";
   const points = useMemo(()=>version ? piecesChartRows(products,version.cutoff,mode,source).map(r=>{
