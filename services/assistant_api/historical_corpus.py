@@ -11,7 +11,7 @@ import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -89,7 +89,11 @@ def number(value: Any) -> tuple[str, str | None]:
         return "INVALID", None
     if not result.is_finite() or result < 0:
         return "INVALID", None
-    return "VALUE", format(result.normalize(), "f")
+    # Decimal.normalize otherwise silently rounds quantities longer than the
+    # process-wide default precision (28 significant digits).
+    with localcontext() as context:
+        context.prec = max(28, len(result.as_tuple().digits))
+        return "VALUE", format(result.normalize(), "f")
 
 
 def _metadata(path: Path) -> dict[str, Any]:

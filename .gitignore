@@ -63,3 +63,4 @@ __pycache__/
 /venv/
 /services/assistant_api/state/
 /supabase/.temp/
+/lab/prd3a8/supabase/.temp/

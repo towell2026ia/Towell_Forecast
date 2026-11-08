@@ -76,6 +76,46 @@ jobs:
           done
           curl -fsS http://127.0.0.1:18080/api/ready >/dev/null
 
+  gateb-postgres:
+    runs-on: ubuntu-latest
+    needs: public-repo
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r services/assistant_api/requirements.txt -r lab/prd3a8/requirements.txt
+      - name: Real isolated PostgreSQL and B0
+        shell: bash
+        run: |
+          set -euo pipefail
+          lab_id=$(python -c 'import uuid;print(uuid.uuid4().hex)')
+          db_name="gateb_ci_${lab_id:0:12}"
+          docker run --rm -d --name gateb-pg --network host \
+            -e POSTGRES_HOST_AUTH_METHOD=trust -e POSTGRES_DB="$db_name" \
+            postgres:17.11@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f -p 65438 -c listen_addresses=127.0.0.1 -c gateb.lab_id="$lab_id"
+          for i in {1..30}; do
+            if python -B scripts/gateb.py probe --port 65438 --database "$db_name" --lab-id "$lab_id" --output "$RUNNER_TEMP/gateb-config.json"; then break; fi
+            sleep 1
+          done
+          test -s "$RUNNER_TEMP/gateb-config.json"
+      - name: Thirty SQL acceptance cases (private T14 explicitly SKIP in CI)
+        run: python -B scripts/gateb.py test --config "$RUNNER_TEMP/gateb-config.json" --output "$RUNNER_TEMP/gateb-report"
+      - name: Synthetic A to B to A evidence
+        run: python -B scripts/gateb.py demonstrate --config "$RUNNER_TEMP/gateb-config.json" --output "$RUNNER_TEMP/gateb-demo"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gateb-synthetic-evidence
+          path: |
+            ${{ runner.temp }}/gateb-report
+            ${{ runner.temp }}/gateb-demo
+      - name: Stop disposable PostgreSQL
+        if: always()
+        run: docker stop gateb-pg || true
+
   frontend:
     runs-on: ubuntu-latest
     needs: public-repo

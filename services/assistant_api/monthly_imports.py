@@ -25,6 +25,8 @@ from .historical_corpus import code, number
 
 PERIOD = re.compile(r"^20\d\d-(0[1-9]|1[0-2])$")
 METRICS = {"sales": "SALES", "order": "ORDER", "delivery": "DELIVERY"}
+HISTORICAL_METRICS = {**METRICS, "fcst_towell_history": "FCST_TOWELL_HISTORY",
+                      "fcst_cliente_history": "FCST_CLIENTE_HISTORY"}
 REQUIRED = ("product_code", "description", "period")
 
 
@@ -35,13 +37,20 @@ class ImportProfileVersion:
     version: int
     columns: dict[str, str]
     sheet: str | None = None
+    include_historical_forecasts: bool = False  # Explicit opt-in; legacy consumers remain three-metric.
+
+    @property
+    def metric_columns(self) -> dict[str, str]:
+        return HISTORICAL_METRICS if self.include_historical_forecasts else METRICS
 
     def validate(self) -> None:
+        if type(self.include_historical_forecasts) is not bool:
+            raise ValueError("invalid_metric_contract")
         if self.version < 1 or not self.chain_id or not self.profile_id:
             raise ValueError("invalid_profile_identity")
         if any(not self.columns.get(field) for field in REQUIRED):
             raise ValueError("incomplete_profile_mapping")
-        if not any(self.columns.get(metric) for metric in METRICS):
+        if not any(self.columns.get(metric) for metric in self.metric_columns):
             raise ValueError("profile_requires_metric")
 
 
@@ -163,7 +172,7 @@ def parse_monthly(content: bytes, filename: str, profile: ImportProfileVersion) 
         if not PERIOD.fullmatch(period):
             errors.append("invalid_period")
         metrics: dict[str, str] = {}
-        for source_name, metric in METRICS.items():
+        for source_name, metric in profile.metric_columns.items():
             column = profile.columns.get(source_name)
             if not column:
                 continue
