@@ -133,6 +133,18 @@ def snapshot(c):
     for t in c.execute("select schemaname,tablename from pg_tables where schemaname in ('public','auth','private') order by 1,2"):
         query=sql.SQL("select count(*) as n,encode(sha256(convert_to(coalesce(string_agg(to_jsonb(x)::text,E'\\n' order by to_jsonb(x)::text),''),'UTF8')),'hex') as hash from {}.{} x").format(sql.Identifier(t['schemaname']),sql.Identifier(t['tablename']))
         result[t['schemaname']+'.'+t['tablename']]=c.execute(query).fetchone()
+    controls=c.execute("""select 'function' as kind,n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||')' as name,
+        pg_get_functiondef(p.oid) as definition from pg_proc p join pg_namespace n on p.pronamespace=n.oid
+        where n.nspname in ('public','private','auth') and p.prokind='f'
+        union all select 'policy',tablename||'.'||policyname,to_jsonb(x)::text from pg_policies x
+        where schemaname in ('public','private','auth')
+        union all select 'trigger',r.relname||'.'||t.tgname,pg_get_triggerdef(t.oid)
+        from pg_trigger t join pg_class r on t.tgrelid=r.oid join pg_namespace n on r.relnamespace=n.oid
+        where not t.tgisinternal and n.nspname in ('public','private','auth')
+        union all select 'view',r.relname,pg_get_viewdef(r.oid,true)||coalesce(r.reloptions::text,'')
+        from pg_class r join pg_namespace n on n.oid=r.relnamespace
+        where r.relkind='v' and n.nspname='public' order by kind,name""").fetchall()
+    result['_schema_controls']={'n':len(controls),'hash':digest(controls)}
     return result
 
 
@@ -159,7 +171,7 @@ def recover(args):
     if after!=before:raise ValueError('ISOLATED_RECOVERY_MISMATCH')
     save(output/'recovery.json',dict(status='PASS',source=lab.config['database'],destination=target,
         synthetic_only=True,tables=before,all_rows_hashes_identical=True,gate_c_executed=False,production_writes=0))
-    return dict(recovery='PASS',tables=len(before),synthetic_only=True,gate_c_executed=False)
+    return dict(recovery='PASS',tables=len(before)-1,schema_controls=before['_schema_controls']['n'],synthetic_only=True,gate_c_executed=False)
 
 
 def main():

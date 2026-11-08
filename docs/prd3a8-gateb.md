@@ -17,7 +17,7 @@ An operator must first provision a fresh, disposable PostgreSQL >=15 instance,
 bound **only** to 127.0.0.1, with `gateb.lab_id=<random 32-hex token>`. No Windows
 service or remote project is required. The local acceptance run uses portable
 PostgreSQL 17.11 and verified Supabase CLI 3.0.0. CLI `migration new` created the
-three new lab migrations. Existing migrations remain untouched.
+four new lab migrations. Existing migrations remain untouched.
 
 Example local config (all values are laboratory metadata, never production
 credentials):
@@ -88,6 +88,10 @@ explicit carry-forward, catalog retention, absences and imported source batches.
 The hash covers the complete document, members, quantities, versions, lineage,
 catalog/physical guards and declared absences; timestamps are canonical in UTC.
 Sealed metadata and members are immutable.
+The global laboratory baseline must include the entire catalog, including
+products without observations, and the complete initial imported selection.
+Additional independent roots are rejected after initialization. Later releases
+must explicitly retain all parent logical keys and catalog products.
 
 The laboratory pointer covers one complete synthetic dataset across two chains.
 It does not choose a production global/per-chain publication policy. The reader

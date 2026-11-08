@@ -263,6 +263,17 @@ class GateBPostgres(unittest.TestCase):
         agg=totals(self.rows(B),PRODUCTS,'ORDER')
         self.assertEqual({k[0] for k in agg},set(CHAINS))
         self.assertEqual(len(agg),4)  # Same design/code across two chains stays separate.
+        with self.assertRaisesRegex(psycopg.Error,'additional_root_not_allowed'),self.c.transaction():
+            self.lab.seal(self.c,draft)
+        incomplete=str(uuid.uuid4());doc=document(self.c,self.b_ids,'missing catalog product')
+        extra=uid('catalog-product-without-forecast')
+        original=self.c.execute('select * from products limit 1').fetchone()
+        self.c.execute('''insert into products(id,chain_id,product_code,description,status,first_seen_period,last_seen_period,created_from_batch_id)
+            values(%s,%s,'999999999999','Synthetic no observations','ACTIVE',%s,%s,%s)''',
+            (extra,original['chain_id'],original['first_seen_period'],original['last_seen_period'],original['created_from_batch_id']))
+        self.lab.build(self.c,incomplete,doc,self.b_ids,A)
+        with self.assertRaisesRegex(psycopg.Error,'incomplete_global_catalog'),self.c.transaction():
+            self.lab.seal(self.c,incomplete)
 
     def test_T28_protected_sources_and_code(self):
         bad=dict(self.lab.config)
