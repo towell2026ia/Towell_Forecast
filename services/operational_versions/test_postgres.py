@@ -283,8 +283,16 @@ class GateBPostgres(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'STOP_B0'): self.lab.put(object(),chain='',product='',period='',metric='',value='1',batch='')
         prefixes=['app','components','lib','services/statistical_engine','services/ml_engine',
                   'services/ensemble_engine','services/forecast_engine','services/planning_pilot','supabase/migrations']
-        changed=subprocess.check_output(['git','diff','3faa061e418ce9bf4355aea227fc170e589b607d','--name-only','--',*prefixes],cwd=REPO,text=True)
-        self.assertEqual(changed.strip(),'')
+        gateb='d6486fc03763d87afb6c23025e7c10afa7ae64a8'
+        before_gateb=subprocess.check_output(['git','diff','--name-only','3faa061e418ce9bf4355aea227fc170e589b607d',gateb,'--',*prefixes],cwd=REPO,text=True)
+        self.assertEqual(before_gateb.strip(),'')
+        # Later PRD 3A.9 authorizes only this private pilot adapter and consultation.
+        approved_prd3a9={
+            'components/forecast/planning-periods.tsx','lib/planning-results.ts','lib/planning-source-audit.ts',
+            'services/planning_pilot/engine.py','services/planning_pilot/test_engine.py',
+        }
+        after_gateb=subprocess.check_output(['git','diff','--name-only',gateb,'--',*prefixes],cwd=REPO,text=True)
+        self.assertEqual(set(after_gateb.splitlines()) - approved_prd3a9,set())
         private=os.environ.get('GATEB_PRIVATE_CANDIDATE')
         if private:
             identities=json.loads((Path(private)/'Identidades.json').read_text(encoding='utf-8'))
