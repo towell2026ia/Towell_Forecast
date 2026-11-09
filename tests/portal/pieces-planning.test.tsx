@@ -85,7 +85,7 @@ describe("PRD 3A.1 pieces only",()=>{
    const commercial=sheets.find(s=>s.name==="Series_comerciales")!;
    expect(commercial.headers.slice(10,16)).toEqual(["Forecast de Pedido real","Fcst Towell histórico","Fcst Cliente recibido","Pedido real","Venta real","Entrega"]);
    render(<PlanningPeriods initialBundle={bundle}/>);
-   expect(screen.getByLabelText<HTMLSelectElement>("Serie histórica").value).toBe("Pedidos");
+   expect(screen.getByRole("option", { name: "Pedido real", selected: true })).toBeTruthy();
    expect(screen.getByText(/Origen: paquete privado V04 · Forecast de Pedido real/)).toBeTruthy();
  });
 });
