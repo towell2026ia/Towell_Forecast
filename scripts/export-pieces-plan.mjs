@@ -32,7 +32,7 @@ for(const [index,spec] of sheets.entries()){
    s.getRange(`A1:A${last}`).format.columnWidth=36;s.getRange(`B1:B${last}`).format.columnWidth=115;s.getRange(`A6:B${last}`).format.wrapText=true;
    spec.rows.forEach((row,i)=>{if(/confirmación$|Emisión original/.test(String(row[0])))s.getRange(`B${i+6}`).setNumberFormat('yyyy-mm-dd hh:mm:ss.000 "UTC"');});
  }
- if(spec.name==='Plan_anual_por_modelo'){
+ if(spec.name==='Plan_anual_por_modelo'&&!spec.headers.includes('Cobertura 2026-11')){
    const total=spec.headers.indexOf('Total parcial anual')+1;
    for(let r=6;r<=last;r++)s.getRange(`${col(total)}${r}`).formulas=[[`=IF(COUNT(H${r}:S${r})=0,"",SUM(H${r}:S${r}))`]];
  }

@@ -20,6 +20,8 @@ SCHEMA = "towell-planning-1"
 MONTHS = "Enero Febrero Marzo Abril Mayo Junio Julio Agosto Septiembre Octubre Noviembre Diciembre".split()
 SOURCES = ("Towell", "Pedidos", "Cliente")
 UNKNOWN_UNIT = "Unidad de origen sin equivalencia acreditada"
+LEGACY_TRAINING = ("Towell", "Venta")
+ORDER_TRAINING = ("Pedidos", "ORDER")
 
 
 def digest(value):
@@ -199,9 +201,17 @@ def extension(method, values, first12):
         return [{"horizon": h, "value": None, "reason": f"Sin cobertura: {exc}", "backtest": wape([])} for h in (13, 14)]
 
 
-def forecast_product(product, cutoff):
+def forecast_product(product, cutoff, *, training_source="Towell", objective="Venta"):
     product = copy.deepcopy(product)
-    periods, values = tail(product["history"]["Towell"], cutoff)
+    configuration = (training_source, objective)
+    if configuration not in (LEGACY_TRAINING, ORDER_TRAINING):
+        raise ValueError("Fuente y objetivo de entrenamiento incompatibles")
+    order = configuration == ORDER_TRAINING
+    if order:
+        for history in product["history"].values():
+            for obs in history.values():
+                obs.update(unit="PIEZAS", pieces=obs["value"], unit_evidence="Confirmación comercial PRD 3A.9")
+    periods, values = tail(product["history"][training_source], cutoff)
     product.update(method=None, projection=[], status="PENDING", reason=None, retrospective={}, candidates=[])
     if product["issues"]:
         product["reason"] = "; ".join(product["issues"])
@@ -210,12 +220,14 @@ def forecast_product(product, cutoff):
         product["reason"] = "Sin serie continua con movimiento hasta el cierre"
         return product
     try:
-        calculated = stat.run_series(product["id"], product["description"], periods, values, "Venta")
+        first = next(i for i, value in enumerate(values) if value > 0)
+        train = values[first:]
+        if order:
+            product["training_periods"] = periods[first:]
+        calculated = stat.run_series(product["id"], product["description"], periods, values, objective)
         if calculated["status"] == "insufficient":
             product["reason"] = calculated["reason"]
             return product
-        first = next(i for i, value in enumerate(values) if value > 0)
-        train = values[first:]
         method = calculated["winner"]
         curve = [x["forecast"] for x in calculated["forecast"]]
         if len(curve) != 12 or not all(math.isfinite(v) for v in curve):
@@ -223,9 +235,9 @@ def forecast_product(product, cutoff):
         product.update(method=method, status="PROVISIONAL", reason="Estadístico provisional; no publicado ni adoptado", candidates=calculated["comparisons"])
         product["alerts"] = calculated["alerts"]
         product["training_start"] = periods[first]
-        training_obs = [product["history"]["Towell"][p] for p in periods[first:]]
+        training_obs = [product["history"][training_source][p] for p in periods[first:]]
         factors = {o.get("pieces_per_unit") for o in training_obs}
-        factor = next(iter(factors)) if len(factors) == 1 and None not in factors else None
+        factor = 1 if order else next(iter(factors)) if len(factors) == 1 and None not in factors else None
         product["unit"] = training_obs[-1]["unit"] if factor else UNKNOWN_UNIT
         product["pieces_factor"] = factor
         ext = extension(method, train, curve)
@@ -235,6 +247,16 @@ def forecast_product(product, cutoff):
                 "pieces": value * factor if value is not None and factor else None, "reason": reason})
         product["extension"] = ext
         predictions = stat.one_step_backtest(periods[first:], train, stat.MODELS[method])
+        if order:
+            product["evaluated_periods"] = list(predictions)
+            product["retrospective"]["Pedidos"] = {
+                **wape((product["history"]["Pedidos"][period]["value"], prediction)
+                       for period, prediction in predictions.items()),
+                "basis": "PIEZAS",
+                "reason": "H1 de origen rodante contra Pedido real; método elegido en la misma muestra, sin validación independiente ni LIVE",
+                "temporal_certification": False,
+            }
+            return product
         for source in SOURCES:
             pairs, basis = [], "piezas"
             for period, prediction in predictions.items():
@@ -255,7 +277,14 @@ def forecast_product(product, cutoff):
 
 
 def make_version(products, audit, *, cutoff, issued_at, version_id, code_sha, previous=None,
-                 closure_confirmed_on=None, closure_confirmed_by="Usuario solicitante"):
+                 closure_confirmed_on=None, closure_confirmed_by="Usuario solicitante",
+                 training_source="Towell", objective="Venta"):
+    configuration = (training_source, objective)
+    if configuration not in (LEGACY_TRAINING, ORDER_TRAINING):
+        raise ValueError("Fuente y objetivo de entrenamiento incompatibles")
+    order = configuration == ORDER_TRAINING
+    if order and previous:
+        raise ValueError("El forecast de Pedido requiere un paquete independiente")
     previous = copy.deepcopy(previous or {"schema": SCHEMA, "versions": []})
     if previous.get("schema") != SCHEMA or any(v["id"] == version_id for v in previous["versions"]):
         raise ValueError("Versión duplicada o esquema incompatible")
@@ -271,7 +300,7 @@ def make_version(products, audit, *, cutoff, issued_at, version_id, code_sha, pr
     projected = []
     for product in products:
         try:
-            projected.append(forecast_product(product, cutoff))
+            projected.append(forecast_product(product, cutoff, training_source=training_source, objective=objective))
         except Exception as exc:
             # A local model/data exception must not discard other identities.
             failed = copy.deepcopy(product)
@@ -287,8 +316,21 @@ def make_version(products, audit, *, cutoff, issued_at, version_id, code_sha, pr
         "previous_hash": digest(previous["versions"][-1]) if previous["versions"] else None,
         "audit": audit, "products": projected,
         "summary": dict(Counter(p["status"] for p in projected)), "live": "No evaluable: no hay pronóstico previo acreditado para estos reales"}
+    if order:
+        version.update(training_source=training_source, objective=objective,
+                       last_quantity=max((m for p in products for m, o in p["history"][training_source].items()
+                                          if o["value"] is not None), default=None),
+                       live="No evaluado. La emisión de noviembre no acredita un pronóstico previo a noviembre.")
     version["hash"] = digest(version)
     previous["versions"].append(version)
+    if order:
+        previous["pieces_confirmation"] = {
+            "prd": "3A.9", "unit": "PIEZAS", "sources": ["Towell", "Cliente", "Pedidos"],
+            "statement": "Confirmación comercial PRD 3A.9: series independientes en piezas sin conversión de empaque.",
+            "confirmed_by": closure_confirmed_by, "recorded_at": issued_at, "presentation_version": "V04",
+            "base_versions": [{"id": version_id, "hash": version["hash"]}],
+            "source_file_sha256": audit["source_sha256"],
+        }
     return previous
 
 
@@ -301,13 +343,19 @@ def main():
     parser.add_argument("--code-sha", required=True)
     parser.add_argument("--units", type=Path)
     parser.add_argument("--previous", type=Path)
+    parser.add_argument("--training-source", choices=("Towell", "Pedidos"), default="Towell")
+    parser.add_argument("--objective", choices=("Venta", "ORDER"), default="Venta")
     parser.add_argument("--closure-confirmed-on", required=True)
     args = parser.parse_args()
+    if (args.training_source, args.objective) == ORDER_TRAINING and args.units:
+        parser.error("Pedido se calcula directamente en piezas sin reglas de conversión")
+    if args.output.exists():
+        parser.error("La salida ya existe; usa un identificador y archivo nuevos")
     products, audit = read_source(args.source)
     apply_units(products, json.loads(args.units.read_text(encoding="utf-8-sig")) if args.units else {})
     bundle = make_version(products, audit, cutoff=args.cutoff, issued_at=datetime.now(timezone.utc).isoformat(), version_id=args.version,
         code_sha=args.code_sha, previous=json.loads(args.previous.read_text(encoding="utf-8")) if args.previous else None,
-        closure_confirmed_on=args.closure_confirmed_on)
+        closure_confirmed_on=args.closure_confirmed_on, training_source=args.training_source, objective=args.objective)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("x", encoding="utf-8") as handle:
         json.dump(bundle, handle, ensure_ascii=False, allow_nan=False)

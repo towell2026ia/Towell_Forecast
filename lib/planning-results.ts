@@ -8,10 +8,10 @@ const metric = z.object({ value: amount, absolute_error: z.number().optional(), 
 const product = z.object({ id: z.string(), account: z.string(), chain: z.string(), format: z.string(), barcode: z.string(), description: z.string(), model: z.string(), color: z.string(), size: z.string(), commercial_code: z.string().nullable().optional(),
   history: z.record(z.record(observation)), issues: z.array(z.string()), champion: z.null(), champion_reason: z.string(),
   proposal: z.object({ period, value: amount, unit: z.string(), cell: z.string(), code_cell: z.string(), code_evidence: z.string() }).nullable(),
-  method: z.string().nullable(), projection: z.array(projection), status: z.enum(["PENDING", "PROVISIONAL"]), reason: z.string().nullable(), unit: z.string().optional(), pieces_factor: z.number().nullable().optional(), retrospective: z.record(metric), training_start: period.optional(), pack_conflict: z.boolean().optional(),
+  method: z.string().nullable(), projection: z.array(projection), status: z.enum(["PENDING", "PROVISIONAL"]), reason: z.string().nullable(), unit: z.string().optional(), pieces_factor: z.number().nullable().optional(), retrospective: z.record(metric), training_start: period.optional(), training_periods: z.array(period).optional(), evaluated_periods: z.array(period).optional(), pack_conflict: z.boolean().optional(),
 });
-const version = z.object({ id: z.string(), issued_at: z.string().datetime({ offset: true }), cutoff: period, last_closed: period, closure_evidence: z.string(), closure_confirmed_on: z.string().nullable().optional(), closure_confirmed_by: z.string().optional(), last_quantity: period.nullable(), code_sha: z.string(), engine: z.string(), policy: z.string(), original_id: z.string(), previous_hash: z.string().nullable(), hash: z.string(), audit: z.record(z.unknown()), products: z.array(product), live: z.string() });
-const piecesConfirmation = z.object({ prd: z.literal("3A.1"), unit: z.literal("PIEZAS"), sources: z.tuple([z.literal("Towell"),z.literal("Cliente"),z.literal("Pedidos")]), statement: z.string().min(1), confirmed_by: z.string().min(1), recorded_at: z.string().datetime({offset:true}), presentation_version: z.string().min(1), base_versions: z.array(z.object({id:z.string(),hash:z.string()})).min(1), source_file_sha256: z.string().regex(/^[a-f0-9]{64}$/) });
+const version = z.object({ id: z.string(), issued_at: z.string().datetime({ offset: true }), cutoff: period, last_closed: period, closure_evidence: z.string(), closure_confirmed_on: z.string().nullable().optional(), closure_confirmed_by: z.string().optional(), last_quantity: period.nullable(), code_sha: z.string(), engine: z.string(), policy: z.string(), original_id: z.string(), previous_hash: z.string().nullable(), hash: z.string(), audit: z.record(z.unknown()), products: z.array(product), live: z.string(), objective: z.literal("ORDER").optional(), training_source: z.literal("Pedidos").optional() });
+const piecesConfirmation = z.object({ prd: z.enum(["3A.1", "3A.9"]), unit: z.literal("PIEZAS"), sources: z.tuple([z.literal("Towell"),z.literal("Cliente"),z.literal("Pedidos")]), statement: z.string().min(1), confirmed_by: z.string().min(1), recorded_at: z.string().datetime({offset:true}), presentation_version: z.string().min(1), base_versions: z.array(z.object({id:z.string(),hash:z.string()})).min(1), source_file_sha256: z.string().regex(/^[a-f0-9]{64}$/) });
 export const planningSchema = z.object({ schema: z.literal("towell-planning-1"), versions: z.array(version).min(1), pieces_confirmation: piecesConfirmation.optional() });
 export type PlanningBundle = z.infer<typeof planningSchema>;
 export type PlanningVersion = PlanningBundle["versions"][number];
@@ -86,6 +86,11 @@ export function parsePiecesPlanning(input: unknown): PlanningBundle {
   const bundle=parsePlanning(input), confirmation=bundle.pieces_confirmation;
   if(!confirmation)throw new Error("Se requiere el paquete PIEZAS con confirmación PRD 3A.1; V01 permanece intacta");
   if(confirmation.base_versions.length!==bundle.versions.length || new Set(confirmation.base_versions.map(v=>v.id)).size!==bundle.versions.length || bundle.versions.some(v=>!confirmation.base_versions.some(b=>b.id===v.id&&b.hash===v.hash)))throw new Error("Confirmación PIEZAS incompatible con las versiones originales");
+  if (confirmation.prd === "3A.9"
+    ? bundle.versions.length !== 1 || bundle.versions.some(v => v.objective !== "ORDER" || v.training_source !== "Pedidos")
+    : bundle.versions.some(v => v.objective || v.training_source)) {
+    throw new Error("Objetivo y fuente incompatibles con el paquete");
+  }
   return bundle;
 }
 export function piecesView(bundle: PlanningBundle): PlanningBundle {
@@ -98,7 +103,11 @@ export function piecesView(bundle: PlanningBundle): PlanningBundle {
   }
   return copy;
 }
-export function piecesModelRows(products: PlanningProduct[],months:string[]) {
+const forecastSum = (values: number[], exact: boolean) => exact
+  ? values.reduce((sum, value) => sum + Math.round(value * 100), 0) / 100
+  : values.reduce((sum, value) => sum + value, 0);
+
+export function piecesModelRows(products: PlanningProduct[],months:string[],exact=false) {
   const groups=new Map<string,PlanningProduct[]>(),seen=new Set<string>();
   for(const p of products){
     if(seen.has(p.id))throw new Error("Identidad repetida; no consolidar dos veces");seen.add(p.id);
@@ -106,14 +115,17 @@ export function piecesModelRows(products: PlanningProduct[],months:string[]) {
     groups.set(key,[...(groups.get(key)??[]),p]);
   }
   return [...groups.entries()].map(([key,rows])=>({key,account:rows[0].account,chain:rows[0].chain,format:rows[0].format,model:canonicalLabel(rows[0].model),size:canonicalLabel(rows[0].size),code:rows[0].commercial_code??"Sin código; identidad aislada",ids:rows.map(p=>p.id),expected:rows.length,
-    months:months.map(period=>{const values=rows.map(p=>projectionAt(p,period)).filter((x):x is number=>x!==null);return {period,value:values.length?values.reduce((a,b)=>a+b,0):null,covered:values.length};})}));
+    months:months.map(period=>{const values=rows.map(p=>projectionAt(p,period)).filter((x):x is number=>x!==null);return {period,value:values.length?forecastSum(values,exact):null,covered:values.length};})}));
 }
-export function piecesChartRows(products:PlanningProduct[],cutoff:string,mode:"color"|"provisional"|"model",source:"Towell"|"Cliente"|"Pedidos"="Towell") {
-  const total=(items:(number|null)[])=>({value:items.some(x=>x!==null)?items.reduce<number>((n,x)=>n+(x??0),0):null,covered:items.filter(x=>x!==null).length,eligible:products.length});
+export function piecesChartRows(products:PlanningProduct[],cutoff:string,mode:"color"|"provisional"|"model",source:"Towell"|"Cliente"|"Pedidos"="Towell",exact=false) {
+  const total=(items:(number|null)[], exactSum=false)=>{
+    const values=items.filter((x):x is number=>x!==null);
+    return {value:values.length?forecastSum(values,exactSum):null,covered:values.length,eligible:products.length};
+  };
   return Array.from({length:12},(_,i)=>{
     const period=addPlanningMonth(cutoff,i-8);
     const actual=(offset:number)=>total(products.map(p=>p.history[source]?.[addPlanningMonth(period,offset)]?.value??null));
-    const coverage={previous2:actual(-24),previous1:actual(-12),actual:i<9?actual(0):total([]),STATISTICAL:i>=9&&mode!=="color"?total(products.map(p=>projectionAt(p,period))):total([])};
+    const coverage={previous2:actual(-24),previous1:actual(-12),actual:i<9?actual(0):total([]),STATISTICAL:i>=9&&mode!=="color"?total(products.map(p=>projectionAt(p,period)),exact):total([])};
     return {period,coverage,previous2:coverage.previous2.value,previous1:coverage.previous1.value,actual:coverage.actual.value,forecast:coverage.STATISTICAL.value};
   });
 }
@@ -140,7 +152,8 @@ export function piecesPlanningSheets(bundle:PlanningBundle,v:PlanningVersion,f=n
   const ids=(p:PlanningProduct):Cell[]=>[p.id,p.account,p.chain,p.format,p.barcode,p.model,p.size,p.color,p.commercial_code??"Sin código; identidad aislada"];
   const note=`PIEZAS · ${c.presentation_version} · Cálculo ${v.id} · Emisión original ${v.issued_at} · Corte ${v.cutoff}`;
   const cleanReason=(p:PlanningProduct)=>p.status==="PENDING"?p.reason??"Sin proyección disponible":"Provisional; no adoptado";
-  const model=piecesModelRows(products,annual);
+  const order=v.objective==="ORDER";
+  const model=piecesModelRows(products,annual,order);
   const historySheets:PlanningSheet[]=(['Towell','Cliente','Pedidos'] as const).map(s=>({name:`Historico_${s}`,title:`Histórico ${s} · PIEZAS`,note:note+" · Serie independiente. Vacíos y ceros conservados.",headers:[...header,...history],rows:products.map(p=>[...ids(p),...history.map(m=>p.history[s]?.[m]?.value??null)])}));
   return [
     {name:"Guia_y_control",title:"FORECAST Towell · Planeación en PIEZAS",note,headers:["Concepto","Valor"],rows:[["Versión de presentación",c.presentation_version],["Unidad","PIEZAS"],["Confirmación de negocio",c.statement],["Confirmado por",c.confirmed_by],["Registro de confirmación",c.recorded_at],["Emisión original del cálculo",v.issued_at],["Último cierre acreditado",v.last_closed],["Identidades",products.length],["Fuentes independientes","Towell / Cliente / Pedidos; nunca se suman entre sí"],["Provisionales",products.filter(p=>p.status==="PROVISIONAL").length],["Sin pronóstico",products.filter(p=>p.status==="PENDING").length],["Champion acreditado",0],["Cobertura producto-mes",`${products.reduce((n,p)=>n+p.projection.filter(h=>h.value!==null).length,0)}/${products.length*14}`],["Revisiones","Sólo emisiones existentes; V02-PIEZAS no es una revisión del pronóstico"],["Original preservado",original.id],["SHA256 archivo base",c.source_file_sha256],["Motor",v.engine],["Hash del cálculo original",v.hash],["WAPE","LIVE exige emisión anterior al primer día del mes, real cerrado y misma identidad; retrospectivo separado"]]},
@@ -148,7 +161,7 @@ export function piecesPlanningSheets(bundle:PlanningBundle,v:PlanningVersion,f=n
     ...historySheets,
     {name:"Champion_por_color",title:"Champion por color · Sin Champion acreditado",note,headers:[...header,"Estado",...future],rows:products.map(p=>[...ids(p),"Sin Champion",...future.map(()=>null)])},
     {name:"Pronostico_provisional",title:"Estadístico · Provisionales en PIEZAS",note:note+" · Cantidades V01 sin recalcular; consultar método por producto.",headers:[...header,"Método","Estado",...future,...future.map(m=>`Cobertura ${m}`)],rows:products.map(p=>[...ids(p),p.method,p.status,...future.map(m=>projectionAt(p,m)),...future.map(m=>projectionAt(p,m)===null?p.projection.find(h=>h.period===m)?.reason??"Sin cobertura":"Disponible; provisional")])},
-    {name:"Plan_anual_por_modelo",title:"Plan anual por modelo · PIEZAS",note:note+" · Cuenta, cadena, formato, modelo, tamaño y código; total parcial cuando falten variantes.",headers:["Cuenta","Cadena","Formato","Modelo","Tamaño","Código comercial","Variantes esperadas",...annual,...annual.map(m=>`Cubiertas ${m}`),"Total parcial anual","Estado"],rows:model.map(r=>[r.account,r.chain,r.format,r.model,r.size,r.code,r.expected,...r.months.map(m=>m.value),...r.months.map(m=>`${m.covered}/${r.expected}`),r.months.some(m=>m.value!==null)?r.months.reduce((n,m)=>n+(m.value??0),0):null,r.months.every(m=>m.covered===r.expected)?"Completo":"Parcial / sin cobertura"])},
+    {name:"Plan_anual_por_modelo",title:"Plan anual por modelo · PIEZAS",note:note+" · Cuenta, cadena, formato, modelo, tamaño y código; total parcial cuando falten variantes.",headers:["Cuenta","Cadena","Formato","Modelo","Tamaño","Código comercial","Variantes esperadas",...annual,...annual.map(m=>`Cubiertas ${m}`),"Total parcial anual","Estado"],rows:model.map(r=>[r.account,r.chain,r.format,r.model,r.size,r.code,r.expected,...r.months.map(m=>m.value),...r.months.map(m=>`${m.covered}/${r.expected}`),r.months.some(m=>m.value!==null)?forecastSum(r.months.map(m=>m.value??0),order):null,r.months.every(m=>m.covered===r.expected)?"Completo":order&&r.months.some(m=>m.covered)?"TOTAL PARCIAL":"Parcial / sin cobertura"])},
     {name:"Complemento_2026",title:"Complemento noviembre–diciembre · PIEZAS",note,headers:[...header,...future.filter(m=>m<annual[0])],rows:products.map(p=>[...ids(p),...future.filter(m=>m<annual[0]).map(m=>projectionAt(p,m))])},
     {name:"Proximos_2_3_meses",title:"Próximos dos meses y tercero opcional · PIEZAS",note:note+" · Ventana de consulta; no sumar otra vez al plan anual.",headers:[...header,"Método",...nextWindow(v.cutoff,3)],rows:products.map(p=>[...ids(p),p.method,...nextWindow(v.cutoff,3).map(m=>projectionAt(p,m))])},
     {name:"Revisiones_y_reales",title:"Plan original, revisiones y reales · PIEZAS",note:note+" · Una fila por identidad, mes y emisión; tres reales independientes.",headers:["Cálculo","Emisión original","Corte","Identidad","Periodo","Plan original","Revisión","Venta Towell","Pedido Towell","Cliente","Cambio vs original"],rows:bundle.versions.filter(r=>r.issued_at<=v.issued_at).flatMap(r=>r.products.filter(p=>products.some(q=>q.id===p.id)).flatMap(p=>future.map(m=>{const old=projectionAt(original.products.find(q=>q.id===p.id),m),now=projectionAt(p,m),latest=products.find(q=>q.id===p.id)!;return [r.id,r.issued_at,r.cutoff,p.id,m,old,now,...["Towell","Pedidos","Cliente"].map(s=>m<=v.last_closed?latest.history[s]?.[m]?.value??null:null),old!==null&&now!==null?now-old:null];})))},

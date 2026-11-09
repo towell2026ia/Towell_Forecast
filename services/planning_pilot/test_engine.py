@@ -26,6 +26,30 @@ class PilotTests(unittest.TestCase):
         self.assertIsNone(result["retrospective"]["Pedidos"]["value"])
         self.assertEqual(p["history"]["Towell"]["2024-01"]["value"], 10.25)
 
+    def test_order_uses_only_closed_pedidos_and_keeps_independent_references(self):
+        p = sample()
+        p["history"]["Pedidos"]["2026-09"]["value"] = 0
+        p["history"]["Pedidos"]["2026-10"]["value"] = 19.25
+        p["history"]["Pedidos"]["2026-11"] = {"value": 1000000}
+        p["history"]["Towell"]["2026-10"]["value"] = 888
+        with patch.object(stat, "run_series", wraps=stat.run_series) as run:
+            result = forecast_product(p, "2026-10", training_source="Pedidos", objective="ORDER")
+        _, _, periods, values, objective = run.call_args.args
+        self.assertEqual((periods[-1], values[-2:], objective), ("2026-10", [0, 19.25], "ORDER"))
+        self.assertEqual(result["status"], "PROVISIONAL")
+        self.assertEqual(len(result["projection"]), 14)
+        self.assertTrue(all(row["pieces"] == row["value"] for row in result["projection"]))
+        self.assertEqual(set(result["retrospective"]), {"Pedidos"})
+        self.assertEqual(result["evaluated_periods"][-1], "2026-10")
+        self.assertEqual(result["retrospective"]["Pedidos"]["pairs"], len(result["evaluated_periods"]))
+        self.assertEqual(result["history"]["Towell"]["2026-10"]["value"], 888)
+        p["history"]["Pedidos"]["2026-10"]["value"] = None
+        self.assertEqual(forecast_product(p, "2026-10", training_source="Pedidos", objective="ORDER")["status"], "PENDING")
+
+    def test_order_package_rejects_mismatched_source(self):
+        with self.assertRaisesRegex(ValueError, "incompatibles"):
+            forecast_product(sample(), "2026-10", training_source="Towell", objective="ORDER")
+
     def test_explicit_units_are_source_product_and_period_scoped(self):
         p = sample()
         apply_units([p], {"Towell": {p["id"]: {"unit": "pack", "pieces_per_unit": 6,

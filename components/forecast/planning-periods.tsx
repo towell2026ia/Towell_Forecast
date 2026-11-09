@@ -1,7 +1,7 @@
 "use client";
 import { useMemo, useState } from "react";
 import { canonicalLabel, piecesChartRows, filterPlanning, nextWindow, noPlanningFilters, parsePiecesPlanning, projectionAt, scopeKey, type PlanningBundle, type PlanningFilters } from "@/lib/planning-results";
-import { auditedPlanningSheets, planningSourceLabels, sourceAuditNotice } from "@/lib/planning-source-audit";
+import { auditedPlanningSheets, orderForecastLabel, orderSourceNotice, planningSourceLabels, sourceAuditNotice } from "@/lib/planning-source-audit";
 import { planningXlsx } from "@/lib/planning-xlsx";
 import { dashboardSeries, type DashboardPoint, type DashboardSeries } from "@/lib/periods-dashboard";
 import { PeriodsComparisonChart } from "./periods-comparison-chart";
@@ -12,25 +12,31 @@ function Multi({ label, values, options, onChange }: { label: string; values: st
 }
 export function PlanningPeriods({ initialBundle }: { initialBundle?: PlanningBundle }) {
   const [bundle,setBundle] = useState(initialBundle?parsePiecesPlanning(initialBundle):null), [error,setError] = useState("");
-  const [source,setSource]=useState<"Towell"|"Cliente"|"Pedidos">("Towell");
+  const [source,setSource]=useState<"Towell"|"Cliente"|"Pedidos">(initialBundle?.versions.at(-1)?.training_source ?? "Towell");
   const [selected,setSelected] = useState(initialBundle?.versions.at(-1)?.id ?? "");
   const [filters,setFilters] = useState<PlanningFilters>(noPlanningFilters), [view,setView] = useState("Por color"), [window,setWindow] = useState<2|3>(2), [page,setPage] = useState(0);
   const version = bundle?.versions.find(v=>v.id===selected);
+  const order = version?.objective === "ORDER";
   const products = useMemo(()=>version ? filterPlanning(version,filters):[],[version,filters]);
   const sheets=useMemo(()=>bundle&&version?auditedPlanningSheets(bundle,version,filters):[],[bundle,version,filters]);
   const viewSheets: Record<string,string> = {"Productos":"Productos","Por color":"Plan_anual_por_color","Histórico":`Historico_${source}`,"Por modelo":"Plan_anual_por_modelo","Provisionales":"Pronostico_provisional","Champion por color":"Champion_por_color","Revisiones":"Revisiones_y_reales","WAPE":"Metricas_y_cobertura","Anual por color":"Plan_anual_por_color","Inventario por color":"Inventario_PV_color","Inventario por modelo":"Inventario_por_modelo","Series comerciales":"Series_comerciales"};
   const sheet = sheets.find(s=>s.name===viewSheets[view]);
   const mode = view==="Por modelo" ? "model" : view==="Champion por color" ? "color" : "provisional";
-  const points = useMemo(()=>version ? piecesChartRows(products,version.cutoff,mode,source).map(r=>{
+  const points = useMemo(()=>version ? piecesChartRows(products,version.cutoff,mode,source,order).map(r=>{
     const values = Object.fromEntries(Object.keys(dashboardSeries).map(k=>[k,null])) as DashboardPoint["values"];
     Object.assign(values,{previous2:r.previous2,previous1:r.previous1,actual:r.actual,STATISTICAL:r.forecast});
     return {month:r.period,period:r.period,values,coverage:{...Object.fromEntries(Object.entries(values).map(([key,value])=>[key,{value,covered:0,eligible:products.length}])),...r.coverage} as Record<DashboardSeries,{value:number|null;covered:number;eligible:number}>};
-  }):[],[products,version,mode,source]);
+  }):[],[products,version,mode,source,order]);
+  function selectVersion(v: NonNullable<typeof version>) {
+    setSelected(v.id);
+    setSource(v.training_source ?? "Towell");
+    setPage(0);
+  }
   function download() {
     try {
       const bytes=planningXlsx(sheets);
       const url=URL.createObjectURL(new Blob([bytes as BlobPart],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}));
-      const a=document.createElement("a");a.href=url;a.download=`FORECAST_Towell_Consulta_V03_${selected.replace(/[^a-zA-Z0-9_-]/g,"_")}_consulta.xlsx`;a.click();
+      const a=document.createElement("a");a.href=url;a.download=`FORECAST_Towell_Consulta_${order?"V04":"V03"}_${selected.replace(/[^a-zA-Z0-9_-]/g,"_")}_consulta.xlsx`;a.click();
       setTimeout(()=>URL.revokeObjectURL(url),1000);
     } catch(err){setError(err instanceof Error?err.message:"No se pudo descargar el XLSX");}
   }
@@ -43,15 +49,15 @@ export function PlanningPeriods({ initialBundle }: { initialBundle?: PlanningBun
   const opts=(values:string[])=>[...new Set(values)].sort().map(value=>({value,label:value}));
   return <section className="min-w-0 space-y-5" aria-label="Planeación privada de resurtibles">
     <div><h2 className="text-2xl font-semibold">Periodos · Planeación privada</h2><p className="text-sm text-slate-600">Abre el paquete JSON entregado con el XLSX. Se consulta sólo en memoria de este navegador; no se envía al servidor.</p></div>
-    <label className="block text-sm">Abrir paquete privado<input aria-label="Abrir paquete privado" className="ml-3" type="file" accept=".json" onChange={async e=>{ const file=e.target.files?.[0];if(!file)return;try{if(file.size>32_000_000)throw new Error("Archivo mayor a 32 MB");const data=parsePiecesPlanning(JSON.parse(await file.text()));setBundle(data);setSelected(data.versions.at(-1)!.id);setFilters(noPlanningFilters);setPage(0);setError("");}catch(err){setError(`${err instanceof Error?err.message:"Paquete inválido"}. Se conserva la última consulta válida.`);}}}/></label>
+    <label className="block text-sm">Abrir paquete privado<input aria-label="Abrir paquete privado" className="ml-3" type="file" accept=".json" onChange={async e=>{ const file=e.target.files?.[0];if(!file)return;try{if(file.size>32_000_000)throw new Error("Archivo mayor a 32 MB");const data=parsePiecesPlanning(JSON.parse(await file.text()));setBundle(data);selectVersion(data.versions.at(-1)!);setFilters(noPlanningFilters);setError("");}catch(err){setError(`${err instanceof Error?err.message:"Paquete inválido"}. Se conserva la última consulta válida.`);}}}/></label>
     {error&&<p role="alert">{error}</p>}
     {version&&<>
-      <p className="rounded bg-slate-50 p-3 text-sm">PIEZAS · Confirmación de negocio PRD 3A.1 · {bundle!.pieces_confirmation!.presentation_version}. Cantidades originales conservadas. Towell, Cliente y Pedidos son series independientes.</p>
-      <div className="flex flex-wrap gap-4 text-sm"><label>Versión <select aria-label="Versión de planeación" value={selected} onChange={e=>{setSelected(e.target.value);setPage(0);}}>{bundle!.versions.map(v=><option key={v.id}>{v.id}</option>)}</select></label><span>Corte: {version.cutoff}</span><span>Cierre acreditado: {version.last_closed} · {version.closure_evidence}</span><span>Emisión: {version.issued_at}</span></div>
+      <p className="rounded bg-slate-50 p-3 text-sm">PIEZAS · Confirmación de negocio PRD {bundle!.pieces_confirmation!.prd} · {bundle!.pieces_confirmation!.presentation_version}. Cantidades originales conservadas. Towell, Cliente y Pedidos son series independientes.</p>
+      <div className="flex flex-wrap gap-4 text-sm"><label>Versión <select aria-label="Versión de planeación" value={selected} onChange={e=>{const v=bundle!.versions.find(v=>v.id===e.target.value);if(v)selectVersion(v);}}>{bundle!.versions.map(v=><option key={v.id}>{v.id}</option>)}</select></label><span>Corte: {version.cutoff}</span><span>Cierre acreditado: {version.last_closed} · {version.closure_evidence}</span><span>Emisión: {version.issued_at}</span></div>
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5"><Multi label="Cadena / formato" values={filters.scopes} options={opts(version.products.map(scopeKey))} onChange={v=>change("scopes",v)}/><Multi label="Modelo / artículo–tamaño" values={filters.models} options={opts(scoped.map(p=>canonicalLabel(p.model)))} onChange={v=>change("models",v)}/><Multi label="Color / surtido" values={filters.colors} options={opts(modeled.map(p=>canonicalLabel(p.color)))} onChange={v=>change("colors",v)}/><Multi label="Tamaño / presentación" values={filters.sizes} options={opts(modeled.map(p=>canonicalLabel(p.size)))} onChange={v=>change("sizes",v)}/><Multi label="Producto" values={filters.products} options={colored.map(p=>({value:p.id,label:`${p.description} · ${p.barcode} · ${p.account} / ${p.format}`}))} onChange={v=>change("products",v)}/></div>
-      <p className="text-sm">Origen: paquete privado V03 · PROVISIONAL · {products.length} variantes · {products.filter(p=>p.status==="PROVISIONAL").length} con proyección provisional · Sin Champion acreditado. Las clasificaciones conservan sus pendientes.</p>
+      <p className="text-sm">Origen: paquete privado {order?`V04 · ${orderForecastLabel}`:"V03"} · PROVISIONAL · {products.length} variantes · {products.filter(p=>p.status==="PROVISIONAL").length} con proyección provisional · Sin Champion acreditado. Las clasificaciones conservan sus pendientes.</p>
       <p data-testid="unit-summary" className="rounded bg-slate-50 p-3 text-sm">PIEZAS · {products.filter(p=>p.projection.some(h=>h.value!==null)).length} productos con pronóstico · {products.filter(p=>!p.projection.some(h=>h.value!==null)).length} sin pronóstico. Cobertura: {products.reduce((n,p)=>n+p.projection.filter(h=>h.value!==null).length,0)}/{products.length*14} producto-meses. {products.filter(p=>!p.commercial_code).length} sin código comercial: agrupación individual.</p>
-      <p className="rounded bg-slate-50 p-3 text-sm" data-testid="inventory-status">{sourceAuditNotice}</p>
+      <p className="rounded bg-slate-50 p-3 text-sm" data-testid="inventory-status">{order?orderSourceNotice:sourceAuditNotice}</p>
       <button type="button" className="rounded border border-slate-300 px-4 py-2 text-sm" onClick={download}>Descargar XLSX de esta consulta</button>
       <label className="block text-sm">Vista <select aria-label="Vista de planeación" value={view} onChange={e=>{setView(e.target.value);setPage(0);}}>{Object.keys(viewSheets).map(v=><option key={v}>{v}</option>)}</select></label>
       <label className="block text-sm">Serie histórica <select aria-label="Serie histórica" value={source} onChange={e=>{setSource(e.target.value as typeof source);setPage(0);}}>{Object.entries(planningSourceLabels).map(([key,label])=><option key={key} value={key}>{label}</option>)}</select></label>

@@ -1,6 +1,7 @@
 import { describe,expect,it,vi } from "vitest";
 import { fireEvent,render,screen } from "@testing-library/react";
 import { PlanningPeriods } from "../../components/forecast/planning-periods";
+import { auditedPlanningSheets } from "../../lib/planning-source-audit";
 import { parsePiecesPlanning,piecesView,piecesModelRows,piecesChartRows,piecesPlanningSheets,piecesLiveMetric,addPlanningMonth,type PlanningBundle,type PlanningProduct } from "../../lib/planning-results";
 vi.mock("../../components/forecast/periods-comparison-chart",()=>({PeriodsComparisonChart:()=> <div>Shared chart</div>}));
 function fixture():PlanningBundle {
@@ -68,5 +69,23 @@ describe("PRD 3A.1 pieces only",()=>{
    fireEvent.change(screen.getByLabelText('Vista de planeación'),{target:{value:'Histórico'}});fireEvent.change(screen.getByLabelText('Serie histórica'),{target:{value:'Pedidos'}});
    expect(screen.getByText('Pedido real · PIEZAS')).toBeTruthy();expect(screen.getByRole('table').querySelectorAll('tbody tr')).toHaveLength(1);
    fireEvent.change(screen.getByLabelText('Vista de planeación'),{target:{value:'Por color'}});expect(screen.getByText('Sin Champion',{selector:'td'})).toBeTruthy();expect(fetcher).not.toHaveBeenCalled();fetcher.mockRestore();
+ });
+ it("consults and exports the independent provisional ORDER version with exact variant sums",()=>{
+   const b=fixture(),v=b.versions[0],p=v.products[0],q=structuredClone(p);
+   b.pieces_confirmation!.prd="3A.9";
+   expect(()=>parsePiecesPlanning(b)).toThrow(/Objetivo y fuente/);
+   v.objective="ORDER";v.training_source="Pedidos";b.pieces_confirmation!.presentation_version="V04";
+   q.id="A|002";q.barcode="002";q.color="Red";p.projection[0].value=0.1;q.projection[0].value=0.2;
+   v.products.push(q);
+   const bundle=parsePiecesPlanning(b),sheets=auditedPlanningSheets(bundle,bundle.versions[0]);
+   const model=sheets.find(s=>s.name==="Plan_anual_por_modelo")!;
+   expect(model.rows[0][model.headers.indexOf("2026-11")]).toBe(0.3);
+   expect(piecesChartRows(v.products,v.cutoff,"model","Pedidos",true)[9].forecast).toBe(0.3);
+   expect(model.rows[0]).toContain("TOTAL PARCIAL");
+   const commercial=sheets.find(s=>s.name==="Series_comerciales")!;
+   expect(commercial.headers.slice(10,16)).toEqual(["Forecast de Pedido real","Fcst Towell histórico","Fcst Cliente recibido","Pedido real","Venta real","Entrega"]);
+   render(<PlanningPeriods initialBundle={bundle}/>);
+   expect(screen.getByLabelText<HTMLSelectElement>("Serie histórica").value).toBe("Pedidos");
+   expect(screen.getByText(/Origen: paquete privado V04 · Forecast de Pedido real/)).toBeTruthy();
  });
 });
