@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { KeyboardEvent, useCallback, useRef, useState } from "react";
+import { KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
 import { LoaderCircle, Mic, SendHorizonal, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -12,7 +12,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Input } from "@/components/ui/input";
 import { PreviewReadError } from "@/lib/forecast-preview";
-import { assistantScopeIsValid, rsMetrics, safeResearchUrl, type RsAssistantAction, type RsAssistantClient, type RsAssistantResponse } from "@/lib/rs-assistant";
+import { assistantScopeIsValid, rsMetrics, safeResearchUrl, type RsAssistantAction, type RsAssistantClient, type RsAssistantRequest, type RsAssistantResponse } from "@/lib/rs-assistant";
 import {
   type AssistantContext, type AssistantMode, sendAssistantMessage,
 } from "./assistant/assistant-service";
@@ -29,7 +29,24 @@ type ConversationMessage = {
   text: string;
   scope?: string;
   response?: RsAssistantResponse;
+  researchPollingStopped?: boolean;
 };
+
+type PendingResearch = { messageId: string; scopeKey: string; request: RsAssistantRequest; version: RsAssistantResponse["scope"] };
+const researchPollDelay = 15_000;
+const maxResearchPolls = 20;
+
+function sameResearchScope(previous: RsAssistantResponse["scope"], current: RsAssistantResponse["scope"]) {
+  return previous && current && previous.chain_id === current.chain_id && previous.period === current.period
+    && previous.model === current.model && previous.format === current.format && previous.archive_id === current.archive_id
+    && previous.version_id === current.version_id && previous.generation === current.generation;
+}
+
+function replaceResearch(messages: ConversationMessage[], id: string, research: RsAssistantResponse["research"]) {
+  return messages.map(entry => entry.id === id && entry.response
+    ? { ...entry, researchPollingStopped: false, response: { ...entry.response, research } }
+    : entry);
+}
 
 type ForecastAssistantProps = {
   authorized: boolean;
@@ -45,6 +62,7 @@ const rsActions = { answer: "Enviar mensaje", research: "Iniciar investigación 
 const researchStatus: Record<string, string> = {
   COMPLETED: "Investigación completada", PENDING: "Investigación pendiente", QUEUED: "Investigación pendiente", IN_PROGRESS: "Investigación en curso",
   DISABLED: "Investigación desactivada", UNAVAILABLE: "Investigación no disponible", FAILED: "No se pudo completar la investigación", NO_EVIDENCE: "Sin evidencia pública suficiente",
+  BUSY: "Hay cuatro investigaciones en curso. Vuelve a iniciar la investigación más tarde.", NOT_REQUESTED: "Sin investigación iniciada para este alcance",
 };
 const researchTime = new Intl.DateTimeFormat("es-MX", { dateStyle: "medium", timeStyle: "short", timeZone: "America/Mexico_City" });
 const usageLabels = { input_tokens: "Tokens de entrada", output_tokens: "Tokens de salida", total_tokens: "Tokens totales", web_search_calls: "Búsquedas web" } as const;
@@ -134,23 +152,28 @@ function ForecastAssistantContent({ apiEnabled, voiceEnabled, mode, context, rsA
   const [draftState, setDraftState] = useState({ key: "", value: "" });
   const [processing, setProcessing] = useState(false);
   const [lottieFailed, setLottieFailed] = useState(false);
+  const [pendingResearch, setPendingResearch] = useState<PendingResearch | null>(null);
   const sequence = useRef(1);
   const sending = useRef(false);
+  const stoppedPoll = useRef<PendingResearch | null>(null);
   const models = context.commercialModels ?? [];
   const filterPeriod = context.periodRange?.[0] && context.periodRange[0] === context.periodRange[1] ? context.periodRange[0] : "";
-  const filterKey = JSON.stringify([context.chainId, models, context.periodRange]);
+  const filterKey = JSON.stringify([context.user, context.chainId, models, context.periodRange]);
   const [selection, setSelection] = useState<{ key: string; format: string; model: string; period: string }>({ key: "", format: "", model: "", period: "" });
   const activeSelection = selection.key === filterKey ? selection : { key: filterKey, format: "", model: "", period: "" };
   const scope = {
     chain_id: context.chainId ?? "", purchase_type: "RS" as const, format: activeSelection.format.trim(),
     model: (models.length === 1 ? models[0] : activeSelection.model).trim(), period: filterPeriod || activeSelection.period,
   };
-  const scopeKey = JSON.stringify(scope);
+  const scopeKey = JSON.stringify([context.user, context.globalRole ?? context.role, scope]);
   const draftKey = rsAssistant ? scopeKey : "";
   const draft = draftState.key === draftKey ? draftState.value : "";
   const setDraft = (value: string) => setDraftState({ key: draftKey, value });
   const scopeReady = assistantScopeIsValid(scope);
   const canSend = rsAssistant ? scopeReady : apiEnabled;
+  const canExecute = context.globalRole
+    ? context.globalRole === "ADMIN" || context.globalRole === "EDITOR"
+    : context.role === "manager" || context.role === "editor";
   const operationalNotice = "Consultas RS para una cadena, formato, modelo y mes. El pronóstico se calcula bajo demanda y queda provisional.";
   const [messages, setMessages] = useState<ConversationMessage[]>([
     { id: "welcome", role: "assistant", text: apiEnabled
@@ -161,6 +184,44 @@ function ForecastAssistantContent({ apiEnabled, voiceEnabled, mode, context, rsA
   const logEvent = useCallback((event: "open" | "close" | "response" | "lottie_error" | "ui_error") => {
     console.info("[ForecastAssistant]", { event, screen: context.screen });
   }, [context.screen]);
+
+  useEffect(() => {
+    if (!open || !rsAssistant || !pendingResearch || pendingResearch.scopeKey !== scopeKey || stoppedPoll.current === pendingResearch) return;
+    const { messageId, request, version } = pendingResearch;
+    const client = rsAssistant;
+    const controller = new AbortController();
+    let attempts = 0;
+    let timer = window.setTimeout(() => void refresh(), researchPollDelay);
+    const finish = () => setPendingResearch(current => current === pendingResearch ? null : current);
+    const stop = () => {
+      setMessages(current => current.map(entry => entry.id === messageId ? { ...entry, researchPollingStopped: true } : entry));
+      finish();
+    };
+
+    async function refresh() {
+      attempts++;
+      try {
+        const response = await client(request, controller.signal);
+        if (controller.signal.aborted) return;
+        if (!response.research || !sameResearchScope(version, response.scope)) {
+          stop();
+          return;
+        }
+        setMessages(current => replaceResearch(current, messageId, response.research));
+        if (response.research.status !== "PENDING") finish();
+        else if (attempts >= maxResearchPolls) stop();
+        else timer = window.setTimeout(() => void refresh(), researchPollDelay);
+      } catch {
+        if (!controller.signal.aborted) stop();
+      }
+    }
+
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+      stoppedPoll.current = pendingResearch;
+    };
+  }, [open, pendingResearch, rsAssistant, scopeKey]);
 
   const handleOpenChange = (nextOpen: boolean) => {
     setOpen(nextOpen);
@@ -175,7 +236,9 @@ function ForecastAssistantContent({ apiEnabled, voiceEnabled, mode, context, rsA
   const submit = async (action: RsAssistantAction = "answer") => {
     const message = action === "answer" || action === "research" ? draft.trim() : "";
     if (!canSend || sending.current || action === "answer" && !message || !rsAssistant && action !== "answer") return;
+    if ((action === "forecast" || action === "research") && !canExecute) return;
     const sentScope = rsAssistant ? scopeKey : undefined;
+    if (action === "research_status") setPendingResearch(null);
     if (message) setDraft("");
     setMessages(current => [...current, { id: `user-${sequence.current++}`, role: "user", text: message || rsActions[action], scope: sentScope }]);
     sending.current = true;
@@ -183,7 +246,13 @@ function ForecastAssistantContent({ apiEnabled, voiceEnabled, mode, context, rsA
     try {
       if (rsAssistant) {
         const response = await rsAssistant({ ...scope, message, action });
-        setMessages(current => [...current, { id: `assistant-${sequence.current++}`, role: "assistant", text: response.message, scope: sentScope, response }]);
+        const entry = action === "research_status" && response.research ? messages.findLast(item => item.scope === sentScope && item.response?.research && sameResearchScope(item.response.scope, response.scope)) : undefined;
+        const id = entry?.id ?? `assistant-${sequence.current++}`;
+        if (entry) setMessages(current => replaceResearch(current, id, response.research));
+        else setMessages(current => [...current, { id, role: "assistant", text: response.message, scope: sentScope, response }]);
+        if (response.research?.status === "PENDING" && response.scope) {
+          setPendingResearch({ messageId: id, scopeKey, version: response.scope, request: { ...scope, message: "", action: "research_status" } });
+        }
       } else {
         const response = await sendAssistantMessage(message, context, { mode, apiEnabled });
         setMessages(current => [...current, { id: `assistant-${sequence.current++}`, role: "assistant", text: response.message }]);
@@ -261,6 +330,7 @@ function ForecastAssistantContent({ apiEnabled, voiceEnabled, mode, context, rsA
               <div className={`max-w-[88%] rounded-2xl px-4 py-3 text-sm leading-6 ${message.role === "user" ? "rounded-br-md bg-blue-700 text-white" : "rounded-bl-md border border-slate-200 bg-white text-slate-700 shadow-sm"}`}>
                 <p className="whitespace-pre-wrap break-words">{message.text}</p>
                 {message.response && <AssistantEvidence response={message.response}/>}
+                {message.researchPollingStopped && <p className="mt-2 text-xs text-slate-500">Seguimiento automático detenido. Usa Consultar estado de investigación para actualizar.</p>}
               </div>
             </div>)}
             {processing && <div className="flex justify-start"><div className="flex items-center gap-2 rounded-2xl rounded-bl-md border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500 shadow-sm"><LoaderCircle className="size-4 animate-spin" /> Preparando respuesta…</div></div>}
@@ -286,7 +356,7 @@ function ForecastAssistantContent({ apiEnabled, voiceEnabled, mode, context, rsA
             </Button>
           </div>
           {rsAssistant && <div className="mt-2 flex flex-wrap gap-2">
-            {(["forecast", "research", "research_status"] as const).map(action => <Button key={action} type="button" size="sm" variant="outline" disabled={!scopeReady || processing} onClick={() => void submit(action)}>{rsActions[action]}</Button>)}
+            {(["forecast", "research", "research_status"] as const).map(action => <Button key={action} type="button" size="sm" variant="outline" disabled={!scopeReady || processing || action !== "research_status" && !canExecute} onClick={() => void submit(action)}>{rsActions[action]}</Button>)}
           </div>}
           {(apiEnabled || rsAssistant) && <p className="mt-2 text-center text-[11px] text-slate-500">Enter para enviar · Shift+Enter para una nueva línea</p>}
         </div>

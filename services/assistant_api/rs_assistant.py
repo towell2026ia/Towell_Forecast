@@ -1,6 +1,8 @@
 """Operational assistant for a single authorized RS scope."""
 from __future__ import annotations
 
+import re
+import sqlite3
 from decimal import Decimal
 from threading import Lock
 from typing import Literal
@@ -16,6 +18,11 @@ from .persistence import content_hash
 from .rs_assistant_data import load_rs_scope
 from .supabase_access import PreviewError, uuid_value
 from .tools import fold
+
+PUBLIC_CONTEXT = re.compile(
+    r"\b(?:investig\w*|mercado|hallazgos?|tendencias?|estacional\w*|"
+    r"riesgos?\s+comerciales?|desabasto|sobreinventario)\b"
+)
 
 
 class RSAssistantRequest(BaseModel):
@@ -61,7 +68,7 @@ class RSAssistantWorkflow:
         self.storage, self.research, self.compute = storage, research, compute
         self.compute_slot = Lock()
 
-    def answer(self, body, scoped):
+    def answer(self, body, scoped, *, may_start_research=False):
         scope, rows = scoped["scope"], scoped["records"]
         key = content_hash({"engine": ENGINE_VERSION, "scope": scope, "records": rows})
         forecast = self.storage.get("rs_assistant_forecasts", key)
@@ -92,14 +99,19 @@ class RSAssistantWorkflow:
         research_scope = {key: scope[key] for key in (
             "chain_id", "format", "model", "period", "version_id", "purchase_type", "public_product_type"
         ) if key in scope}
-        if body.action in {"research", "research_status"}:
+        context_requested = body.action == "answer" and PUBLIC_CONTEXT.search(fold(body.message))
+        try:
             if self.research is None:
-                report = {"status": "DISABLED"}
-            else:
-                report = (self.research.start(research_scope) if body.action == "research"
-                          else self.research.status(research_scope))
-        elif self.research and any(word in fold(body.message) for word in ("investig", "mercado", "hallazgo", "tendencia")):
-            report = self.research.cached(research_scope)
+                if body.action in {"research", "research_status"}:
+                    report = {"status": "DISABLED"}
+            elif body.action == "research_status":
+                report = self.research.status(research_scope)
+            elif may_start_research and (body.action in {"forecast", "research"} or context_requested):
+                report = self.research.start(research_scope)
+            elif context_requested:
+                report = self.research.cached(research_scope)
+        except sqlite3.Error:
+            report = {"status": "UNAVAILABLE", "reason": "RESEARCH_STORAGE_UNAVAILABLE"}
         return ForecastOrchestrator.operational_answer(body.message, scoped, forecast=forecast, research=report)
 
 
@@ -127,6 +139,8 @@ def mount_rs_assistant(app, config, identity, client, limiter, workflow):
         scoped = load_rs_scope(client.bind(token), principal, chain_id=chain, purchase_type=body.purchase_type,
                                format=body.format, model=body.model, period=body.period)
         try:
-            return workflow.answer(body, scoped)
+            return workflow.answer(body, scoped, may_start_research=(
+                EXECUTE in principal.permissions and chain in principal.execute_chain_ids
+            ))
         except (ValueError, ArithmeticError, IndexError, KeyError):
             raise PreviewError("RS_ASSISTANT_UNAVAILABLE", 503) from None

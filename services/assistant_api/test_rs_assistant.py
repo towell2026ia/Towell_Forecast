@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,19 +21,22 @@ SCOPE = {**BODY, "version_id": "c139f367-df75-5ef3-8f9f-1627038e4496"}
 
 
 class RSAssistantTests(unittest.TestCase):
-    def test_questions_never_compute_or_search_and_research_uses_only_scope(self):
+    def test_questions_start_public_research_only_with_execution_permission(self):
         with tempfile.TemporaryDirectory() as tmp:
             storage = LocalPersistenceProvider(Path(tmp) / "state.sqlite")
             provider = Mock()
             provider.status.return_value = {"status": "NOT_REQUESTED"}
             provider.start.return_value = {"status": "PENDING"}
+            provider.cached.return_value = {"status": "NOT_REQUESTED"}
             compute = Mock()
             workflow = RSAssistantWorkflow(storage, provider, compute=compute)
             scoped = {"scope": SCOPE, "records": [], "quality": {}, "metrics": {}}
-            message = "riesgo de desabasto; private text"
-            answer = workflow.answer(RSAssistantRequest(**BODY, message=message), scoped)
+            question = RSAssistantRequest(**BODY, message="riesgo de desabasto; private text")
+            answer = workflow.answer(question, scoped)
             self.assertIn("inventario disponible es agregado", answer["message"])
-            explanation = workflow.answer(RSAssistantRequest(**BODY, message="Explica el Bias"), scoped)
+            provider.cached.assert_called_once_with(SCOPE)
+            explanation = workflow.answer(RSAssistantRequest(**BODY, message="Explica el Bias"), scoped,
+                                          may_start_research=True)
             self.assertIn("real menos pronóstico", explanation["message"])
             self.assertIn("positivo indica subestimación", explanation["message"])
             compute.assert_not_called()
@@ -41,7 +45,11 @@ class RSAssistantTests(unittest.TestCase):
             workflow.answer(RSAssistantRequest(**BODY, action="research_status"), scoped)
             provider.status.assert_called_once_with(SCOPE)
             provider.start.assert_not_called()
-            workflow.answer(RSAssistantRequest(**BODY, message=message, action="research"), scoped)
+            answer = workflow.answer(question, scoped, may_start_research=True)
+            self.assertEqual(answer["research"], {"status": "PENDING"})
+            provider.start.assert_called_once_with(SCOPE)
+            provider.start.reset_mock()
+            workflow.answer(RSAssistantRequest(**BODY, action="research"), scoped, may_start_research=True)
             provider.start.assert_called_once_with(SCOPE)
 
     def test_forecast_separates_families_reuses_results_and_reports_short_history(self):
@@ -55,17 +63,44 @@ class RSAssistantTests(unittest.TestCase):
                 "retrospective_statistical_metrics": {"wape": 10, "bias": -5}}, "forecast_towell": [
                     {"target_period": "2026-11", "statistical": 12, "ml": None, "ensemble_value": 11},
                 ]}]})
-            workflow = RSAssistantWorkflow(storage, compute=compute)
+            provider = Mock()
+            provider.start.return_value = {"status": "PENDING"}
+            workflow = RSAssistantWorkflow(storage, provider, compute=compute)
             body = RSAssistantRequest(**BODY, action="forecast")
             with self.assertRaisesRegex(PreviewError, "RS_FORECAST_HISTORY_INSUFFICIENT"):
-                workflow.answer(body, {**scoped, "records": records[:1]})
-            first = workflow.answer(body, scoped)["forecast"]
-            second = workflow.answer(body, scoped)["forecast"]
+                workflow.answer(body, {**scoped, "records": records[:1]}, may_start_research=True)
+            provider.start.assert_not_called()
+            response = workflow.answer(body, scoped, may_start_research=True)
+            provider.start.assert_called_once_with(SCOPE)
+            self.assertEqual(response["research"], {"status": "PENDING"})
+            first = response["forecast"]
+            provider.start.side_effect = sqlite3.OperationalError
+            cached = workflow.answer(body, scoped, may_start_research=True)
+            self.assertEqual(cached["research"]["reason"], "RESEARCH_STORAGE_UNAVAILABLE")
+            second = cached["forecast"]
             self.assertEqual(first, second)
             self.assertEqual(first["periods"][0]["statistical"], {"pieces": "12", "covered": 1, "eligible": 2})
             self.assertIsNone(first["periods"][0]["ml"]["pieces"])
             self.assertIsNone(first["live"])
             compute.assert_called_once()
+
+    def test_route_derives_research_permission_from_role_and_chain(self):
+        app = FastAPI()
+        identity, data, limiter, workflow = Mock(), Mock(), Mock(), Mock()
+        mount_rs_assistant(app, SimpleNamespace(ai_assistant_api_enabled=True), identity, data, limiter, workflow)
+        route = next(route.endpoint for route in app.routes if route.path == "/api/forecast/rs-assistant")
+        body = RSAssistantRequest(**BODY, message="¿Qué tendencias comerciales hay?")
+        request = SimpleNamespace(state=SimpleNamespace())
+        with patch("services.assistant_api.rs_assistant.load_rs_scope") as load:
+            for role, execute_chain_ids, expected in (
+                ("reader", {CHAIN}, False), ("editor", set(), False), ("editor", {CHAIN}, True),
+            ):
+                with self.subTest(role=role, execute_chain_ids=execute_chain_ids):
+                    identity.authenticate.return_value = Principal(
+                        "user", role, ROLE_PERMISSIONS[role], "session", frozenset({CHAIN}), frozenset(execute_chain_ids)
+                    )
+                    route(body, request, "Bearer fixture")
+                    workflow.answer.assert_called_with(body, load.return_value, may_start_research=expected)
 
     def test_route_rejects_anonymous_wrong_chain_and_inactive_b_before_work(self):
         app = FastAPI()

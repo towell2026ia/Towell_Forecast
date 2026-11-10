@@ -90,9 +90,9 @@ export class RailwayPreviewClient implements PreviewClient {
   readonly rsAssistant?: RsAssistantClient;
   constructor(private auth: SupabaseClient, private origin = process.env.NEXT_PUBLIC_FORECAST_API_URL ?? "") {
     try { this.apiOrigin(); } catch { return; }
-    this.rsAssistant = async request => {
+    this.rsAssistant = async (request, signal) => {
       if (!assistantScopeIsValid(request)) throw new PreviewReadError("REQUEST_001");
-      return parseRsAssistantResponse(await this.e4<unknown>("/api/forecast/rs-assistant", request), request);
+      return parseRsAssistantResponse(await this.e4<unknown>("/api/forecast/rs-assistant", request, undefined, signal), request);
     };
   }
   private apiOrigin() {
@@ -198,13 +198,14 @@ export class RailwayPreviewClient implements PreviewClient {
       capture_center: response.ok && result.capture_center === true,
       live_learning: response.ok && result.live_learning === true };
   }
-  private async e4<T>(path: string, body?: unknown, idempotencyKey?: string): Promise<T> {
+  private async e4<T>(path: string, body?: unknown, idempotencyKey?: string, signal?: AbortSignal): Promise<T> {
     const origin = this.apiOrigin();
-    if (this.controller.signal.aborted) throw new PreviewReadError("AUTH_REQUIRED");
+    const requestSignal = signal ? AbortSignal.any([this.controller.signal, signal]) : this.controller.signal;
+    if (requestSignal.aborted) throw new PreviewReadError("AUTH_REQUIRED");
     const { data } = await this.auth.auth.getSession();
     if (!data.session?.access_token) throw new PreviewReadError("AUTH_REQUIRED");
     const response = await fetch(origin + path, { method: body === undefined ? "GET" : "POST", credentials: "omit",
-      cache: "no-store", signal: this.controller.signal,
+      cache: "no-store", signal: requestSignal,
       headers: { Authorization: `Bearer ${data.session.access_token}`,
         ...(body === undefined ? {} : { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey ?? crypto.randomUUID() }) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }) });

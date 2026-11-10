@@ -16,7 +16,7 @@ Un producto con menos de seis meses consecutivos de venta desde su primera venta
 
 ## Activación y controles
 
-El cálculo numérico provisional se activa en el backend operacional para productos seleccionados con comparables válidos. Se ejecuta mediante la acción explícita del usuario autorizado. La investigación RS es una operación separada y tampoco se inicia al navegar o calcular una vista previa.
+El cálculo numérico provisional se activa en el backend operacional para productos seleccionados con comparables válidos. Se ejecuta mediante la acción explícita del usuario autorizado. La vista previa general carece de la selección completa de formato, modelo y tipo de compra requerida por la investigación RS.
 
 La integración RS reutiliza `ColdStartResearch`, Responses API y el coordinador existente. `OPENAI_API_KEY` se conserva únicamente como secreto del backend. `OPENAI_ENABLED` y `DEEP_RESEARCH_ENABLED` deben habilitarse juntos y requieren una clave configurada. `AI_ASSISTANT_API_ENABLED` habilita la nueva ruta operativa autenticada. La publicación de código y los cambios de configuración siguen sujetos a la autorización de despliegue. Los métodos estadísticos y los flags de publicación conservan su contrato.
 
@@ -30,9 +30,9 @@ El usuario puede solicitar una comparación provisional con el motor existente. 
 
 ## Investigación externa y presupuesto
 
-Las acciones de investigar y consultar su estado son explícitas. Las preguntas normales no disparan búsquedas. La caché persistente se distingue por cadena, formato, modelo, corte, versión operativa y política. Las consultas externas reciben únicamente un tema genérico de producto procedente de una lista controlada y un mes validado. Nunca reciben cantidades, identificadores internos, textos libres del catálogo, mensajes del usuario ni archivos.
+Los roles con permiso de ejecución para la cadena pueden iniciar investigaciones mediante una solicitud explícita, un cálculo RS elegible o una pregunta sobre mercado, estacionalidad, tendencias o riesgos comerciales. Se aplica la autorización operativa continua de uso de la clave existente de Railway. Los lectores pueden consultar resultados del alcance autorizado. La navegación y las preguntas sobre métricas internas por sí solas no inician búsquedas. La caché persistente se distingue por cadena, formato, modelo, corte, versión operativa y política. Las consultas externas reciben únicamente un tema genérico de producto procedente de una lista controlada y un mes validado. Nunca reciben cantidades, identificadores internos, textos libres del catálogo, mensajes del usuario ni archivos.
 
-Se conserva el modelo existente `gpt-5.5`, con tres llamadas máximas de herramientas y 3,000 tokens de salida por respuesta. El presupuesto preventivo limita el inicio a cuatro investigaciones diarias y 24 mensuales por volumen compartido. Estos límites son una decisión conservadora de implementación, pendientes de contrastar con el importe presupuestado. También se limitan el sondeo, la concurrencia y los reintentos inciertos. El resultado registra uso, fechas reales de consulta y motivos de error sin divulgar credenciales ni IDs del proveedor.
+Se conserva el modelo existente `gpt-5.5`, con tres llamadas máximas de herramientas y 3,000 tokens de salida por respuesta. El control de concurrencia admite cuatro investigaciones en curso por almacenamiento compartido. Una solicitud nueva puede volver a intentarse cuando se libera un lugar. El sondeo de una investigación ya iniciada tiene intervalo y vencimiento; los fallos de proveedor se registran sin reintentos automáticos. El resultado registra uso, fechas reales de consulta y motivos de error sin divulgar credenciales ni IDs del proveedor.
 
 Los hallazgos son contexto público de categoría. Una cita URL no acredita por sí sola la fecha de publicación o la accesibilidad de la fuente. Esos controles se verifican en la prueba real antes de declarar operativa la función. Las cantidades Python permanecen separadas de la investigación.
 

@@ -42,7 +42,7 @@ type RsCoverage = { pieces: string | null; products_with_data: number; products_
 type RsMonth = { period: string; fill_rate?: { ratio: string | null; paired_products: number; products_expected: number } } & Partial<Record<keyof typeof rsMetrics, RsCoverage>>;
 type RsCandidate = { pieces: string | null; covered: number; eligible: number };
 
-export type RsAssistantClient = (request: RsAssistantRequest) => Promise<RsAssistantResponse>;
+export type RsAssistantClient = (request: RsAssistantRequest, signal?: AbortSignal) => Promise<RsAssistantResponse>;
 
 export function safeResearchUrl(value: string) {
   try {

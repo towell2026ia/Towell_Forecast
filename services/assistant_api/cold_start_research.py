@@ -64,12 +64,16 @@ def public_citation(source):
 def public_research_result(result):
     if not isinstance(result, dict):
         return {"status": "UNAVAILABLE", "reason": "INVALID_RESPONSE"}
+    usage = result.get("usage")
+    counts = {k: n for k in ("input_tokens", "output_tokens", "total_tokens", "web_search_calls")
+              if isinstance(usage, dict) and type(n := usage.get(k)) is int and 0 <= n <= 1_000_000}
+    unavailable = {"status": "UNAVAILABLE", **({"usage": counts} if counts else {})}
     if result.get("status") == "UNAVAILABLE":
         reason = result.get("reason")
-        return {"status": "UNAVAILABLE", "reason": reason if isinstance(reason, str) and reason in SAFE_FAILURES else "PROVIDER_ERROR"}
+        return {**unavailable, "reason": reason if isinstance(reason, str) and reason in SAFE_FAILURES else "PROVIDER_ERROR"}
     summary = result.get("summary")
     if not isinstance(summary, str) or not summary.strip():
-        return {"status": "UNAVAILABLE", "reason": "EMPTY_RESPONSE"}
+        return {**unavailable, "reason": "EMPTY_RESPONSE"}
     sources, seen = [], set()
     candidates = result.get("sources")
     for item in candidates[:12] if isinstance(candidates, list) else []:
@@ -78,10 +82,7 @@ def public_research_result(result):
             sources.append(source)
             seen.add(source["url"])
     if not sources:
-        return {"status": "UNAVAILABLE", "reason": "NO_PUBLIC_CITATIONS"}
-    usage = result.get("usage")
-    counts = {k: n for k in ("input_tokens", "output_tokens", "total_tokens", "web_search_calls")
-              if isinstance(usage, dict) and type(n := usage.get(k)) is int and 0 <= n <= 1_000_000}
+        return {**unavailable, "reason": "NO_PUBLIC_CITATIONS"}
     return {"status": "COMPLETED", "summary": _PRIVATE_MARKERS.sub("[dato omitido]", summary[:3000].strip()),
             "sources": sources, "usage": counts}
 
@@ -162,19 +163,22 @@ class ColdStartResearch:
         status = result.get("status") if isinstance(result, dict) else None
         if status in {"queued", "in_progress"}:
             return {"status": "PENDING", "response_id": response_id, "model": self.model}
+        output = result.get("output") if isinstance(result, dict) else None
+        items = output if isinstance(output, list) else []
+        reported = result.get("usage") if isinstance(result, dict) else None
+        usage = dict(reported) if isinstance(reported, dict) else {}
+        if items:
+            usage["web_search_calls"] = sum(isinstance(item, dict) and item.get("type") == "web_search_call"
+                                            for item in items)
         if status != "completed":
-            return {"status": "UNAVAILABLE", "reason": "INCOMPLETE" if status == "incomplete" else "RESPONSE_FAILED"}
-        text, sources, searches = [], [], 0
-        output = result.get("output")
-        for item in output if isinstance(output, list) else []:
-            if not isinstance(item, dict):
+            return public_research_result({"status": "UNAVAILABLE", "usage": usage,
+                "reason": "INCOMPLETE" if status == "incomplete" else "RESPONSE_FAILED"})
+        text, sources = [], []
+        for item in items:
+            if not isinstance(item, dict) or item.get("type") != "message":
                 continue
-            if item.get("type") == "web_search_call":
-                searches += 1
-            if item.get("type") != "message":
-                continue
-            items = item.get("content")
-            for content in items if isinstance(items, list) else []:
+            contents = item.get("content")
+            for content in contents if isinstance(contents, list) else []:
                 if not isinstance(content, dict) or content.get("type") != "output_text":
                     continue
                 paragraph = content.get("text")
@@ -184,6 +188,5 @@ class ColdStartResearch:
                 for annotation in annotations if isinstance(annotations, list) else []:
                     if isinstance(annotation, dict) and annotation.get("type") in (None, "url_citation"):
                         sources.append(annotation)
-        usage = result.get("usage")
         return public_research_result({"status": "COMPLETED", "summary": "\n".join(text), "sources": sources,
-            "usage": {**(usage if isinstance(usage, dict) else {}), "web_search_calls": searches}})
+            "usage": usage})

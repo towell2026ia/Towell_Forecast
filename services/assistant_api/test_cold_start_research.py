@@ -100,13 +100,22 @@ class ResearchTests(unittest.TestCase):
                     {"type": "message", "content": [content]}],
                     "usage": {"input_tokens": 10, "output_tokens": 12, "total_tokens": 22, "secret": "private"}}
         with patch.object(research, "_request", return_value=response):
-            self.assertEqual(research.poll("resp_test"), {"status": "UNAVAILABLE", "reason": "NO_PUBLIC_CITATIONS"})
+            uncited = research.poll("resp_test")
             content["annotations"].append({"url": "https://source.example.com/public?token=private#section", "title": "Informe"})
             result = research.poll("resp_test")
         self.assertEqual(result["sources"], [{"title": "Informe", "url": "https://source.example.com/public"}])
         self.assertEqual(result["usage"], {"input_tokens": 10, "output_tokens": 12, "total_tokens": 22, "web_search_calls": 1})
+        self.assertEqual(uncited, {"status": "UNAVAILABLE", "reason": "NO_PUBLIC_CITATIONS", "usage": result["usage"]})
         self.assertNotIn("resp_fixture", str(result))
         self.assertNotIn("private", str(result))
+
+    def test_incomplete_research_preserves_reported_usage(self):
+        research = ColdStartResearch("sk-test-only")
+        response = {"status": "incomplete", "output": [{"type": "web_search_call"}], "usage": {"total_tokens": 3000}}
+        with patch.object(research, "_request", return_value=response):
+            result = research.poll("resp_test")
+        self.assertEqual(result, {"status": "UNAVAILABLE", "reason": "INCOMPLETE",
+                                  "usage": {"total_tokens": 3000, "web_search_calls": 1}})
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -85,25 +86,29 @@ class RSResearchTests(unittest.TestCase):
         self.assertTrue(all(row["status"] == "PENDING" for row in results))
         self.provider.start_public.assert_called_once()
 
-    def test_global_daily_monthly_budgets_are_persistent(self):
-        service = RSResearch(self.storage, self.provider, daily_limit=2, monthly_limit=3, now=lambda: self.clock)
-        service.start(SCOPE)
-        service.start({**SCOPE, "format": "FORMATO-2"})
-        self.assertEqual(service.start({**SCOPE, "format": "FORMATO-3"})["reason"], "BUDGET_EXHAUSTED")
-        self.clock += 86400
-        restarted = RSResearch(self.storage, self.provider, daily_limit=2, monthly_limit=3, now=lambda: self.clock)
-        restarted.start({**SCOPE, "format": "FORMATO-3"})
-        self.assertEqual(restarted.start({**SCOPE, "format": "FORMATO-4"})["reason"], "BUDGET_EXHAUSTED")
-        self.assertEqual(self.provider.start_public.call_count, 3)
+    def test_completed_runs_do_not_fill_calendar_quotas(self):
+        for index in range(125):
+            scope = {**SCOPE, "format": f"FORMAT-{index}"}
+            self.assertEqual(self.research.start(scope)["status"], "PENDING")
+            self.assertEqual(self.research.status(scope)["status"], "COMPLETED")
+        self.assertEqual(self.provider.start_public.call_count, 125)
+        self.assertEqual(self.provider.poll.call_count, 125)
 
-    def test_distinct_concurrent_scopes_share_start_budget(self):
+    def test_distinct_concurrent_scopes_share_slots_and_busy_can_retry(self):
         def start(index):
-            service = RSResearch(self.storage, self.provider, daily_limit=2, monthly_limit=3, now=lambda: self.clock)
+            service = RSResearch(self.storage, self.provider, max_pending=2, now=lambda: self.clock)
             return service.start({**SCOPE, "format": f"FORMAT-{index}"})
         with ThreadPoolExecutor(max_workers=6) as workers:
             results = list(workers.map(start, range(12)))
         self.assertEqual(sum(row["status"] == "PENDING" for row in results), 2)
         self.assertEqual(self.provider.start_public.call_count, 2)
+        pending_index = next(index for index, row in enumerate(results) if row["status"] == "PENDING")
+        busy_index = next(index for index, row in enumerate(results) if row.get("reason") == "BUSY")
+        self.assertEqual(results[busy_index], {"status": "UNAVAILABLE", "reason": "BUSY", "retryable": True})
+        self.assertEqual(self.research.cached({**SCOPE, "format": f"FORMAT-{busy_index}"}), {"status": "NOT_REQUESTED"})
+        self.research.status({**SCOPE, "format": f"FORMAT-{pending_index}"})
+        self.assertEqual(start(busy_index)["status"], "PENDING")
+        self.assertEqual(self.provider.start_public.call_count, 3)
 
     def test_polling_is_bounded_and_result_hides_response_id(self):
         service = RSResearch(self.storage, self.provider, max_polls=2, now=lambda: self.clock)
@@ -128,19 +133,44 @@ class RSResearchTests(unittest.TestCase):
         self.assertIn("started_at", result)
         self.assertIn("finished_at", result)
 
-    def test_polling_budget_and_deadline_apply_across_instances(self):
+    def test_expired_pending_releases_slot_without_polling(self):
         self.provider.poll.return_value = {"status": "PENDING"}
-        service = RSResearch(self.storage, self.provider, global_daily_polls=1, now=lambda: self.clock)
+        service = RSResearch(self.storage, self.provider, max_pending=1, now=lambda: self.clock)
         other = {**SCOPE, "format": "OTHER"}
         service.start(SCOPE)
-        service.start(other)
-        service.status(SCOPE)
-        restarted = RSResearch(self.storage, self.provider, global_daily_polls=1, now=lambda: self.clock)
-        self.assertEqual(restarted.status(other)["status"], "PENDING")
-        self.assertEqual(self.provider.poll.call_count, 1)
+        self.assertEqual(service.start(other)["reason"], "BUSY")
+        restarted = RSResearch(self.storage, self.provider, max_pending=1, now=lambda: self.clock)
         self.clock += 601
-        self.assertEqual(restarted.status(other)["reason"], "TIMEOUT")
-        self.assertEqual(restarted.start(other)["reason"], "TIMEOUT")
+        self.assertEqual(restarted.start(other)["status"], "PENDING")
+        self.assertEqual(restarted.status(SCOPE)["reason"], "TIMEOUT")
+        self.assertEqual(restarted.start(SCOPE)["reason"], "TIMEOUT")
+        self.provider.poll.assert_not_called()
+        self.assertEqual(self.provider.start_public.call_count, 2)
+
+    def test_expired_reservation_releases_slot_and_late_response_is_ignored(self):
+        service = RSResearch(self.storage, self.provider, max_pending=1, now=lambda: self.clock)
+        started, release = Event(), Event()
+
+        def slow_provider(topic, *, cutoff):
+            if cutoff == "2026-10":
+                started.set()
+                if not release.wait(5):
+                    raise RuntimeError("test provider timed out")
+            return {"status": "PENDING", "response_id": "resp_fixture"}
+
+        self.provider.start_public.side_effect = slow_provider
+        next_scope = {**SCOPE, "period": "2026-11"}
+        with ThreadPoolExecutor(max_workers=1) as worker:
+            first = worker.submit(service.start, SCOPE)
+            try:
+                self.assertTrue(started.wait(5))
+                self.assertEqual(service.start(next_scope)["reason"], "BUSY")
+                self.clock += 121
+                self.assertEqual(service.start(next_scope)["status"], "PENDING")
+            finally:
+                release.set()
+            self.assertEqual(first.result(timeout=5)["reason"], "TIMEOUT")
+        self.assertEqual(service.status(SCOPE)["reason"], "TIMEOUT")
         self.assertEqual(self.provider.start_public.call_count, 2)
 
     def test_uncited_output_is_unavailable_and_usage_is_whitelisted(self):

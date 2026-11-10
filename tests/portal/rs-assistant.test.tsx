@@ -1,22 +1,22 @@
 import React from "react";
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import ForecastAssistant from "../../app/forecast-assistant";
 import { PreviewReadError, RailwayPreviewClient } from "../../lib/forecast-preview";
 import type { AssistantContext } from "../../app/assistant/assistant-service";
-import { parseRsAssistantResponse, safeResearchUrl, type RsAssistantRequest, type RsAssistantResponse } from "../../lib/rs-assistant";
+import { parseRsAssistantResponse, safeResearchUrl, type RsAssistantClient, type RsAssistantRequest, type RsAssistantResponse } from "../../lib/rs-assistant";
 
 vi.mock("next/dynamic", () => ({ default: () => function Animation() { return <span>Animation</span>; } }));
 
 const chain = "00000000-0000-0000-0000-000000000001";
 const request: RsAssistantRequest = { chain_id: chain, format: "FORMATO", model: "MODELO DE PRUEBA", period: "2026-10", purchase_type: "RS", message: "Consulta de cobertura", action: "answer" };
-const context: AssistantContext = { user: "viewer", role: "reader", chainId: chain, chain: "Cadena de prueba", screen: "Periodos", category: null, product: null, color: null, period: null, activeFilters: {}, periodRange: ["2026-10", "2026-10"], commercialModels: [request.model] };
+const context: AssistantContext = { user: "editor", role: "editor", globalRole: "EDITOR", chainId: chain, chain: "Cadena de prueba", screen: "Periodos", category: null, product: null, color: null, period: null, activeFilters: {}, periodRange: ["2026-10", "2026-10"], commercialModels: [request.model] };
 function result(): RsAssistantResponse {
   return {
     message: "Datos del alcance consultado.",
-    scope: { chain_id: chain, chain: "Cadena de prueba", format: request.format, model: request.model, period: request.period },
+    scope: { chain_id: chain, chain: "Cadena de prueba", format: request.format, model: request.model, period: request.period, version_id: "00000000-0000-0000-0000-000000000010", generation: 3 },
     quality: { products_classified: 2, temporal_certification: false },
     metrics: { by_month: [{ period: request.period, SALES: { pieces: "12.1234567890123456", products_with_data: 1, products_expected: 2 }, ORDER: { pieces: "20", products_with_data: 2, products_expected: 2 }, DELIVERY: { pieces: null, products_with_data: 0, products_expected: 2 }, fill_rate: { ratio: null, paired_products: 0, products_expected: 2 } }], inventory: { pieces: "0", products_with_data: 1, products_expected: 2 } },
     forecast: { status: "PROVISIONAL", engine: "test-engine", periods: [{ period: "2026-11", statistical: { pieces: "15.01", covered: 1, eligible: 2 }, ml: { pieces: null, covered: 0, eligible: 2 }, ensemble_value: { pieces: "14.12", covered: 1, eligible: 2 } }], retrospective: { statistical: { wape: 10, bias: -2 }, ml: { wape: null, bias: null } } },
@@ -29,10 +29,21 @@ function result(): RsAssistantResponse {
     },
   };
 }
-function panel(client: (body: RsAssistantRequest) => Promise<RsAssistantResponse>, ctx = context) {
+function panel(client: RsAssistantClient, ctx = context) {
   return <ForecastAssistant authorized uiEnabled apiEnabled={false} voiceEnabled={false} mode="local" context={ctx} rsAssistant={client}/>;
 }
 async function open() { await userEvent.click(screen.getByRole("button", { name: "Abrir Asistente FORECAST Towell" })); }
+const pendingResult = (): RsAssistantResponse => ({ ...result(), research: { status: "PENDING" } });
+async function selectFormat() {
+  await open();
+  await userEvent.type(screen.getByLabelText("Formato comercial"), request.format);
+}
+async function startForecast() {
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Calcular / consultar pronóstico RS" })); });
+}
+async function pollOnce() {
+  await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+}
 
 describe("Scoped RS assistant transport", () => {
   it("has no operational transport without an explicit valid Railway origin", () => {
@@ -67,6 +78,27 @@ describe("Scoped RS assistant transport", () => {
     expect(safeResearchUrl("https://user:password@example.org")).toBeNull();
     vi.unstubAllGlobals();
   });
+  it("propagates cancellation to the Railway fetch", async () => {
+    let inspect: (signal: AbortSignal) => void = () => {};
+    const fetching = new Promise<AbortSignal>(resolve => { inspect = resolve; });
+    const fetcher = vi.fn((_url: string, options: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      const signal = options.signal!;
+      inspect(signal);
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    }));
+    vi.stubGlobal("fetch", fetcher);
+    try {
+      const auth = { auth: { getSession: vi.fn(async () => ({ data: { session: { access_token: "synthetic-user-token" } } })) } } as unknown as SupabaseClient;
+      const controller = new AbortController();
+      const client = new RailwayPreviewClient(auth, "https://railway.example.org");
+      const reply = client.rsAssistant!({ ...request, action: "research_status" }, controller.signal);
+      const failed = expect(reply).rejects.toMatchObject({ name: "AbortError" });
+      const signal = await fetching;
+      controller.abort();
+      expect(signal.aborted).toBe(true);
+      await failed;
+    } finally { vi.unstubAllGlobals(); }
+  });
   it("accepts only the requested normalized model, format and authorized archive", () => {
     const original = result();
     expect(parseRsAssistantResponse({ ...original, scope: { ...original.scope, model: "módelo   de prueba", format: "FÓR-MA_TO", archive_id: "UNIF-20060057ee8e4dfdbcd9" } }, request).scope?.model).toBe("módelo   de prueba");
@@ -83,6 +115,14 @@ describe("Scoped RS assistant transport", () => {
 });
 
 describe("Existing assistant panel with explicit RS actions", () => {
+  it("keeps explicit execution unavailable to viewers while allowing status reads", async () => {
+    const client = vi.fn<RsAssistantClient>(async () => result());
+    render(panel(client, { ...context, role: "reader", globalRole: "VIEWER" })); await selectFormat();
+    expect(screen.getByRole("button", { name: "Calcular / consultar pronóstico RS" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Iniciar investigación pública" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Consultar estado de investigación" }).hasAttribute("disabled")).toBe(false);
+    expect(client).not.toHaveBeenCalled();
+  });
   it("does not call any operation on mount, opening, editing or scope changes", async () => {
     const client = vi.fn<(body: RsAssistantRequest) => Promise<RsAssistantResponse>>(async () => result());
     const { rerender } = render(panel(client, { ...context, chainId: null }));
@@ -129,5 +169,75 @@ describe("Existing assistant panel with explicit RS actions", () => {
     expect(within(screen.getByLabelText("Conversación del asistente")).queryByText(/La versión RS requerida/)).toBeNull();
     expect((screen.getByLabelText("Formato comercial") as HTMLInputElement).value).toBe("");
     expect(client).toHaveBeenCalledOnce();
+  });
+  it("polls only the research already pending and preserves the forecast when a status response omits it", async () => {
+    const client = vi.fn<RsAssistantClient>().mockResolvedValueOnce(pendingResult()).mockResolvedValueOnce({ ...result(), message: "Respuesta de estado", forecast: undefined });
+    render(panel(client)); await selectFormat();
+    vi.useFakeTimers();
+    try {
+      await startForecast();
+      expect(screen.getByText("Investigación pendiente")).toBeTruthy();
+      expect(client).toHaveBeenCalledOnce();
+      await pollOnce();
+      const [body, signal] = client.mock.calls[1];
+      expect(body).toEqual({ ...request, message: "", action: "research_status" });
+      expect(signal).toBeDefined();
+      expect(screen.getByText("Investigación completada")).toBeTruthy();
+      expect(screen.getByRole("table", { name: "Pronóstico RS del asistente" }).textContent).toContain("15.01");
+      expect(screen.getByText("Datos del alcance consultado.")).toBeTruthy();
+      expect(screen.queryByText("Respuesta de estado")).toBeNull();
+      await pollOnce();
+      expect(client).toHaveBeenCalledTimes(2);
+    } finally { vi.useRealTimers(); }
+  });
+  it("bounds automatic status reads and allows a manual retry on the same message", async () => {
+    const client = vi.fn<RsAssistantClient>(async () => pendingResult());
+    render(panel(client)); await selectFormat();
+    vi.useFakeTimers();
+    try {
+      await startForecast();
+      for (let attempt = 0; attempt < 21; attempt++) await pollOnce();
+      expect(client).toHaveBeenCalledTimes(21);
+      expect(screen.getByText(/Seguimiento automático detenido/)).toBeTruthy();
+      await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Consultar estado de investigación" })); });
+      await pollOnce();
+      expect(client).toHaveBeenCalledTimes(23);
+      expect(screen.getAllByText("Investigación pendiente")).toHaveLength(1);
+      expect(client.mock.calls.slice(1).every(([body]) => body.action === "research_status")).toBe(true);
+    } finally { vi.useRealTimers(); }
+  });
+  it.each(["scope", "close", "unmount"])("aborts an in-flight status read on %s and drops a late reply", async mode => {
+    let complete: (response: RsAssistantResponse) => void = () => {};
+    const client = vi.fn<RsAssistantClient>().mockResolvedValueOnce(pendingResult()).mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
+    const view = render(panel(client)); await selectFormat();
+    vi.useFakeTimers();
+    try {
+      await startForecast();
+      await pollOnce();
+      const signal = client.mock.calls[1][1]!;
+      expect(signal.aborted).toBe(false);
+      if (mode === "scope") view.rerender(panel(client, { ...context, chainId: "00000000-0000-0000-0000-000000000002" }));
+      else if (mode === "close") fireEvent.click(screen.getByRole("button", { name: "Close" }));
+      else view.unmount();
+      expect(signal.aborted).toBe(true);
+      await act(async () => complete(result()));
+      if (mode === "close") fireEvent.click(screen.getByRole("button", { name: "Abrir Asistente FORECAST Towell" }));
+      expect(screen.queryByText("Investigación completada")).toBeNull();
+      await pollOnce();
+      expect(client).toHaveBeenCalledTimes(2);
+    } finally { vi.useRealTimers(); }
+  });
+  it("keeps the original result when a status reply comes from a different generation", async () => {
+    const client = vi.fn<RsAssistantClient>().mockResolvedValueOnce(pendingResult()).mockResolvedValueOnce({ ...result(), scope: { ...result().scope!, generation: 4 } });
+    render(panel(client)); await selectFormat();
+    vi.useFakeTimers();
+    try {
+      await startForecast();
+      await pollOnce();
+      expect(screen.queryByText("Investigación completada")).toBeNull();
+      expect(screen.getByText("Investigación pendiente")).toBeTruthy();
+      expect(screen.getByText(/Seguimiento automático detenido/)).toBeTruthy();
+      expect(screen.getByRole("table", { name: "Pronóstico RS del asistente" })).toBeTruthy();
+    } finally { vi.useRealTimers(); }
   });
 });

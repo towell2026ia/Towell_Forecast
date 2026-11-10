@@ -1,4 +1,4 @@
-"""Opt-in, public-only RS context with a shared durable budget."""
+"""Public RS context with durable deduplication."""
 from __future__ import annotations
 
 import json
@@ -49,15 +49,14 @@ def _iso(timestamp):
 
 
 class RSResearch:
-    def __init__(self, storage, researcher, *, daily_limit=4, monthly_limit=24, poll_interval=15,
-                 poll_ttl=600, max_polls=20, global_daily_polls=120, now=time.time):
-        limits = (daily_limit, monthly_limit, poll_interval, poll_ttl, max_polls, global_daily_polls)
-        if any(type(limit) is not int or limit < 1 for limit in limits) or monthly_limit < daily_limit:
+    def __init__(self, storage, researcher, *, max_pending=4, poll_interval=15,
+                 poll_ttl=600, max_polls=20, now=time.time):
+        limits = (max_pending, poll_interval, poll_ttl, max_polls)
+        if any(type(limit) is not int or limit < 1 for limit in limits):
             raise ValueError("invalid_research_limits")
         self.researcher, self.now = researcher, now
-        self.daily_limit, self.monthly_limit = daily_limit, monthly_limit
-        self.poll_interval, self.poll_ttl = poll_interval, poll_ttl
-        self.max_polls, self.global_daily_polls = max_polls, global_daily_polls
+        self.max_pending, self.poll_interval = max_pending, poll_interval
+        self.poll_ttl, self.max_polls = poll_ttl, max_polls
         if self.researcher is None:
             return
         self.path = storage.path
@@ -67,9 +66,6 @@ class RSResearch:
                 next_poll real not null, polls integer not null default 0,
                 state text not null check(state in ('RESERVED','PENDING','COMPLETED','UNAVAILABLE')),
                 provider_id text, result text)""")
-            c.execute("create index if not exists rs_public_research_started on rs_public_research(started)")
-            c.execute("""create table if not exists rs_public_research_poll_budget (
-                day text primary key, polls integer not null)""")
 
     @contextmanager
     def _transaction(self):
@@ -95,25 +91,27 @@ class RSResearch:
                     where cache_key=? and state in ('RESERVED','PENDING')""",
                   (result["status"], now, json.dumps(result, ensure_ascii=False), key))
 
+    def _expire(self, c, now):
+        c.execute("""update rs_public_research set state='UNAVAILABLE',finished=?,provider_id=null,result=?
+            where (state='RESERVED' and next_poll<=?) or (state='PENDING' and started<=?)""",
+            (now, json.dumps({"status": "UNAVAILABLE", "reason": "TIMEOUT"}), now, now - self.poll_ttl))
+
     def start(self, scope):
-        """Reserve the cost atomically before initiating one provider response."""
+        """Reserve an available slot atomically before initiating a provider response."""
         key, topic, period = _scope_key(scope)
         if not self.researcher:
             return {"status": "DISABLED"}
         if not topic:
             return {"status": "UNAVAILABLE", "reason": "PUBLIC_TOPIC_UNVERIFIED"}
         now = self.now()
-        current = datetime.fromtimestamp(now, timezone.utc)
-        day = current.replace(hour=0, minute=0, second=0, microsecond=0)
-        month = day.replace(day=1)
         with self._transaction() as c:
+            self._expire(c, now)
             stored = self._lookup(c, key)
             if stored is not None:
                 return self._public(stored)
-            monthly, daily = c.execute("""select count(*), count(*) filter(where started>=?)
-                from rs_public_research where started>=?""", (day.timestamp(), month.timestamp())).fetchone()
-            if daily >= self.daily_limit or monthly >= self.monthly_limit:
-                return {"status": "UNAVAILABLE", "reason": "BUDGET_EXHAUSTED"}
+            pending = c.execute("select count(*) from rs_public_research where state in ('RESERVED','PENDING')").fetchone()[0]
+            if pending >= self.max_pending:
+                return {"status": "UNAVAILABLE", "reason": "BUSY", "retryable": True}
             c.execute("""insert into rs_public_research(cache_key,started,next_poll,state)
                          values(?,?,?,'RESERVED')""", (key, now, now + min(120, self.poll_ttl)))
         try:
@@ -123,6 +121,7 @@ class RSResearch:
         now = self.now()
         response_id = response.get("response_id") if isinstance(response, dict) and response.get("status") == "PENDING" else None
         with self._transaction() as c:
+            self._expire(c, now)
             if isinstance(response_id, str) and SAFE_RESPONSE_ID.fullmatch(response_id):
                 c.execute("""update rs_public_research set state='PENDING',provider_id=?,next_poll=?
                              where cache_key=? and state='RESERVED'""", (response_id, now, key))
@@ -139,41 +138,38 @@ class RSResearch:
             return {"status": "UNAVAILABLE", "reason": "PUBLIC_TOPIC_UNVERIFIED"}
         now = self.now()
         with self._transaction() as c:
+            self._expire(c, now)
             row = self._lookup(c, key)
             if row is None:
                 return {"status": "NOT_REQUESTED"}
             if row["state"] in {"UNAVAILABLE", "COMPLETED"}:
                 return self._public(row)
-            if now >= row["started"] + self.poll_ttl or (row["state"] == "RESERVED" and now >= row["next_poll"]):
-                self._finish(c, key, now, {"status": "UNAVAILABLE", "reason": "TIMEOUT"})
-                return self._public(self._lookup(c, key))
             if row["state"] == "RESERVED" or now < row["next_poll"]:
                 return self._public(row)
             if row["polls"] >= self.max_polls:
                 self._finish(c, key, now, {"status": "UNAVAILABLE", "reason": "POLL_LIMIT"})
                 return self._public(self._lookup(c, key))
-            day = datetime.fromtimestamp(now, timezone.utc).date().isoformat()
-            daily = c.execute("select polls from rs_public_research_poll_budget where day=?", (day,)).fetchone()
-            if daily and daily["polls"] >= self.global_daily_polls:
-                return self._public(row)
-            c.execute("""insert into rs_public_research_poll_budget values(?,1)
-                         on conflict(day) do update set polls=polls+1""", (day,))
             c.execute("update rs_public_research set next_poll=?,polls=polls+1 where cache_key=?",
                       (now + max(self.poll_interval, 60), key))
         try:
             response = self.researcher.poll(row["provider_id"])
         except Exception:
             response = {"status": "UNAVAILABLE", "reason": "PROVIDER_ERROR"}
+        now = self.now()
         with self._transaction() as c:
+            self._expire(c, now)
             if isinstance(response, dict) and response.get("status") == "PENDING":
-                c.execute("update rs_public_research set next_poll=? where cache_key=? and state='PENDING'",
-                          (self.now() + self.poll_interval, key))
+                if row["polls"] + 1 >= self.max_polls:
+                    self._finish(c, key, now, {"status": "UNAVAILABLE", "reason": "POLL_LIMIT"})
+                else:
+                    c.execute("update rs_public_research set next_poll=? where cache_key=? and state='PENDING'",
+                              (now + self.poll_interval, key))
             else:
-                self._finish(c, key, self.now(), public_research_result(response))
+                self._finish(c, key, now, public_research_result(response))
             return self._public(self._lookup(c, key))
 
     def cached(self, scope):
-        """Return the last public result without polling or changing the budget."""
+        """Return the last saved public result without contacting the provider."""
         key, topic, _ = _scope_key(scope)
         if not self.researcher:
             return {"status": "DISABLED"}
