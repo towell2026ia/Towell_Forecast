@@ -46,6 +46,8 @@ const researchStatus: Record<string, string> = {
   COMPLETED: "Investigación completada", PENDING: "Investigación pendiente", QUEUED: "Investigación pendiente", IN_PROGRESS: "Investigación en curso",
   DISABLED: "Investigación desactivada", UNAVAILABLE: "Investigación no disponible", FAILED: "No se pudo completar la investigación", NO_EVIDENCE: "Sin evidencia pública suficiente",
 };
+const researchTime = new Intl.DateTimeFormat("es-MX", { dateStyle: "medium", timeStyle: "short", timeZone: "America/Mexico_City" });
+const usageLabels = { input_tokens: "Tokens de entrada", output_tokens: "Tokens de salida", total_tokens: "Tokens totales", web_search_calls: "Búsquedas web" } as const;
 const rsErrors: Record<string, string> = {
   SCOPE_FORBIDDEN: "Tu cuenta no tiene acceso a ese alcance o a la acción solicitada.",
   AUTH_REQUIRED: "La sesión debe renovarse antes de consultar el asistente.",
@@ -88,13 +90,26 @@ function AssistantEvidence({ response }: { response: RsAssistantResponse }) {
     const href = safeResearchUrl(source.url);
     return href ? [{ ...source, url: href }] : [];
   }) ?? [];
+  const usage = (Object.keys(usageLabels) as (keyof typeof usageLabels)[]).flatMap(key => {
+    const value = research?.usage?.[key];
+    return value === undefined ? [] : [{ label: usageLabels[key], value }];
+  });
   return <>
     {response.metrics && <AssistantFacts response={response}/>}
     {response.uncertainty && <p className="mt-2 text-xs text-slate-500">{response.uncertainty}</p>}
     {research && <div className="mt-2 border-t border-slate-200 pt-2 text-xs">
       <p className="font-medium">{researchStatus[research.status] ?? "Estado de investigación sin confirmar"}{research.model ? ` · ${research.model}` : ""}</p>
+      {research.evidence_scope === "PUBLIC_CATEGORY_CONTEXT" && <p>Contexto público de la categoría.</p>}
+      {(research.started_at || research.finished_at) && <dl aria-label="Fechas de ejecución" className="mt-1">
+        {research.started_at && <div><dt className="inline font-medium">Inicio </dt><dd className="inline"><time dateTime={research.started_at}>{researchTime.format(new Date(research.started_at))}</time> · hora de Ciudad de México</dd></div>}
+        {research.finished_at && <div><dt className="inline font-medium">Fin </dt><dd className="inline"><time dateTime={research.finished_at}>{researchTime.format(new Date(research.finished_at))}</time> · hora de Ciudad de México</dd></div>}
+      </dl>}
+      {usage.length > 0 && <dl aria-label="Consumo de la investigación" className="mt-1">
+        {usage.map(({ label, value }) => <div key={label}><dt className="inline font-medium">{label} </dt><dd className="inline">{value.toLocaleString("es-MX")}</dd></div>)}
+      </dl>}
       {research.summary && research.summary !== response.message && <p className="whitespace-pre-wrap">{research.summary}</p>}
       {sources.length > 0 && <ul aria-label="Fuentes públicas" className="mt-1 list-disc pl-4">{sources.map(source => <li key={source.url}><a href={source.url} target="_blank" rel="noopener noreferrer" className="break-words underline">{source.title}</a></li>)}</ul>}
+      {research.source_publication_dates_verified === false && <p className="mt-1 text-slate-500">Fechas de publicación de las fuentes sin acreditar.</p>}
     </div>}
   </>;
 }

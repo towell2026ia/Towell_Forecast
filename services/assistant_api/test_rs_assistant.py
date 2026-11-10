@@ -31,6 +31,9 @@ class RSAssistantTests(unittest.TestCase):
             message = "riesgo de desabasto; private text"
             answer = workflow.answer(RSAssistantRequest(**BODY, message=message), scoped)
             self.assertIn("inventario disponible es agregado", answer["message"])
+            explanation = workflow.answer(RSAssistantRequest(**BODY, message="Explica el Bias"), scoped)
+            self.assertIn("real menos pronóstico", explanation["message"])
+            self.assertIn("positivo indica subestimación", explanation["message"])
             compute.assert_not_called()
             provider.start.assert_not_called()
             provider.status.assert_not_called()

@@ -20,7 +20,13 @@ function result(): RsAssistantResponse {
     quality: { products_classified: 2, temporal_certification: false },
     metrics: { by_month: [{ period: request.period, SALES: { pieces: "12.1234567890123456", products_with_data: 1, products_expected: 2 }, ORDER: { pieces: "20", products_with_data: 2, products_expected: 2 }, DELIVERY: { pieces: null, products_with_data: 0, products_expected: 2 }, fill_rate: { ratio: null, paired_products: 0, products_expected: 2 } }], inventory: { pieces: "0", products_with_data: 1, products_expected: 2 } },
     forecast: { status: "PROVISIONAL", engine: "test-engine", periods: [{ period: "2026-11", statistical: { pieces: "15.01", covered: 1, eligible: 2 }, ml: { pieces: null, covered: 0, eligible: 2 }, ensemble_value: { pieces: "14.12", covered: 1, eligible: 2 } }], retrospective: { statistical: { wape: 10, bias: -2 }, ml: { wape: null, bias: null } } },
-    research: { status: "COMPLETED", summary: "Evidencia pública limitada.", sources: [{ title: "Fuente", url: "https://example.org/report" }, { title: "Unsafe", url: "javascript:alert(1)" }] },
+    research: {
+      status: "COMPLETED", summary: "Evidencia pública limitada.",
+      started_at: "2026-11-10T20:05:12.123456+00:00", finished_at: "2026-11-10T20:07:15+00:00",
+      usage: { input_tokens: 130, output_tokens: 55, total_tokens: 185, web_search_calls: 2 },
+      evidence_scope: "PUBLIC_CATEGORY_CONTEXT", source_publication_dates_verified: false,
+      sources: [{ title: "Fuente", url: "https://example.org/report" }, { title: "Unsafe", url: "javascript:alert(1)" }],
+    },
   };
 }
 function panel(client: (body: RsAssistantRequest) => Promise<RsAssistantResponse>, ctx = context) {
@@ -46,6 +52,10 @@ describe("Scoped RS assistant transport", () => {
     expect(init).toMatchObject({ method: "POST", credentials: "omit", cache: "no-store", headers: expect.objectContaining({ Authorization: "Bearer synthetic-user-token" }) });
     expect(JSON.parse(String(init.body))).toEqual(request);
     expect(response.research?.sources).toEqual([{ title: "Fuente", url: "https://example.org/report" }]);
+    expect(response.research).toMatchObject({
+      started_at: result().research?.started_at, finished_at: result().research?.finished_at, usage: result().research?.usage,
+      evidence_scope: "PUBLIC_CATEGORY_CONTEXT", source_publication_dates_verified: false,
+    });
     vi.unstubAllGlobals();
   });
   it("refuses unauthenticated or mismatched results without a local fallback", async () => {
@@ -63,6 +73,12 @@ describe("Scoped RS assistant transport", () => {
     for (const scope of [{ ...original.scope, model: "Otro modelo" }, { ...original.scope, format: "Otro formato" }, { ...original.scope, archive_id: "otra-version" }]) {
       expect(() => parseRsAssistantResponse({ ...original, scope }, request)).toThrow("RS_ASSISTANT_INVALID_RESPONSE");
     }
+  });
+  it("drops invalid research dates and usage without inventing missing values", () => {
+    const original = result();
+    const research = { ...original.research, started_at: "2026-02-30T20:05:12Z", finished_at: null, usage: { input_tokens: "130", output_tokens: -1, total_tokens: 1_000_001, web_search_calls: 0, extra: 3 }, evidence_scope: "OTHER", source_publication_dates_verified: "false" };
+    expect(parseRsAssistantResponse({ ...original, research }, request).research).toMatchObject({ started_at: undefined, finished_at: null, usage: { web_search_calls: 0 }, evidence_scope: undefined, source_publication_dates_verified: undefined });
+    expect(parseRsAssistantResponse({ ...original, research: { ...original.research, finished_at: "2026-11-10T20:04:00Z" } }, request).research?.finished_at).toBeUndefined();
   });
 });
 
@@ -92,6 +108,11 @@ describe("Existing assistant panel with explicit RS actions", () => {
     expect(screen.getByText(/WAPE retrospectivo 10% · Bias retrospectivo -2%/)).toBeTruthy();
     const source = screen.getByRole("link", { name: "Fuente" }); expect(source.getAttribute("rel")).toBe("noopener noreferrer");
     expect(screen.queryByRole("link", { name: "Unsafe" })).toBeNull();
+    expect(screen.getByText("Contexto público de la categoría.")).toBeTruthy();
+    expect(screen.getByText("Fechas de publicación de las fuentes sin acreditar.")).toBeTruthy();
+    const dates = screen.getByLabelText("Fechas de ejecución");
+    expect(Array.from(dates.querySelectorAll("time")).map(time => time.dateTime)).toEqual([result().research?.started_at, result().research?.finished_at]);
+    expect(within(screen.getByLabelText("Consumo de la investigación")).getByText("185")).toBeTruthy();
     expect(client).toHaveBeenCalledOnce();
     await userEvent.click(screen.getByRole("button", { name: "Consultar estado de investigación" }));
     await waitFor(() => expect(client).toHaveBeenCalledTimes(2));

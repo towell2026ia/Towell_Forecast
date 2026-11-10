@@ -27,9 +27,16 @@ export type RsAssistantResponse = {
     sources?: { title: string; url: string }[];
     reason?: string;
     model?: string;
+    started_at?: string;
+    finished_at?: string | null;
+    usage?: Partial<Record<RsResearchUsageField, number>>;
+    evidence_scope?: "PUBLIC_CATEGORY_CONTEXT";
+    source_publication_dates_verified?: boolean;
   };
 };
 
+const researchUsageFields = ["input_tokens", "output_tokens", "total_tokens", "web_search_calls"] as const;
+type RsResearchUsageField = typeof researchUsageFields[number];
 export const rsMetrics = { SALES: "Venta", ORDER: "Pedido", DELIVERY: "Entrega", FCST_TOWELL_HISTORY: "Fcst Towell", FCST_CLIENTE_HISTORY: "Fcst Cliente" } as const;
 type RsCoverage = { pieces: string | null; products_with_data: number; products_expected: number };
 type RsMonth = { period: string; fill_rate?: { ratio: string | null; paired_products: number; products_expected: number } } & Partial<Record<keyof typeof rsMetrics, RsCoverage>>;
@@ -58,6 +65,25 @@ const validCandidate = (item?: RsCandidate) => item && validPieces(item.pieces) 
 const commercialKey = (value: string) => value.normalize("NFKD").replace(/\p{M}/gu, "").toUpperCase().trim().replace(/\s+/gu, " ");
 const formatKey = (value: string) => commercialKey(value).replace(/[\s_-]+/gu, "");
 
+function researchTimestamp(value: unknown) {
+  if (typeof value !== "string") return undefined;
+  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.\d{1,6})?(?:Z|\+00:00)$/.exec(value);
+  if (!match) return undefined;
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 19) === match[1] ? value : undefined;
+}
+
+function researchUsage(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const values = value as Record<string, unknown>;
+  const usage: Partial<Record<RsResearchUsageField, number>> = {};
+  for (const field of researchUsageFields) {
+    const count = values[field];
+    if (typeof count === "number" && validCount(count) && count <= 1_000_000) usage[field] = count;
+  }
+  return Object.keys(usage).length ? usage : undefined;
+}
+
 export function parseRsAssistantResponse(value: unknown, request: RsAssistantRequest): RsAssistantResponse {
   if (!value || typeof value !== "object") throw new Error("RS_ASSISTANT_INVALID_RESPONSE");
   const result = value as RsAssistantResponse;
@@ -66,6 +92,9 @@ export function parseRsAssistantResponse(value: unknown, request: RsAssistantReq
   if (commercialKey(result.scope.model) !== commercialKey(request.model) || formatKey(result.scope.format) !== formatKey(request.format)
       || result.scope.archive_id !== undefined && result.scope.archive_id !== "UNIF-20060057ee8e4dfdbcd9") throw new Error("RS_ASSISTANT_INVALID_RESPONSE");
   const research = result.research;
+  const startedAt = researchTimestamp(research?.started_at);
+  let finishedAt = research?.finished_at === null ? null : researchTimestamp(research?.finished_at);
+  if (startedAt && finishedAt && Date.parse(finishedAt) < Date.parse(startedAt)) finishedAt = undefined;
   const metricKeys = Object.keys(rsMetrics) as (keyof typeof rsMetrics)[];
   const metrics = result.metrics;
   if (!Array.isArray(metrics?.by_month) || metrics.by_month.some(row => !row || typeof row.period !== "string" || metricKeys.some(key => row[key] !== undefined && !validCoverage(row[key]))
@@ -83,6 +112,11 @@ export function parseRsAssistantResponse(value: unknown, request: RsAssistantReq
       summary: typeof research.summary === "string" ? research.summary : undefined,
       model: typeof research.model === "string" ? research.model : undefined,
       reason: typeof research.reason === "string" ? research.reason : undefined,
+      started_at: startedAt,
+      finished_at: finishedAt,
+      usage: researchUsage(research.usage),
+      evidence_scope: research.evidence_scope === "PUBLIC_CATEGORY_CONTEXT" ? research.evidence_scope : undefined,
+      source_publication_dates_verified: typeof research.source_publication_dates_verified === "boolean" ? research.source_publication_dates_verified : undefined,
       sources: Array.isArray(research.sources) ? research.sources.flatMap(source => {
         if (!source || typeof source.title !== "string" || typeof source.url !== "string") return [];
         const url = safeResearchUrl(source.url);

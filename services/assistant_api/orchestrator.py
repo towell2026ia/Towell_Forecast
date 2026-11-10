@@ -251,6 +251,8 @@ class ForecastOrchestrator:
             parts.append("Pronóstico provisional de Venta sobre las variantes RS acreditadas. Compara la cobertura por motor y el WAPE y Bias retrospectivos cuando estén disponibles. La evaluación LIVE requiere evidencia temporal.")
         elif any(word in topic for word in ("forecast", "pronostic", "wape", "bias", "motor", "sesgo")):
             parts.append("No hay un cálculo para esta selección y versión. Usa Calcular / consultar pronóstico RS. WAPE y Bias LIVE requieren evidencia temporal independiente.")
+        if any(word in topic for word in ("wape", "bias", "sesgo", "compar")):
+            parts.append("Un WAPE menor indica menor error absoluto ponderado. En este motor el Bias usa real menos pronóstico, por lo que un valor positivo indica subestimación y uno negativo sobreestimación. Compara métricas sólo con periodos y coberturas equivalentes.")
         if any(word in topic for word in ("inventario", "desabasto", "sobreinvent", "riesgo", "recomend")):
             parts.append("El inventario disponible es agregado. Sin existencias por tienda y umbrales de reposición acreditados, no puedo confirmar desabasto ni sobreinventario por tienda.")
         if any(word in topic for word in ("fill", "entrega", "pedido", "demanda", "calidad", "riesgo", "recomend")):
