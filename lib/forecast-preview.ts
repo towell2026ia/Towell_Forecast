@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { assistantScopeIsValid, parseRsAssistantResponse, type RsAssistantClient } from "./rs-assistant";
 export type PreviewHorizon = { horizon: number; target_period: string; statistical_value: number; ml_value: number | null; forecast_towell: number; p10: number | null; p50: number; p90: number | null; p95: number | null;
   statistical_model?: string; ml_model?: string | null; model_strategy?: string; classification?: string; forecast_status?: string; certification_status?: string; confidence?: string; band_basis?: "PRODUCT" | "CATEGORY" | "CHAIN" | "INSUFFICIENT"; band_observations?: number; band_status?: "AVAILABLE" | "INSUFFICIENT_BAND_EVIDENCE" };
 export type PreviewProduct = { product_id: string; product_code: string; description: string; category_id: string | null; forecast_status: string; history_months?: number; minimum_history_months?: number; horizons?: PreviewHorizon[]; statistical_model?: string | null; classification?: string | null };
@@ -53,6 +54,7 @@ export type CalculationDetail = CalculationSummary & { candidate_metrics: Record
   horizons: CalculationHorizon[]; selection_events: SelectionEvent[]; live_evaluations: Record<string, unknown>[];
   actual_sales?: { observation_id: string; period: string; value: number; version_no: number; available_at: string; source_batch_id: string }[] };
 export interface PreviewClient {
+  rsAssistant?: RsAssistantClient;
   commercialCatalog?(): Promise<import("./supabase/types").CommercialClassification[]>;
   create(chainId: string | null, productId: string | null, issuePeriod?: string | null): Promise<PreviewJob>;
   status(jobId: string): Promise<PreviewJob>;
@@ -85,7 +87,21 @@ export class PreviewReadError extends Error { constructor(public code: string) {
 const safeCodes = new Set(["AUTH_REQUIRED", "SCOPE_FORBIDDEN", "REQUEST_001", "PREVIEW_DISABLED", "DUPLICATE_OBSERVATION_CONFLICT", "NO_ELIGIBLE_PRODUCTS", "INSUFFICIENT_HISTORY", "DATA_READ_FAILED", "TEMPORAL_METADATA_MISSING", "DATA_LEAKAGE_DETECTED", "STATISTICAL_FAILED", "ML_FAILED", "ENSEMBLE_FAILED", "PREVIEW_NOT_FOUND", "PREVIEW_NOT_READY", "RATE_001", "VINTAGE_PERSISTENCE_DISABLED", "OFFICIAL_PUBLICATION_DISABLED", "CHAMPION_PUBLICATION_DISABLED", "REQUIRED_SECRET_MISSING", "VINTAGE_WRITE_FAILED", "DATA_QUALITY_BLOCKED", "LINEAGE_MISMATCH", "HASH_MISMATCH"]);
 export class RailwayPreviewClient implements PreviewClient {
   private controller = new AbortController();
-  constructor(private auth: SupabaseClient, private origin = process.env.NEXT_PUBLIC_FORECAST_API_URL ?? "") {}
+  readonly rsAssistant?: RsAssistantClient;
+  constructor(private auth: SupabaseClient, private origin = process.env.NEXT_PUBLIC_FORECAST_API_URL ?? "") {
+    try { this.apiOrigin(); } catch { return; }
+    this.rsAssistant = async request => {
+      if (!assistantScopeIsValid(request)) throw new PreviewReadError("REQUEST_001");
+      return parseRsAssistantResponse(await this.e4<unknown>("/api/forecast/rs-assistant", request), request);
+    };
+  }
+  private apiOrigin() {
+    try {
+      const url = new URL(this.origin);
+      if (url.protocol !== "https:" || url.username || url.password || url.pathname !== "/" || url.search || url.hash) throw new Error();
+      return url.origin;
+    } catch { throw new PreviewReadError("PREVIEW_CONFIGURATION_REQUIRED"); }
+  }
   async commercialCatalog() {
     const data = await this.e4<{ products: import("./supabase/types").CommercialClassification[]; persisted: boolean }>("/api/forecast/commercial-catalog");
     if (!Array.isArray(data.products) || data.persisted !== false || data.products.some(p => !p.product_id || !p.chain_id || !["APPROVED", "PENDING_CLASSIFICATION"].includes(p.status) || !Array.isArray(p.reasons))) throw new PreviewReadError("DATA_READ_FAILED");
@@ -183,13 +199,11 @@ export class RailwayPreviewClient implements PreviewClient {
       live_learning: response.ok && result.live_learning === true };
   }
   private async e4<T>(path: string, body?: unknown, idempotencyKey?: string): Promise<T> {
-    let url: URL;
-    try { url = new URL(this.origin); if (url.protocol !== "https:" || url.username || url.password || url.pathname !== "/" || url.search || url.hash) throw new Error(); }
-    catch { throw new PreviewReadError("PREVIEW_CONFIGURATION_REQUIRED"); }
+    const origin = this.apiOrigin();
     if (this.controller.signal.aborted) throw new PreviewReadError("AUTH_REQUIRED");
     const { data } = await this.auth.auth.getSession();
     if (!data.session?.access_token) throw new PreviewReadError("AUTH_REQUIRED");
-    const response = await fetch(url.origin + path, { method: body === undefined ? "GET" : "POST", credentials: "omit",
+    const response = await fetch(origin + path, { method: body === undefined ? "GET" : "POST", credentials: "omit",
       cache: "no-store", signal: this.controller.signal,
       headers: { Authorization: `Bearer ${data.session.access_token}`,
         ...(body === undefined ? {} : { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey ?? crypto.randomUUID() }) },

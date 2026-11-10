@@ -109,7 +109,7 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
     globalRole: profile.global_role, screen: title, moduleId: active,
     chain: subtitle, chainId: filters.chainId, category: filters.categoryId, categoryId: filters.categoryId,
     product: filters.productId, productId: filters.productId, color: null, period: null,
-    periodRange: filters.periodRange, search: filters.search,
+    periodRange: filters.periodRange, commercialModels: filters.commercialModels, search: filters.search,
     activeFilters: { chainId: filters.chainId, categoryId: filters.categoryId, productId: filters.productId, periodFrom: filters.periodRange[0], periodTo: filters.periodRange[1], search: filters.search },
   };
   return <ForecastFiltersContext.Provider value={state}><SidebarProvider>
@@ -131,7 +131,7 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
         {active === "base-datos" && <DatabaseView/>}
       </main>
     </SidebarInset>
-    <ForecastAssistantErrorBoundary><ForecastAssistant authorized={profile.status === "ACTIVE"} uiEnabled apiEnabled={false} voiceEnabled={false} mode="local" context={assistantContext}/></ForecastAssistantErrorBoundary>
+    <ForecastAssistantErrorBoundary><ForecastAssistant authorized={profile.status === "ACTIVE"} uiEnabled apiEnabled={false} voiceEnabled={false} mode="local" context={assistantContext} rsAssistant={repository.previews?.rsAssistant}/></ForecastAssistantErrorBoundary>
   </SidebarProvider></ForecastFiltersContext.Provider>;
 }
 

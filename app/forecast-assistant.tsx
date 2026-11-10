@@ -10,6 +10,9 @@ import {
 } from "@/components/ui/sheet";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { Input } from "@/components/ui/input";
+import { PreviewReadError } from "@/lib/forecast-preview";
+import { assistantScopeIsValid, rsMetrics, safeResearchUrl, type RsAssistantAction, type RsAssistantClient, type RsAssistantResponse } from "@/lib/rs-assistant";
 import {
   type AssistantContext, type AssistantMode, sendAssistantMessage,
 } from "./assistant/assistant-service";
@@ -24,6 +27,8 @@ type ConversationMessage = {
   id: string;
   role: "assistant" | "user";
   text: string;
+  scope?: string;
+  response?: RsAssistantResponse;
 };
 
 type ForecastAssistantProps = {
@@ -33,7 +38,66 @@ type ForecastAssistantProps = {
   voiceEnabled: boolean;
   mode: AssistantMode;
   context: AssistantContext;
+  rsAssistant?: RsAssistantClient;
 };
+
+const rsActions = { answer: "Enviar mensaje", research: "Iniciar investigación pública", research_status: "Consultar estado de investigación", forecast: "Calcular / consultar pronóstico RS" } as const;
+const researchStatus: Record<string, string> = {
+  COMPLETED: "Investigación completada", PENDING: "Investigación pendiente", QUEUED: "Investigación pendiente", IN_PROGRESS: "Investigación en curso",
+  DISABLED: "Investigación desactivada", UNAVAILABLE: "Investigación no disponible", FAILED: "No se pudo completar la investigación", NO_EVIDENCE: "Sin evidencia pública suficiente",
+};
+const rsErrors: Record<string, string> = {
+  SCOPE_FORBIDDEN: "Tu cuenta no tiene acceso a ese alcance o a la acción solicitada.",
+  AUTH_REQUIRED: "La sesión debe renovarse antes de consultar el asistente.",
+  RS_ASSISTANT_DISABLED: "El asistente RS está desactivado en el servidor.",
+  RS_CANDIDATE_NOT_ACTIVE: "La versión RS requerida todavía no está activa. No hay resultados operativos para esta consulta.",
+  RS_FORMAT_NOT_VERIFIED: "El formato no está acreditado para la cadena seleccionada.",
+  RS_MODEL_NOT_VERIFIED: "El modelo no está acreditado para ese alcance RS.",
+  RS_MODEL_PRESENTATION_AMBIGUOUS: "El modelo contiene presentaciones diferentes. Se necesita aclarar el alcance antes de calcular.",
+  RS_SCOPE_INVALID: "El alcance o el mes no están disponibles en la versión RS autorizada.",
+  RS_FORECAST_SCOPE_UNAVAILABLE: "El alcance no admite el cálculo RS solicitado.",
+  RS_FORECAST_HISTORY_INSUFFICIENT: "El histórico acreditado no alcanza para calcular este pronóstico RS.",
+  RS_FORECAST_BUSY: "Hay un cálculo en curso. Puedes volver a consultar cuando termine.",
+  RATE_001: "Se alcanzó el límite de consultas. Espera antes de volver a intentar.",
+};
+const metricValue = (value: number | null | undefined) => typeof value === "number" && Number.isFinite(value) ? `${value.toLocaleString("es-MX", { maximumFractionDigits: 4 })}%` : "Sin dato";
+const coverageLabel = (value?: { products_with_data: number; products_expected: number }) => value ? `${value.products_with_data}/${value.products_expected} productos${value.products_with_data < value.products_expected ? " · Parcial" : ""}` : "Cobertura sin dato";
+function AssistantFacts({ response }: { response: RsAssistantResponse }) {
+  const selected = response.metrics?.by_month.find(row => row.period === response.scope?.period);
+  const stock = response.metrics?.inventory;
+  const forecast = response.forecast;
+  return <details className="mt-2 border-t border-slate-200 pt-2 text-xs" open>
+    <summary className="cursor-pointer font-medium">Datos y cobertura del alcance</summary>
+    {response.scope && <p className="mt-1 break-words">{response.scope.chain} · {response.scope.format} · {response.scope.model} · {response.scope.presentation} · RS · {response.scope.period}</p>}
+    {response.scope?.version_id && <p className="break-all text-[10px] text-slate-500">Versión {response.scope.version_id} · Generación {response.scope.generation ?? "Sin dato"}</p>}
+    <dl className="mt-2 space-y-1">{(Object.keys(rsMetrics) as (keyof typeof rsMetrics)[]).map(key => <div key={key}><dt className="inline font-medium">{rsMetrics[key]} </dt><dd className="inline">{selected?.[key]?.pieces ?? "Sin dato"} piezas · {coverageLabel(selected?.[key])}</dd></div>)}
+      <div><dt className="inline font-medium">Inventario agregado </dt><dd className="inline">{stock?.pieces ?? "Sin dato"} piezas · {coverageLabel(stock)}</dd></div>
+      <div><dt className="inline font-medium">Fill Rate </dt><dd className="inline">{selected?.fill_rate?.ratio !== null && selected?.fill_rate?.ratio !== undefined ? metricValue(Number(selected.fill_rate.ratio) * 100) : "Sin dato"} · {selected?.fill_rate ? `${selected.fill_rate.paired_products}/${selected.fill_rate.products_expected} pares${selected.fill_rate.paired_products < selected.fill_rate.products_expected ? " · Parcial" : ""}` : "Cobertura sin dato"}</dd></div>
+    </dl>
+    {forecast && <div className="mt-3 space-y-2"><p className="font-medium">Pronóstico provisional · {forecast.engine}</p>
+      <div className="max-h-64 overflow-auto"><table aria-label="Pronóstico RS del asistente" className="w-full text-left"><thead><tr><th>Mes</th><th>Estadístico</th><th>ML</th><th>Ensemble</th></tr></thead><tbody>{forecast.periods.map(period => <tr key={period.period}><th className="pr-2 font-normal">{period.period}</th>{[period.statistical, period.ml, period.ensemble_value].map((item, index) => <td key={index} className="px-1 align-top">{item.pieces ?? "Sin dato"}<span className="block text-[10px]">{item.covered}/{item.eligible}{item.covered < item.eligible ? " · Parcial" : ""}</span></td>)}</tr>)}</tbody></table></div>
+      {(["statistical", "ml"] as const).map(engine => <p key={engine}>{engine === "statistical" ? "Estadístico" : "ML"} · WAPE retrospectivo {metricValue(forecast.retrospective?.[engine]?.wape)} · Bias retrospectivo {metricValue(forecast.retrospective?.[engine]?.bias)}</p>)}
+    </div>}
+    {typeof response.quality?.products_excluded_ambiguous === "number" && response.quality.products_excluded_ambiguous > 0 && <p>Variantes con identidad pendiente: {response.quality.products_excluded_ambiguous}</p>}
+    <p className="mt-2 text-slate-500">La cobertura incompleta conserva sus faltantes. Sin certificación LIVE en esta consulta.</p>
+  </details>;
+}
+function AssistantEvidence({ response }: { response: RsAssistantResponse }) {
+  const research = response.research;
+  const sources = research?.sources?.flatMap(source => {
+    const href = safeResearchUrl(source.url);
+    return href ? [{ ...source, url: href }] : [];
+  }) ?? [];
+  return <>
+    {response.metrics && <AssistantFacts response={response}/>}
+    {response.uncertainty && <p className="mt-2 text-xs text-slate-500">{response.uncertainty}</p>}
+    {research && <div className="mt-2 border-t border-slate-200 pt-2 text-xs">
+      <p className="font-medium">{researchStatus[research.status] ?? "Estado de investigación sin confirmar"}{research.model ? ` · ${research.model}` : ""}</p>
+      {research.summary && research.summary !== response.message && <p className="whitespace-pre-wrap">{research.summary}</p>}
+      {sources.length > 0 && <ul aria-label="Fuentes públicas" className="mt-1 list-disc pl-4">{sources.map(source => <li key={source.url}><a href={source.url} target="_blank" rel="noopener noreferrer" className="break-words underline">{source.title}</a></li>)}</ul>}
+    </div>}
+  </>;
+}
 
 function AssistantMark() {
   return <span className="grid size-full place-items-center rounded-full bg-gradient-to-br from-blue-600 to-slate-950 text-[13px] font-black tracking-tight text-white">FT</span>;
@@ -50,12 +114,29 @@ function FutureVoiceControls({ enabled }: { enabled: boolean }) {
   ><Mic className="size-4" /></Button>;
 }
 
-function ForecastAssistantContent({ apiEnabled, voiceEnabled, mode, context }: Omit<ForecastAssistantProps, "authorized" | "uiEnabled">) {
+function ForecastAssistantContent({ apiEnabled, voiceEnabled, mode, context, rsAssistant }: Omit<ForecastAssistantProps, "authorized" | "uiEnabled">) {
   const [open, setOpen] = useState(false);
-  const [draft, setDraft] = useState("");
+  const [draftState, setDraftState] = useState({ key: "", value: "" });
   const [processing, setProcessing] = useState(false);
   const [lottieFailed, setLottieFailed] = useState(false);
   const sequence = useRef(1);
+  const sending = useRef(false);
+  const models = context.commercialModels ?? [];
+  const filterPeriod = context.periodRange?.[0] && context.periodRange[0] === context.periodRange[1] ? context.periodRange[0] : "";
+  const filterKey = JSON.stringify([context.chainId, models, context.periodRange]);
+  const [selection, setSelection] = useState<{ key: string; format: string; model: string; period: string }>({ key: "", format: "", model: "", period: "" });
+  const activeSelection = selection.key === filterKey ? selection : { key: filterKey, format: "", model: "", period: "" };
+  const scope = {
+    chain_id: context.chainId ?? "", purchase_type: "RS" as const, format: activeSelection.format.trim(),
+    model: (models.length === 1 ? models[0] : activeSelection.model).trim(), period: filterPeriod || activeSelection.period,
+  };
+  const scopeKey = JSON.stringify(scope);
+  const draftKey = rsAssistant ? scopeKey : "";
+  const draft = draftState.key === draftKey ? draftState.value : "";
+  const setDraft = (value: string) => setDraftState({ key: draftKey, value });
+  const scopeReady = assistantScopeIsValid(scope);
+  const canSend = rsAssistant ? scopeReady : apiEnabled;
+  const operationalNotice = "Consultas RS para una cadena, formato, modelo y mes. El pronóstico se calcula bajo demanda y queda provisional.";
   const [messages, setMessages] = useState<ConversationMessage[]>([
     { id: "welcome", role: "assistant", text: apiEnabled
       ? "Puedes preguntarme por Forecast, WAPE, Bias, Fill Rate, Champion, Challenger y desempeño de productos."
@@ -76,20 +157,29 @@ function ForecastAssistantContent({ apiEnabled, voiceEnabled, mode, context }: O
     logEvent("lottie_error");
   }, [logEvent]);
 
-  const submit = async () => {
-    const message = draft.trim();
-    if (!apiEnabled || !message || processing) return;
-    setDraft("");
-    setMessages((current) => [...current, { id: `user-${sequence.current++}`, role: "user", text: message }]);
+  const submit = async (action: RsAssistantAction = "answer") => {
+    const message = action === "answer" || action === "research" ? draft.trim() : "";
+    if (!canSend || sending.current || action === "answer" && !message || !rsAssistant && action !== "answer") return;
+    const sentScope = rsAssistant ? scopeKey : undefined;
+    if (message) setDraft("");
+    setMessages(current => [...current, { id: `user-${sequence.current++}`, role: "user", text: message || rsActions[action], scope: sentScope }]);
+    sending.current = true;
     setProcessing(true);
     try {
-      const response = await sendAssistantMessage(message, context, { mode, apiEnabled });
-      setMessages((current) => [...current, { id: `assistant-${sequence.current++}`, role: "assistant", text: response.message }]);
+      if (rsAssistant) {
+        const response = await rsAssistant({ ...scope, message, action });
+        setMessages(current => [...current, { id: `assistant-${sequence.current++}`, role: "assistant", text: response.message, scope: sentScope, response }]);
+      } else {
+        const response = await sendAssistantMessage(message, context, { mode, apiEnabled });
+        setMessages(current => [...current, { id: `assistant-${sequence.current++}`, role: "assistant", text: response.message }]);
+      }
       logEvent("response");
-    } catch {
-      setMessages((current) => [...current, { id: `assistant-${sequence.current++}`, role: "assistant", text: "La interfaz del asistente no está disponible en este momento." }]);
+    } catch (error) {
+      const text = error instanceof PreviewReadError && rsErrors[error.code] ? rsErrors[error.code] : "La interfaz del asistente no está disponible en este momento.";
+      setMessages(current => [...current, { id: `assistant-${sequence.current++}`, role: "assistant", text, scope: sentScope }]);
       logEvent("ui_error");
     } finally {
+      sending.current = false;
       setProcessing(false);
     }
   };
@@ -134,7 +224,7 @@ function ForecastAssistantContent({ apiEnabled, voiceEnabled, mode, context }: O
         <ScrollArea className="min-h-0 flex-1">
           <div className="space-y-4 p-5" aria-live="polite" aria-label="Conversación del asistente">
             <div className="rounded-xl border border-blue-100 bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-800">
-              {apiEnabled ? "Consultas sobre resultados publicados para el scope seleccionado." : visualAssistantNotice}
+              {rsAssistant ? operationalNotice : apiEnabled ? "Consultas sobre resultados publicados para el scope seleccionado." : visualAssistantNotice}
             </div>
             <dl aria-label="Contexto del asistente" className="space-y-1 rounded-xl border border-slate-200 bg-white p-3 text-xs text-slate-600">
               <div><dt className="inline font-medium">Scope: </dt><dd className="inline">{context.chain ?? "Todas las cadenas"}</dd></div>
@@ -145,9 +235,17 @@ function ForecastAssistantContent({ apiEnabled, voiceEnabled, mode, context }: O
               <div><dt className="inline font-medium">Periodo: </dt><dd className="inline">{context.periodRange ? `${context.periodRange[0] ?? "Inicio"} → ${context.periodRange[1] ?? "Último"}` : context.period ?? "Todos"}</dd></div>
               <div><dt className="inline font-medium">Búsqueda: </dt><dd className="inline">{context.search || "Sin filtro"}</dd></div>
             </dl>
-            {messages.filter(message => apiEnabled || message.id !== "welcome").map((message) => <div key={message.id} className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}>
+            {rsAssistant && <fieldset className="space-y-2 rounded-xl border border-slate-200 bg-white p-3 text-xs" disabled={processing}>
+              <legend className="font-medium">Alcance del asistente RS</legend>
+              {!context.chainId && <p>Selecciona una cadena en los filtros del portal.</p>}
+              <label className="block">Formato comercial<Input value={activeSelection.format} maxLength={60} onChange={event => setSelection({ ...activeSelection, format: event.target.value })}/></label>
+              {models.length > 1 ? <label className="block">Modelo<select className="block w-full rounded border px-2 py-1" value={activeSelection.model} onChange={event => setSelection({ ...activeSelection, model: event.target.value })}><option value="">Seleccionar un modelo</option>{models.map(model => <option key={model}>{model}</option>)}</select></label> : <label className="block">Modelo<Input value={models.length === 1 ? models[0] : activeSelection.model} readOnly={models.length === 1} maxLength={80} onChange={event => setSelection({ ...activeSelection, model: event.target.value })}/></label>}
+              <label className="block">Mes<Input type="month" value={scope.period} readOnly={Boolean(filterPeriod)} onChange={event => setSelection({ ...activeSelection, period: event.target.value })}/></label>
+            </fieldset>}
+            {messages.filter(message => rsAssistant ? message.scope === scopeKey : apiEnabled || message.id !== "welcome").map((message) => <div key={message.id} className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}>
               <div className={`max-w-[88%] rounded-2xl px-4 py-3 text-sm leading-6 ${message.role === "user" ? "rounded-br-md bg-blue-700 text-white" : "rounded-bl-md border border-slate-200 bg-white text-slate-700 shadow-sm"}`}>
-                {message.text}
+                <p className="whitespace-pre-wrap break-words">{message.text}</p>
+                {message.response && <AssistantEvidence response={message.response}/>}
               </div>
             </div>)}
             {processing && <div className="flex justify-start"><div className="flex items-center gap-2 rounded-2xl rounded-bl-md border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500 shadow-sm"><LoaderCircle className="size-4 animate-spin" /> Preparando respuesta…</div></div>}
@@ -158,20 +256,24 @@ function ForecastAssistantContent({ apiEnabled, voiceEnabled, mode, context }: O
           <div className="flex items-end gap-2">
             {voiceEnabled && <FutureVoiceControls enabled />}
             <Textarea
-              disabled={!apiEnabled || processing}
+              disabled={!canSend || processing}
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder={apiEnabled ? "Escribe tu pregunta…" : "Consulta inteligente disponible en la siguiente fase"}
+              placeholder={canSend ? "Escribe tu pregunta…" : rsAssistant ? "Completa el alcance de la consulta" : "Consulta inteligente disponible en la siguiente fase"}
               aria-label="Mensaje para el asistente"
               rows={2}
+              maxLength={rsAssistant ? 1000 : undefined}
               className="max-h-32 min-h-11 resize-none bg-white"
             />
-            <Button type="button" size="icon" disabled={!apiEnabled || !draft.trim() || processing} onClick={() => void submit()} aria-label="Enviar mensaje" className="shrink-0">
+            <Button type="button" size="icon" disabled={!canSend || !draft.trim() || processing} onClick={() => void submit()} aria-label="Enviar mensaje" className="shrink-0">
               <SendHorizonal className="size-4" />
             </Button>
           </div>
-          {apiEnabled && <p className="mt-2 text-center text-[11px] text-slate-500">Enter para enviar · Shift+Enter para una nueva línea</p>}
+          {rsAssistant && <div className="mt-2 flex flex-wrap gap-2">
+            {(["forecast", "research", "research_status"] as const).map(action => <Button key={action} type="button" size="sm" variant="outline" disabled={!scopeReady || processing} onClick={() => void submit(action)}>{rsActions[action]}</Button>)}
+          </div>}
+          {(apiEnabled || rsAssistant) && <p className="mt-2 text-center text-[11px] text-slate-500">Enter para enviar · Shift+Enter para una nueva línea</p>}
         </div>
       </SheetContent>
     </Sheet>
@@ -180,5 +282,5 @@ function ForecastAssistantContent({ apiEnabled, voiceEnabled, mode, context }: O
 
 export default function ForecastAssistant(props: ForecastAssistantProps) {
   if (!props.authorized || !props.uiEnabled) return null;
-  return <ForecastAssistantContent apiEnabled={props.apiEnabled} voiceEnabled={props.voiceEnabled} mode={props.mode} context={props.context} />;
+  return <ForecastAssistantContent apiEnabled={props.apiEnabled} voiceEnabled={props.voiceEnabled} mode={props.mode} context={props.context} rsAssistant={props.rsAssistant} />;
 }

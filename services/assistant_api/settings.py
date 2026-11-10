@@ -168,7 +168,7 @@ class Settings:
         if self.data_provider == "supabase" or self.supabase_enabled or self.operational_preview_enabled:
             if not (self.data_provider == "supabase" and self.supabase_enabled and self.operational_preview_enabled):
                 raise ValueError("operational_preview_configuration_missing")
-            if self.legacy_pilot_enabled or self.ai_assistant_api_enabled:
+            if self.legacy_pilot_enabled:
                 raise ValueError("preview_only_configuration_required")
             supabase = urlparse(self.supabase_url)
             if supabase.scheme != "https" or not supabase.hostname or not supabase.hostname.endswith(".supabase.co") \

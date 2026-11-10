@@ -666,12 +666,13 @@ class JobTests(unittest.TestCase):
         self.assertFalse(valid.official_publication_enabled)
         self.assertFalse(valid.champion_publication_enabled)
         replace(valid, vintage_persistence_enabled=True).validate()
+        replace(valid, ai_assistant_api_enabled=True).validate()
         for invalid in (replace(valid, official_publication_enabled=True),
                         replace(valid, champion_publication_enabled=True)):
             with self.assertRaises(ValueError):
                 invalid.validate()
         for settings in (replace(valid, openai_enabled=True), replace(valid, supabase_publishable_key="service-secret"),
-                         replace(valid, ai_assistant_api_enabled=True), replace(valid, max_forecast_runs=3), replace(Settings(), supabase_enabled=True)):
+                         replace(valid, max_forecast_runs=3), replace(Settings(), supabase_enabled=True)):
             with self.assertRaises(ValueError):
                 settings.validate()
 

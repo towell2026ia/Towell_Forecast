@@ -236,3 +236,33 @@ class ForecastOrchestrator:
             "data": data, "source": "local", "actions": [],
             "metadata": {"provider": self.provider.name, "executed_command": False},
         }
+
+    @staticmethod
+    def operational_answer(question, scoped, *, forecast=None, research=None):
+        """Present measured facts and named gaps without the legacy pilot tools."""
+        scope, metrics, quality = (scoped[key] for key in ("scope", "metrics", "quality"))
+        topic = fold(question)
+        parts = [f"{scope['model']} · {scope['format']} · RS · {scope['period']}."]
+        if quality.get("model_total_certified") is False:
+            parts.append("El alcance incluye sólo variantes con identidad resuelta y evidencia RS. La cobertura no acredita el total comercial del modelo.")
+        if research is not None:
+            parts.append("La investigación pública complementa el análisis comercial. Sus hallazgos no cambian el pronóstico.")
+        if forecast is not None:
+            parts.append("Pronóstico provisional de Venta sobre las variantes RS acreditadas. Compara la cobertura por motor y el WAPE y Bias retrospectivos cuando estén disponibles. La evaluación LIVE requiere evidencia temporal.")
+        elif any(word in topic for word in ("forecast", "pronostic", "wape", "bias", "motor", "sesgo")):
+            parts.append("No hay un cálculo para esta selección y versión. Usa Calcular / consultar pronóstico RS. WAPE y Bias LIVE requieren evidencia temporal independiente.")
+        if any(word in topic for word in ("inventario", "desabasto", "sobreinvent", "riesgo", "recomend")):
+            parts.append("El inventario disponible es agregado. Sin existencias por tienda y umbrales de reposición acreditados, no puedo confirmar desabasto ni sobreinventario por tienda.")
+        if any(word in topic for word in ("fill", "entrega", "pedido", "demanda", "calidad", "riesgo", "recomend")):
+            parts.append("Fill Rate usa pares completos de Pedido y Entrega del mismo producto y mes.")
+            months = metrics.get("by_month") or []
+            paired = months[-1].get("fill_rate", {}) if months else {}
+            if paired.get("paired_products", 0) < paired.get("products_expected", 0):
+                parts.append("La cobertura es parcial. Conviene conciliar los pares faltantes antes de cambiar un pedido.")
+            elif paired.get("ratio") is None:
+                parts.append("El Fill Rate del periodo no es medible con los datos disponibles.")
+        if len(parts) == 1:
+            parts.append("La cobertura y los indicadores disponibles corresponden a esta selección. Los valores sin evidencia se muestran como Sin dato.")
+        return {"message": " ".join(parts), "scope": scope, "metrics": metrics, "quality": quality,
+                **({"forecast": forecast} if forecast is not None else {}),
+                **({"research": research} if research is not None else {})}

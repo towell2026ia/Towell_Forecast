@@ -60,9 +60,7 @@ class SupabaseReadClient:
             raise PreviewError("DATA_READ_FAILED", 503)
         return self._pages(f"/rest/v1/{table}", params)
 
-    def observation_rows(self, params: dict[str, Any], *, mode: str = "OPERATIONAL",
-                         available_through: str | None = None,
-                         chain_id: str | None = None) -> list[dict[str, Any]]:
+    def operational_context(self) -> dict[str, str | int]:
         if self._operational_context is None:
             rows = self.get("/rest/v1/rpc/operational_read_context")
             if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
@@ -77,14 +75,23 @@ class SupabaseReadClient:
                     raise ValueError()
             except (TypeError, ValueError, KeyError, AttributeError):
                 raise PreviewError("DATA_READ_FAILED", 503) from None
-            self._operational_context = {"p_version_id": version, "p_manifest_hash": manifest,
-                                         "p_generation": generation}
-        arguments = {**params, **self._operational_context, "p_mode": mode}
+            self._operational_context = {"version_id": version, "manifest_hash": manifest,
+                                         "generation": generation}
+        return dict(self._operational_context)
+
+    def observation_rows(self, params: dict[str, Any], *, mode: str = "OPERATIONAL",
+                         available_through: str | None = None,
+                         chain_id: str | None = None) -> list[dict[str, Any]]:
+        arguments = {**params, **{f"p_{k}": v for k, v in self.operational_context().items()}, "p_mode": mode}
         if chain_id is not None:
             arguments["p_chain_id"] = uuid_value(chain_id)
         if available_through is not None:
             arguments["p_available_through"] = available_through
         return self._pages("/rest/v1/rpc/operational_read_observations", arguments)
+
+    def inventory_rows(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+        return self._pages("/rest/v1/rpc/operational_read_inventory",
+                           {**params, **{f"p_{k}": v for k, v in self.operational_context().items()}})
 
     def _pages(self, path: str, params: dict[str, Any]) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []

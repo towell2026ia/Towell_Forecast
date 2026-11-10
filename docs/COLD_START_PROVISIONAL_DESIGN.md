@@ -16,7 +16,27 @@ Un producto con menos de seis meses consecutivos de venta desde su primera venta
 
 ## Activación y controles
 
-El cálculo numérico provisional se activa en el backend operacional para productos seleccionados con comparables válidos. No se ejecuta automáticamente al navegar: el usuario autorizado pulsa «Calcular vista previa». La investigación permanece desactivada por defecto. Para habilitarla en Railway, capturar `OPENAI_API_KEY` **sólo** como secreto del servicio backend y configurar `OPENAI_ENABLED=true` y `DEEP_RESEARCH_ENABLED=true`; nunca en Netlify, `NEXT_PUBLIC_*` o Git. Mantener `VOICE_ENABLED=false` y los flags de publicación oficial sin cambio. Si falta la clave o los flags no coinciden, el servicio falla al validar configuración.
+El cálculo numérico provisional se activa en el backend operacional para productos seleccionados con comparables válidos. Se ejecuta mediante la acción explícita del usuario autorizado. La investigación RS es una operación separada y tampoco se inicia al navegar o calcular una vista previa.
+
+La integración RS reutiliza `ColdStartResearch`, Responses API y el coordinador existente. `OPENAI_API_KEY` se conserva únicamente como secreto del backend. `OPENAI_ENABLED` y `DEEP_RESEARCH_ENABLED` deben habilitarse juntos y requieren una clave configurada. `AI_ASSISTANT_API_ENABLED` habilita la nueva ruta operativa autenticada. La publicación de código y los cambios de configuración siguen sujetos a la autorización de despliegue. Los métodos estadísticos y los flags de publicación conservan su contrato.
+
+## Asistente RS y procedencia
+
+La ruta `POST /api/forecast/rs-assistant` recibe cadena, tipo RS, formato, modelo y periodo. El mismo JWT autoriza todas sus lecturas. Exige que la versión activa sea la derivada del manifiesto `72f4b1a25d7d26823c28d10f39326b2743d3eb2655ad009f017b0257a4dec20d`. Si B está inactiva o falta el contrato versionado, devuelve un error y no consulta los snapshots del piloto.
+
+Los datos de Venta, Pedido, Entrega y forecasts históricos se mantienen separados. Para atribuir cantidades a RS, se requiere procedencia del archivo BAASE. Los valores heredados sin esa acreditación se excluyen e informan en cobertura. El inventario es agregado por cadena, formato, producto y mes. No representa existencias por tienda.
+
+El usuario puede solicitar una comparación provisional con el motor existente. El coordinador comprueba primero la historia mínima, conserva los métodos existentes, calcula sólo el alcance acreditado y reutiliza el resultado de la misma selección y datos. El resultado no publica un Champion. WAPE y Bias se identifican como retrospectivos y LIVE continúa sin certificar cuando falta evidencia temporal.
+
+## Investigación externa y presupuesto
+
+Las acciones de investigar y consultar su estado son explícitas. Las preguntas normales no disparan búsquedas. La caché persistente se distingue por cadena, formato, modelo, corte, versión operativa y política. Las consultas externas reciben únicamente un tema genérico de producto procedente de una lista controlada y un mes validado. Nunca reciben cantidades, identificadores internos, textos libres del catálogo, mensajes del usuario ni archivos.
+
+Se conserva el modelo existente `gpt-5.5`, con tres llamadas máximas de herramientas y 3,000 tokens de salida por respuesta. El presupuesto preventivo limita el inicio a cuatro investigaciones diarias y 24 mensuales por volumen compartido. Estos límites son una decisión conservadora de implementación, pendientes de contrastar con el importe presupuestado. También se limitan el sondeo, la concurrencia y los reintentos inciertos. El resultado registra uso, fechas reales de consulta y motivos de error sin divulgar credenciales ni IDs del proveedor.
+
+Los hallazgos son contexto público de categoría. Una cita URL no acredita por sí sola la fecha de publicación o la accesibilidad de la fuente. Esos controles se verifican en la prueba real antes de declarar operativa la función. Las cantidades Python permanecen separadas de la investigación.
+
+Con los precios consultados, un ejemplo de 10,000 tokens de entrada, 3,000 de salida y tres búsquedas cuesta aproximadamente USD 0.17. La entrada es una hipótesis de cálculo, no un límite garantizado. Debe reportarse el uso real del proveedor y confirmar la facturación del proyecto. [Modelo GPT-5.5](https://developers.openai.com/api/docs/models/gpt-5.5) · [Precios de herramientas](https://developers.openai.com/api/docs/pricing)
 
 ## Gate de verificación
 

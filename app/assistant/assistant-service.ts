@@ -19,6 +19,7 @@ export type AssistantContext = {
   categoryId?: string | null;
   productId?: string | null;
   periodRange?: [string | null, string | null];
+  commercialModels?: string[] | null;
   search?: string;
 };
 

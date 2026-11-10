@@ -142,7 +142,7 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
     researcher = ColdStartResearch(config.openai_api_key, timeout=config.external_timeout_seconds) \
         if config.deep_research_enabled else None
     preview_runner = OperationalMultiChainForecastRunner(storage, concurrency=config.max_forecast_runs,
-        environment=config.app_env, researcher=researcher) if config.operational_preview_enabled else None
+        environment=config.app_env) if config.operational_preview_enabled else None
     app.state.preview_runner = preview_runner
     if preview_runner:
         write_repository = SupabaseForecastWriteRepository(config.supabase_url, config.supabase_service_role_key,
@@ -151,6 +151,11 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
                 config.capture_center_enabled,config.live_learning_enabled))) else None
         mount_preview_routes(app, config, identity, data, preview_runner, rate_limiter, write_repository)
         mount_e4_routes(app, config, identity, data, preview_runner, write_repository)
+        from .rs_assistant import RSAssistantWorkflow, mount_rs_assistant
+        from .rs_research import RSResearch
+        research = RSResearch(storage, researcher) if researcher and config.ai_assistant_api_enabled else None
+        mount_rs_assistant(app, config, identity, supabase_client, rate_limiter,
+                           RSAssistantWorkflow(storage, research))
         from .commercial_api import mount_commercial_routes
         mount_commercial_routes(app, identity, supabase_client, rate_limiter)
 
@@ -273,6 +278,10 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
             return JSONResponse(status_code=200 if healthy else 503, content={"status": "ok" if healthy else "not_ready",
                 "version": config.app_version, "environment": config.app_env, "providers": providers,
                 "operational_preview": True,
+                "rs_assistant_enabled": config.ai_assistant_api_enabled,
+                "openai_enabled": config.openai_enabled,
+                "deep_research_enabled": config.deep_research_enabled,
+                "openai_key_configured": config.openai_api_key.startswith("sk-"),
                 "vintage_persistence": config.vintage_persistence_enabled,
                 "official_publication": config.official_publication_enabled,
                 "champion_publication": config.champion_publication_enabled,
@@ -541,7 +550,7 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
     @app.post("/api/v1/assistant/message")
     def assistant_message(body: AssistantMessage, request: Request,
                           principal: Principal = Depends(read_access)):
-        if not config.ai_assistant_api_enabled or not config.local_intent_router_enabled:
+        if orchestrator is None or not config.ai_assistant_api_enabled or not config.local_intent_router_enabled:
             raise HTTPException(status_code=503, detail="ASSISTANT_001")
         start = time.monotonic()
         try:

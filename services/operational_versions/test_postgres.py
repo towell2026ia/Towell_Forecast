@@ -302,8 +302,12 @@ class GateBPostgres(unittest.TestCase):
             'lib/forecast-reporting.ts','lib/operational-periods-xlsx.ts','lib/periods-dashboard.ts',
             'lib/portal-read-diagnostic.ts','lib/supabase/types.ts',
         }
+        approved_rs_assistant={
+            'app/assistant/assistant-service.ts','app/forecast-assistant.tsx',
+            'lib/forecast-preview.ts','lib/rs-assistant.ts',
+        }
         after_gateb=subprocess.check_output(['git','diff','--name-only',gateb,'--',*prefixes],cwd=REPO,text=True)
-        self.assertEqual(set(after_gateb.splitlines()) - approved_prd3a9 - approved_portal_rs,set())
+        self.assertEqual(set(after_gateb.splitlines()) - approved_prd3a9 - approved_portal_rs - approved_rs_assistant,set())
         private=os.environ.get('GATEB_PRIVATE_CANDIDATE')
         if private:
             identities=json.loads((Path(private)/'Identidades.json').read_text(encoding='utf-8'))
