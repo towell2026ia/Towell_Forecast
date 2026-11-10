@@ -1,3 +1,4 @@
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,12 +7,12 @@ from unittest.mock import Mock, patch
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from fastapi.testclient import TestClient
+import httpx
 
-from .auth import Principal, ROLE_PERMISSIONS
-from .persistence import LocalPersistenceProvider
-from .rs_assistant import RSAssistantRequest, RSAssistantWorkflow, mount_rs_assistant
-from .supabase_access import PreviewError
+from services.assistant_api.auth import Principal, ROLE_PERMISSIONS
+from services.assistant_api.persistence import LocalPersistenceProvider
+from services.assistant_api.rs_assistant import RSAssistantRequest, RSAssistantWorkflow, mount_rs_assistant
+from services.assistant_api.supabase_access import PreviewError
 
 CHAIN = "00000000-0000-4000-8000-000000000001"
 BODY = {"chain_id": CHAIN, "purchase_type": "RS", "format": "BD", "model": "FENDI", "period": "2026-10"}
@@ -77,14 +78,18 @@ class RSAssistantTests(unittest.TestCase):
         identity.authenticate.return_value = Principal("user", "reader", ROLE_PERMISSIONS["reader"], "session",
                                                       chain_ids=frozenset({CHAIN}))
         mount_rs_assistant(app, SimpleNamespace(ai_assistant_api_enabled=True), identity, data, limiter, workflow)
-        with TestClient(app) as client, patch("services.assistant_api.rs_assistant.load_rs_scope",
-                                             side_effect=PreviewError("RS_CANDIDATE_NOT_ACTIVE", 409)) as load:
-            path, headers = "/api/forecast/rs-assistant", {"Authorization": "Bearer fixture"}
-            self.assertEqual(client.post(path, json=BODY).status_code, 401)
-            self.assertEqual(client.post(path, headers=headers, json={**BODY, "action": "research"}).status_code, 403)
-            response = client.post(path, headers=headers, json=BODY)
-            self.assertEqual(response.json(), {"code": "RS_CANDIDATE_NOT_ACTIVE"})
-            self.assertEqual(response.status_code, 409)
-            self.assertEqual(client.post(path, headers=headers, json={**BODY, "purchase_type": "CE"}).status_code, 422)
+        async def requests():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://fixture") as client:
+                path, headers = "/api/forecast/rs-assistant", {"Authorization": "Bearer fixture"}
+                self.assertEqual((await client.post(path, json=BODY)).status_code, 401)
+                self.assertEqual((await client.post(path, headers=headers, json={**BODY, "action": "research"})).status_code, 403)
+                response = await client.post(path, headers=headers, json=BODY)
+                self.assertEqual(response.json(), {"code": "RS_CANDIDATE_NOT_ACTIVE"})
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual((await client.post(path, headers=headers, json={**BODY, "purchase_type": "CE"})).status_code, 422)
+
+        with patch("services.assistant_api.rs_assistant.load_rs_scope",
+                   side_effect=PreviewError("RS_CANDIDATE_NOT_ACTIVE", 409)) as load:
+            asyncio.run(requests())
             load.assert_called_once()
             workflow.answer.assert_not_called()

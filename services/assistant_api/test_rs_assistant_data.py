@@ -1,9 +1,9 @@
 """Scoped RS reads over synthetic responses, without an engine or remote service."""
 import unittest
 
-from .auth import Principal, READ
-from .rs_assistant_data import ARCHIVE_VERSION_ID, load_rs_scope
-from .supabase_access import PreviewError
+from services.assistant_api.auth import Principal, READ
+from services.assistant_api.rs_assistant_data import ARCHIVE_VERSION_ID, load_rs_scope
+from services.assistant_api.supabase_access import PreviewError
 
 
 CHAIN = "00000000-0000-0000-0000-000000000001"
