@@ -41,6 +41,7 @@ jobs:
       - run: python -m unittest services.inventory_preflight.test_validator services.inventory_preflight.test_reconciliation services.inventory_preflight.test_commercial_decisions services.inventory_preflight.test_automatic_reconciliation -q
       - run: python -m unittest services.planning_pilot.test_engine -q
       - run: python -m unittest services.operational_update.test_preparation -q
+      - run: python -m unittest services.operational_update.test_unification -q
       - run: python scripts/test_import_unit_catalog.py
       - run: python scripts/audit_forecast_engine.py
       - run: docker build -f Dockerfile.api -t forecast-towell-api:ci .
@@ -105,6 +106,11 @@ jobs:
         run: python -B scripts/gateb.py test --config "$RUNNER_TEMP/gateb-config.json" --output "$RUNNER_TEMP/gateb-report"
       - name: Synthetic A to B to A evidence
         run: python -B scripts/gateb.py demonstrate --config "$RUNNER_TEMP/gateb-config.json" --output "$RUNNER_TEMP/gateb-demo"
+      - name: Reconcile versioned reads and rollback with synthetic data
+        shell: bash
+        run: |
+          set -euo pipefail
+          GATEB_CONFIG="$RUNNER_TEMP/gateb-config.json" python -B -m unittest services.operational_versions.test_unification -v 2>&1 | tee "$RUNNER_TEMP/unification-postgres.log"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -112,6 +118,7 @@ jobs:
           path: |
             ${{ runner.temp }}/gateb-report
             ${{ runner.temp }}/gateb-demo
+            ${{ runner.temp }}/unification-postgres.log
       - name: Stop disposable PostgreSQL
         if: always()
         run: docker stop gateb-pg || true

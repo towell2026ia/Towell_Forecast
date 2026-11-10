@@ -48,7 +48,7 @@ def document(c, ids, name):
                 policy='gateb-local-global-1',name=name,unit='PIEZAS',grouping=PRODUCTS)
 
 
-def seed(lab):
+def seed(lab, *, stage_candidates=True, include_prior_year=False):
     with lab.connect() as c, c.transaction():
         for user,role in ((ADMIN,'ADMIN'),(VIEW_A,'VIEWER'),(VIEW_B,'VIEWER'),(EDITOR,'EDITOR')):
             c.execute('insert into auth.users(id) values(%s)',(user,))
@@ -62,7 +62,8 @@ def seed(lab):
             c.execute("insert into import_profiles(id,chain_id,name) values(%s,%s,'Synthetic monthly')",(profile,chain))
             c.execute("insert into import_profile_versions(id,profile_id,chain_id,version,mapping_json,required_columns,created_by) values(%s,%s,%s,1,'{}','[]',%s)",(pv,profile,chain,ADMIN))
             profiles[chain]=pv
-            for period in PERIODS:batches[chain,period]=_batch(c,chain,pv,period,'base')
+            for period in [*PERIODS, *(['2024-10'] if include_prior_year else [])]:
+                batches[chain,period]=_batch(c,chain,pv,period,'base')
         for user,chain in ((VIEW_A,CHAINS[0]),(VIEW_B,CHAINS[1]),(EDITOR,CHAINS[0])):
             c.execute('insert into user_chain_access(user_id,chain_id,can_view) values(%s,%s,true)',(user,chain))
         for i,(pid,p) in enumerate(PRODUCTS.items()):
@@ -76,8 +77,13 @@ def seed(lab):
                     if (i==1 and month==PERIODS[1] and metric=='ORDER') or (i==3 and month==PERIODS[1] and metric=='SALES'):continue
                     if i==0 and month==PERIODS[0] and metric=='SALES':value='0'
                     old.append(lab.put(c,chain=p['chain'],product=pid,period=month,metric=metric,value=value,batch=batches[p['chain'],month]))
+            if include_prior_year:
+                old.append(lab.put(c,chain=p['chain'],product=pid,period='2024-10',metric='SALES',value='20',
+                                   batch=batches[p['chain'],'2024-10']))
         lab.build(c,A,document(c,old,'A'),old); hash_a=lab.seal(c,A)
         lab.activate(c,A,hash_a,None,0,'synthetic-first-activation')
+    if not stage_candidates:
+        return dict(hashes={A:hash_a},old_ids=old,batches=batches)
     # Commit A before B is physically present, then prepare B and C as inactive candidates.
     with lab.connect() as c, c.transaction():
         actor(c)
