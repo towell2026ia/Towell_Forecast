@@ -12,7 +12,7 @@ import { ForecastSummary, humanStatus } from "@/components/forecast/forecast-sum
 import { ForecastEnginesTabs, type EngineTab } from "@/components/forecast/forecast-engines-tabs";
 import { MLEngineDetail } from "@/components/forecast/ml-engine-detail";
 import { StatisticalEngineDetail } from "@/components/forecast/statistical-engine-detail";
-import { useForecastFilters, type PreviewView } from "./forecast-towell-app";
+import { useForecastFilters, useOperationPin, type PreviewView } from "./forecast-towell-app";
 import { currentRetrospectivePreview } from "@/lib/preview-presentation";
 import type { VintageCapabilities, VintageDetail, VintageSummary } from "@/lib/forecast-preview";
 
@@ -38,6 +38,7 @@ const stages = ["QUEUED", "READING_DATA", "ELIGIBILITY", "STATISTICAL", "ML", "E
 const labels = ["En cola", "Datos", "Elegibilidad", "Estadístico", "Machine Learning", "Ensamble", "Quality Gate"];
 export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit?: () => void }) {
   const { repository, filters, profile, seriesVisibility, setSeriesVisibility, preview: sharedPreview, setPreview: sharedSetPreview } = useForecastFilters();
+  const pin = useOperationPin();
   const client = repository.previews;
   const currentSelection = useCurrentForecastSelection(client, filters.chainId, filters.productId);
   const [localVisibility, setLocalVisibility] = useState<SeriesVisibility>({ ...defaultVisibility });
@@ -111,12 +112,12 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
   useEffect(() => {
     let alive = true;
     if (!filters.chainId) return;
-    const readHistory = repository.getForecastHistory?.(filters) ?? Promise.resolve([]);
+    const readHistory = pin().then(context => repository.getForecastHistory?.(filters, context) ?? []);
     const readCustomer = cutoff && repository.getCustomerForecast ? repository.getCustomerForecast(filters, cutoff) : Promise.resolve([]);
     const readCategories = filters.categoryId && repository.getCategories ? repository.getCategories(filters.chainId) : Promise.resolve([]);
     void Promise.allSettled([readHistory, readCustomer, readCategories]).then(([h, c, categories]) => { if (alive) setHistory({ key: historyKey, rows: h.status === "fulfilled" ? h.value : [], customer: c.status === "fulfilled" ? c.value : [], categoryName: categories.status === "fulfilled" ? categories.value.find(category => category.id === filters.categoryId && category.chain_id === filters.chainId)?.name ?? null : null, error: h.status === "rejected", customerError: c.status === "rejected" }); });
     return () => { alive = false; };
-  }, [repository, filters, cutoff, historyKey]);
+  }, [repository, filters, cutoff, historyKey, pin]);
   const actual = history?.key === historyKey ? history : null;
   const horizons = scopeHorizons(stale ? null : selected, filters);
   const provisionalHorizons = scopeProvisionalHorizons(selected, filters);

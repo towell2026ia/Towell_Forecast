@@ -159,10 +159,10 @@ def mount_preview_routes(app, config, identity, data, runner, limiter, write_rep
         if snapshot_hash(sales) != preview["dataset_hash"]:
             raise PreviewError("PREVIEW_NOT_READY", 409)
         policy = quality_policy()
-        raw = source.client.rows("portal_monthly_observations_current", {
+        raw = source.client.observation_rows({
             "select": "product_id,period,metric_code,value", "chain_id": f"eq.{chain_id}",
             "metric_code": "in.(ORDER,DELIVERY)", "period": f"eq.{preview['issue_period']}-01",
-            "order": "product_id.asc,period.asc"})
+            "order": "product_id.asc,period.asc,metric_code.asc"}, chain_id=chain_id)
         return {"chain_id": chain_id, "preview_id": reference["preview_id"], "dataset_hash": preview["dataset_hash"],
             "policy_version": policy.version, "data_quality": data_quality(sales, preview, policy),
             "forecast_quality": forecast_quality(preview, policy),
@@ -250,10 +250,10 @@ def mount_preview_routes(app, config, identity, data, runner, limiter, write_rep
             raise PreviewError("LINEAGE_MISMATCH", 409)
         source = data.bind(token)
         sales = source.records(chain_id=chain_id, issue_period=preview["issue_period"], mode=preview["mode"])
-        service_rows = source.client.rows("portal_monthly_observations_current", {
+        service_rows = source.client.observation_rows({
             "select": "product_id,period,metric_code,value", "chain_id": f"eq.{chain_id}",
             "metric_code": "in.(ORDER,DELIVERY)", "period": f"eq.{preview['issue_period']}-01",
-            "order": "product_id.asc,period.asc"})
+            "order": "product_id.asc,period.asc,metric_code.asc"}, chain_id=chain_id)
         payload = candidate_payload(preview, sales, service_rows, actor_id=principal.user_id,
             git_sha=config.git_sha, policy=quality_policy(),
             preview_id=body.preview_id)

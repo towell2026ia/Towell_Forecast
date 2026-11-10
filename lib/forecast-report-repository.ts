@@ -1,10 +1,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { Filters, ForecastReadRepository, Product } from "./supabase/types";
+import type { Filters, ForecastReadRepository, OperationalInventory, OperationalReadContext, Product } from "./supabase/types";
 import { emptyFilters } from "./supabase/types";
 import type { CustomerForecast, DatabasePage, DatabaseSection, ReportCalculation, ReportDecision, ReportHorizon, ReportLive, ReportSnapshot } from "./forecast-reporting";
 import { addReportMonth, amount } from "./forecast-reporting";
 import { attachCommercial, filteredProducts, hasCommercialFilters } from "./commercial-filters";
-import { combineObservations } from "./forecast-data";
+import { actualMetrics, combineObservations, observationFields, observationScope, operationalArguments } from "./forecast-data";
 
 const calculationFields = "id,chain_id,product_id,objective,calculation_no,calculation_code,issue_period,cutoff_at,status,created_at,created_by,preview_id,data_snapshot_hash,content_hash,input_snapshot,candidate_metrics,research_snapshot,suggested_reference,scope_leader,evidence_mode,engine_version,git_sha,recalculation_reason";
 const horizonFields = "id,calculation_id,chain_id,product_id,horizon,target_period,statistical_value,ml_value,ensemble_value,ensemble_ml_component,statistical_model,ml_model,ensemble_ml_model,statistical_weight,ml_weight,p10,p50,p90,p95,band_basis,band_observations,band_status";
@@ -13,17 +13,22 @@ const liveFields = "id,calculation_id,chain_id,product_id,horizon,target_period,
 export class SupabaseReportReader {
   constructor(private client: SupabaseClient, private repository: ForecastReadRepository, private signal: AbortSignal) {}
   private ensureOpen() { if (this.signal.aborted) throw new Error("session_disposed"); }
-  private async read<T>(table: string, fields: string, filters: Filters, products?: Product[]) {
+  private observations(context: OperationalReadContext, fields: string, mode: "OPERATIONAL" | "AUDIT", includeForecasts: boolean, filters: Filters, productIds?: string[]) {
+    const query = this.client.rpc("operational_read_observations", { ...operationalArguments(context), ...observationScope(filters, productIds), p_mode: mode, p_metric_codes: includeForecasts ? undefined : actualMetrics }).select(fields);
+    return includeForecasts ? query : query.in("metric_code", actualMetrics);
+  }
+  private async read<T>(table: string, fields: string, filters: Filters, products?: Product[], pin?: { context: OperationalReadContext; mode: "OPERATIONAL" | "AUDIT"; includeForecasts: boolean }) {
     this.ensureOpen();
     const output: T[] = [];
     if (products && !products.length) return output;
     const chunks = products ? Array.from({ length: Math.ceil(products.length / 80) }, (_, i) => products.slice(i * 80, i * 80 + 80).map(p => p.id)) : [null];
     for (const ids of chunks) {
       for (let offset = 0; offset < 100000; offset += 500) {
-        let query = this.client.from(table).select(fields).order(table === "portal_monthly_observations_current" ? "observation_id" : "id").range(offset, offset + 499);
+        let query = (pin ? this.observations(pin.context, fields, pin.mode, pin.includeForecasts, filters, ids ?? undefined) : this.client.from(table).select(fields))
+          .order(pin?.mode === "OPERATIONAL" ? "observation_id" : "id").range(offset, offset + 499);
         if (filters.chainId) query = query.eq("chain_id", filters.chainId);
         if (ids) query = query.in("product_id", ids);
-        if (table === "portal_monthly_observations_current" || table === "monthly_observations") {
+        if (pin) {
           if (filters.periodRange[0]) query = query.gte("period", filters.periodRange[0] + "-01");
           if (filters.periodRange[1]) query = query.lte("period", filters.periodRange[1] + "-01");
         }
@@ -37,8 +42,8 @@ export class SupabaseReportReader {
     }
     return output;
   }
-  async snapshot(filters: Filters): Promise<ReportSnapshot> {
-    const [catalog, allChains, categories] = await Promise.all([filteredProducts(this.repository, filters), this.repository.getVisibleChains(), this.repository.getCategories(filters.chainId)]);
+  async snapshot(filters: Filters, context: OperationalReadContext): Promise<ReportSnapshot> {
+    const [catalog, allChains, categories] = await Promise.all([filteredProducts(this.repository, filters), this.repository.getVisibleChains(context), this.repository.getCategories(filters.chainId)]);
     const products = this.repository.getCommercialCatalog && !hasCommercialFilters(filters) ? attachCommercial(catalog, await this.repository.getCommercialCatalog()) : catalog;
     const chains = allChains;
     const chainIds = new Set(chains.map(c => c.id));
@@ -75,18 +80,45 @@ export class SupabaseReportReader {
     for (const row of [...calculations, ...horizons, ...decisions, ...live, ...customers]) {
       if (allowed.get(row.product_id) !== row.chain_id) throw new Error("report_scope_mismatch");
     }
-    return { products, chains, categories, calculations, horizons, decisions, live, customers,
+    return { products, chains, categories, calculations, horizons, decisions, live, customers, operationalVersion: context,
       provisionals: provisionals.filter(p => allowed.get(p.product_id) === p.chain_id), capabilities };
   }
-  async history(filters: Filters) {
+  async history(filters: Filters, context: OperationalReadContext, includeForecasts = false) {
     const products = await filteredProducts(this.repository, filters);
-    const observations = await this.read<Parameters<typeof combineObservations>[0][number]>("portal_monthly_observations_current", "observation_id,chain_id,chain_name,product_id,product_code,variant_code,product_description,category_id,period,metric_code,value,availability_source,version_no,available_at", filters, products);
+    const observations = await this.read<Parameters<typeof combineObservations>[0][number]>("operational_read_observations", observationFields, filters, products, { context, mode: "OPERATIONAL", includeForecasts });
     const catalog = new Map(products.map(p => [p.id, p]));
     if (observations.some(o => catalog.get(o.product_id)?.chain_id !== o.chain_id)) throw new Error("report_scope_mismatch");
-    return combineObservations(observations, catalog, observations.length);
+    return combineObservations(observations, catalog, observations.length, true);
   }
-  async periods(chainId: string | null) {
-    const historical = await this.repository.getPeriods(chainId);
+  async inventory(filters: Filters, context: OperationalReadContext) {
+    this.ensureOpen();
+    const products = await filteredProducts(this.repository, filters);
+    const byId = new Map(products.map(p => [p.id, p.chain_id]));
+    const output: OperationalInventory[] = [], seen = new Set<string>();
+    for (let start = 0; start < products.length; start += 80) {
+      const ids = products.slice(start, start + 80).map(p => p.id);
+      for (let offset = 0; ; offset += 500) {
+        let query = this.client.rpc("operational_read_inventory", operationalArguments(context))
+          .select("chain_id,product_id,period,format,upc,purchase_type,quantity_text")
+          .in("product_id", ids).order("chain_id").order("product_id").order("period").range(offset, offset + 499);
+        if (filters.periodRange[0]) query = query.gte("period", `${filters.periodRange[0]}-01`);
+        if (filters.periodRange[1]) query = query.lte("period", `${filters.periodRange[1]}-01`);
+        const { data, error } = await query.abortSignal(this.signal);
+        this.ensureOpen();
+        if (error || !Array.isArray(data)) throw new Error("inventory_read_failed");
+        for (const row of data as OperationalInventory[]) {
+          const key = `${row.chain_id}/${row.product_id}/${row.period}`;
+          if (seen.has(key) || !ids.includes(row.product_id) || byId.get(row.product_id) !== row.chain_id || !/^\d+(?:\.\d+)?$/.test(row.quantity_text)) throw new Error("inventory_lineage_invalid");
+          seen.add(key); output.push(row);
+        }
+        if (data.length < 500) break;
+        if (offset >= 99500) throw new Error("report_read_limit");
+      }
+    }
+    return output;
+  }
+  async periods(chainId: string | null, context: OperationalReadContext) {
+    const historical = await this.repository.getPeriods(chainId, context);
     const caps = this.repository.previews?.vintageCapabilities ? await this.repository.previews.vintageCapabilities() : null;
     if (!caps?.forecast_calculation_history) return historical;
     const products = await this.repository.getProducts(chainId);
@@ -94,10 +126,10 @@ export class SupabaseReportReader {
     const provisionals = await this.repository.previews?.provisionalForecasts?.(chainId, null) ?? [];
     return [...new Set([...historical, ...horizons.map(h => h.target_period.slice(0, 7)), ...provisionals.flatMap(p => p.horizons.map(h => h.target_period.slice(0, 7)))])].sort();
   }
-  async databasePage(section: DatabaseSection, filters: Filters, page: number, size: 50 | 100 | 250): Promise<DatabasePage> {
+  async databasePage(section: DatabaseSection, filters: Filters, page: number, size: 50 | 100 | 250, context: OperationalReadContext): Promise<DatabasePage> {
     if (!Number.isInteger(page) || page < 0 || ![50, 100, 250].includes(size)) throw new Error("invalid_report_page");
-    if (section === "history" || section === "observations") return this.observationPage(section, filters, page, size);
-    const snapshot = await this.snapshot(filters);
+    if (section === "history" || section === "observations") return this.observationPage(section, filters, page, size, context);
+    const snapshot = await this.snapshot(filters, context);
     const chain = new Map(snapshot.chains.map(c => [c.id, c.name]));
     const product = new Map(snapshot.products.map(p => [p.id, p]));
     const calc = new Map(snapshot.calculations.map(c => [c.id, c]));
@@ -137,23 +169,24 @@ export class SupabaseReportReader {
     records.sort((a, b) => a.id.localeCompare(b.id));
     return { headers, rows: records.slice(page * size, (page + 1) * size), hasMore: records.length > (page + 1) * size };
   }
-  private async observationPage(section: "history" | "observations", filters: Filters, page: number, size: number): Promise<DatabasePage> {
+  private async observationPage(section: "history" | "observations", filters: Filters, page: number, size: number, context: OperationalReadContext): Promise<DatabasePage> {
     this.ensureOpen();
     const products = await filteredProducts(this.repository, filters);
-    const chains = await this.repository.getVisibleChains();
+    const chains = await this.repository.getVisibleChains(context);
     const headers = ["Periodo", "Cadena", "Producto", "Código", "Métrica", "Valor", "Versión", "Disponibilidad", "Observation ID"];
     if (!products.length) return { headers, rows: [], hasMore: false };
     const raw = section === "observations", id = raw ? "id" : "observation_id";
+    const mode = raw ? "AUDIT" : "OPERATIONAL";
+    const fields = `${id},chain_id,product_id,period,metric_code,value_text,version_no,availability_source,available_at,source_batch_id,source_reference`;
+    type AuditObservation = { id?: string; observation_id?: string; chain_id: string; product_id: string; period: string; metric_code: string; value_text: string; version_no: number; availability_source: string; available_at: string | null; source_batch_id: string; source_reference: string | null };
     if (hasCommercialFilters(filters)) {
-      const fields = `${id},chain_id,product_id,period,metric_code,value,version_no,availability_source,available_at,source_batch_id`;
-      const rows = await this.read<{ id?: string; observation_id?: string; chain_id: string; product_id: string; period: string; metric_code: string; value: number; version_no: number; availability_source: string; available_at: string | null; source_batch_id: string }>(raw ? "monthly_observations" : "portal_monthly_observations_current", fields, filters, products);
+      const rows = await this.read<AuditObservation>("operational_read_observations", fields, filters, products, { context, mode, includeForecasts: true });
       rows.sort((a, b) => a.chain_id.localeCompare(b.chain_id) || a.product_id.localeCompare(b.product_id) || a.period.localeCompare(b.period) || a.metric_code.localeCompare(b.metric_code) || (a.id ?? a.observation_id ?? "").localeCompare(b.id ?? b.observation_id ?? ""));
       const catalog = new Map(products.map(p => [p.id, p])), scopes = new Map(chains.map(c => [c.id, c.name]));
       if (rows.some(r => catalog.get(r.product_id)?.chain_id !== r.chain_id)) throw new Error("report_scope_mismatch");
-      return { headers, rows: rows.slice(page * size, (page + 1) * size).map(o => ({ id: (o.id ?? o.observation_id)!, cells: [o.period.slice(0, 7), scopes.get(o.chain_id) ?? o.chain_id, catalog.get(o.product_id)!.description, catalog.get(o.product_id)!.product_code, o.metric_code, o.value, o.version_no, o.availability_source, (o.id ?? o.observation_id)!], detail: { available_at: o.available_at, source_batch_id: o.source_batch_id } })), hasMore: rows.length > (page + 1) * size };
+      return { headers, rows: rows.slice(page * size, (page + 1) * size).map(o => ({ id: (o.id ?? o.observation_id)!, cells: [o.period.slice(0, 7), scopes.get(o.chain_id) ?? o.chain_id, catalog.get(o.product_id)!.description, catalog.get(o.product_id)!.product_code, o.metric_code, o.value_text, o.version_no, o.availability_source, (o.id ?? o.observation_id)!], detail: { available_at: o.available_at, source_batch_id: o.source_batch_id, source_reference: o.source_reference ?? null } })), hasMore: rows.length > (page + 1) * size };
     }
-    let query = this.client.from(raw ? "monthly_observations" : "portal_monthly_observations_current")
-      .select(`${id},chain_id,product_id,period,metric_code,value,version_no,availability_source,available_at,source_batch_id`)
+    let query = this.observations(context, fields, mode, true, filters)
       .order("chain_id").order("product_id").order("period").order("metric_code").order(id).range(page * size, (page + 1) * size);
     if (filters.chainId) query = query.eq("chain_id", filters.chainId);
     if (filters.productId) query = query.eq("product_id", filters.productId);
@@ -164,11 +197,12 @@ export class SupabaseReportReader {
     this.ensureOpen();
     if (result.error || !Array.isArray(result.data)) throw new Error("report_read_failed");
     const catalog = new Map(products.map(p => [p.id, p])), scopes = new Map(chains.map(c => [c.id, c.name]));
-    const rows = result.data.slice(0, size).map(o => {
+    const rows = (result.data as unknown as AuditObservation[]).slice(0, size).map(o => {
       const product = catalog.get(o.product_id);
       if (!product || product.chain_id !== o.chain_id) throw new Error("report_scope_mismatch");
-      const observationId = "id" in o ? o.id : o.observation_id;
-      return { id: observationId, cells: [o.period.slice(0, 7), scopes.get(o.chain_id) ?? o.chain_id, product.description, product.product_code, o.metric_code, o.value, o.version_no, o.availability_source, observationId], detail: { available_at: o.available_at, source_batch_id: o.source_batch_id } };
+      const observationId = o.id ?? o.observation_id;
+      if (!observationId) throw new Error("report_observation_lineage");
+      return { id: observationId, cells: [o.period.slice(0, 7), scopes.get(o.chain_id) ?? o.chain_id, product.description, product.product_code, o.metric_code, o.value_text, o.version_no, o.availability_source, observationId], detail: { available_at: o.available_at, source_batch_id: o.source_batch_id, source_reference: o.source_reference ?? null } };
     });
     return { headers, rows, hasMore: result.data.length > size };
   }

@@ -92,7 +92,13 @@ class OperationalMultiChainForecastRunner:
                     month_end(issue)
                     if issue > latest:
                         raise PreviewError("DATA_LEAKAGE_DETECTED")
-                    rows = [row for row in rows if row["period"] <= issue]
+                    if job["mode"] == "POINT_IN_TIME":
+                        # Choose the latest eligible revision at the issue cutoff within the same pin.
+                        rows = provider.records(chain_id=chain, mode=job["mode"], issue_period=issue)
+                    else:
+                        rows = [row for row in rows if row["period"] <= issue]
+                    if not rows:
+                        raise PreviewError("INSUFFICIENT_HISTORY")
                     chain_rows = rows
                     if job["product_id"] and not any(row["product_id"] == job["product_id"] for row in rows):
                         provisional = self._cold_start_scope(provider, job, chain, issue, chain_rows)

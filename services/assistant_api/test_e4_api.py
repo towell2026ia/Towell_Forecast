@@ -53,15 +53,14 @@ class FakeSource:
             if "captures" in self.saved:
                 return self.saved["captures"]
             return [{"id": self.saved["session"], "chain_id": CHAIN, "product_id": PRODUCT, "status": "DRAFT"}] if self.saved.get("session") else []
-        if table == "monthly_observations":
-            return []
-        if table == "portal_monthly_observations_current":
-            return self.saved.get("actual_sales", [])
         if table == "current_forecast_selection":
             return []
         if table == "forecast_learning_events":
             return []
         return []
+
+    def observation_rows(self, params, *, mode="OPERATIONAL", chain_id=None):
+        return self.saved.get("actual_sales", []) if mode == "OPERATIONAL" else []
 
 
 class FakeWriter:

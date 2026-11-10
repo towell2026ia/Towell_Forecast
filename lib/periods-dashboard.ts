@@ -29,7 +29,7 @@ export function periodsDashboard(snapshot: ReportSnapshot, history: HistoricalRo
     if (seen.has(key)) throw new Error("duplicate_dashboard_month");
     seen.add(key);
   }
-  const cutoff = matrix.issue ?? rows.map(r => r.period.slice(0, 7)).sort().at(-1) ?? null;
+  const cutoff = matrix.issue ?? rows.filter(r => r.SALES !== null || r.ORDER !== null || r.DELIVERY !== null).map(r => r.period.slice(0, 7)).sort().at(-1) ?? null;
   const eligible = allowed.size;
   const points: DashboardPoint[] = cutoff ? Array.from({ length: 12 }, (_, i) => {
     const period = addReportMonth(cutoff, i - 8);
@@ -61,7 +61,7 @@ export function periodsDashboard(snapshot: ReportSnapshot, history: HistoricalRo
   });
   return { matrix, cutoff, points, coverage, actualMonths: points.slice(0, 9).filter(p => p.coverage.actual.covered > 0).length,
     priorComplete: [completeness("previous2"), completeness("previous1")],
-    kpis: { sales: sum("SALES"), orders: sum("ORDER"), delivery: sum("DELIVERY"), fillRate: orders > 0 ? deliveries / orders * 100 : null, paired: paired.length },
+    kpis: { sales: sum("SALES"), orders: sum("ORDER"), delivery: sum("DELIVERY"), fillRate: orders > 0 ? deliveries / orders * 100 : null, paired: paired.length, expectedPairs: eligible * historicalPeriods.size },
     available: matrix.rows.filter(r => r.calculation).length, adopted: matrix.rows.filter(r => r.adopted).length };
 }
 export function detailMetrics(row: ForecastMatrixRow) {

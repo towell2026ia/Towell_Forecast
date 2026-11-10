@@ -57,17 +57,20 @@ class ProviderTests(unittest.TestCase):
             path = request.url.path
             if path.endswith("/user"):
                 return httpx.Response(200, json={"id": USER})
+            if path.endswith("/operational_read_context"):
+                return httpx.Response(200, json=[{"version_id": A, "manifest_hash": "a" * 64, "generation": 1}])
             tables = {
                 "profiles": [{"id": USER, "status": "ACTIVE", "global_role": role}],
                 "chains": [{"id": chain, "name": "Fixture", "status": "ACTIVE"} for chain in ([A, B] if role == "ADMIN" else [A])],
                 "user_chain_access": [{"chain_id": A, "can_view": True, "can_run_forecast": role == "EDITOR"}],
                 "categories": [{"id": CAT, "name": "Actual category"}],
                 "products": [{"id": product, "chain_id": A, "product_code": product, "description": "Actual product", "category_id": CAT} for product in (PRODUCT, OTHER)],
-                "portal_monthly_observations_current": [{"chain_id": A, "product_id": PRODUCT, "period": "2026-05-01", "metric_code": "SALES", "value": 0, "available_at": None, "availability_source": "UNKNOWN", "version_no": 1},
+                "operational_read_observations": [{"chain_id": A, "product_id": PRODUCT, "period": "2026-05-01", "metric_code": "SALES", "value": 0, "available_at": None, "availability_source": "UNKNOWN", "version_no": 1},
                     {"chain_id": A, "product_id": PRODUCT, "period": "2026-07-01", "metric_code": "SALES", "value": 12, "available_at": None, "availability_source": "UNKNOWN", "version_no": 1}, *self.extra_rows],
-                "monthly_observations_current": [],
             }
             result = tables.get(path.rsplit("/", 1)[-1], [])
+            if request.url.params.get("p_mode") == "TEMPORAL":
+                result = []
             if path.endswith("/products") and request.url.params.get("id"):
                 result = [row for row in result if "eq." + row["id"] == request.url.params["id"]]
             if request.url.params.get("offset") != "0":
@@ -118,9 +121,40 @@ class ProviderTests(unittest.TestCase):
 
     def test_PIT_source_and_no_secret_representation(self):
         self.assertEqual(SupabaseDataProvider(self.client.bind(jwt())).records(chain_id=A, mode="POINT_IN_TIME", issue_period="2026-07"), [])
-        self.assertTrue(self.requests[-1].url.path.endswith("monthly_observations_current"))
-        self.assertEqual(self.requests[-1].url.params["available_at"], "not.is.null")
+        self.assertTrue(self.requests[-1].url.path.endswith("operational_read_observations"))
+        self.assertEqual(self.requests[-1].url.params["p_mode"], "TEMPORAL")
+        self.assertEqual(self.requests[-1].url.params["p_available_through"], "2026-07-31T23:59:59Z")
         self.assertNotIn(KEY, repr(self.client))
+
+    def test_same_context_for_each_page_and_metric_of_an_operation(self):
+        active, pages = [A, "a" * 64, 3], []
+
+        def handle(request):
+            if request.url.path.endswith("/operational_read_context"):
+                return httpx.Response(200, json=[dict(zip(("version_id", "manifest_hash", "generation"), active))])
+            pages.append(request.url.params)
+            if len(pages) == 1:
+                active[:] = [B, "b" * 64, 4]
+                return httpx.Response(200, json=[{"id": i} for i in range(500)])
+            return httpx.Response(200, json=[])
+
+        unbound = SupabaseReadClient(URL, KEY, transport=httpx.MockTransport(handle))
+        operation = unbound.bind(jwt())
+        operation.observation_rows({"metric_code": "eq.SALES"})
+        operation.observation_rows({"metric_code": "in.(ORDER,DELIVERY)"})
+        unbound.bind(jwt()).observation_rows({}, mode="AUDIT")
+        self.assertEqual([(q["p_version_id"], q["p_generation"], q["p_manifest_hash"]) for q in pages],
+                         [(A, "3", "a" * 64)] * 3 + [(B, "4", "b" * 64)])
+        self.assertEqual([q["offset"] for q in pages], ["0", "500", "0", "0"])
+        self.assertEqual(pages[-1]["p_mode"], "AUDIT")
+        with self.assertRaisesRegex(PreviewError, "DATA_READ_FAILED"):
+            operation.rows("monthly_observations", {})
+
+    def test_missing_context_does_not_fall_back_to_unpinned_read(self):
+        client = SupabaseReadClient(URL, KEY, jwt(), transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json=[])))
+        with self.assertRaisesRegex(PreviewError, "DATA_READ_FAILED"):
+            client.observation_rows({})
 
     def test_signature_must_be_verified_by_auth_server(self):
         forged = jwt()
@@ -260,6 +294,17 @@ class JobTests(unittest.TestCase):
     def tearDown(self):
         self.runner.close()
         self.temp.cleanup()
+
+    def test_point_in_time_job_uses_cutoff_before_selecting_revisions(self):
+        from unittest.mock import Mock
+
+        provider = Mock()
+        provider.records.side_effect = [[{"period": "2026-07"}], []]
+        self.runner.submit(provider, self.actor, chain_ids=[A],
+                           mode="POINT_IN_TIME", issue_period="2026-05")
+        self.runner.close()
+        self.assertEqual([call.kwargs.get("issue_period") for call in provider.records.call_args_list],
+                         [None, "2026-05"])
 
     def test_saved_proposals_read_only_scope_pagination_and_no_research(self):
         from unittest.mock import Mock

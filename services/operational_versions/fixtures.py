@@ -48,7 +48,8 @@ def document(c, ids, name):
                 policy='gateb-local-global-1',name=name,unit='PIEZAS',grouping=PRODUCTS)
 
 
-def seed(lab, *, stage_candidates=True, include_prior_year=False):
+def seed(lab, *, stage_candidates=True, include_prior_year=False, temporal_history=False,
+         activate_initial=True, commercial_profiles=False):
     with lab.connect() as c, c.transaction():
         for user,role in ((ADMIN,'ADMIN'),(VIEW_A,'VIEWER'),(VIEW_B,'VIEWER'),(EDITOR,'EDITOR')):
             c.execute('insert into auth.users(id) values(%s)',(user,))
@@ -60,7 +61,14 @@ def seed(lab, *, stage_candidates=True, include_prior_year=False):
             c.execute("insert into chains(id,code,name) values(%s,%s,%s)",(chain,f'SYNTHETIC_{i}',f'Synthetic chain {i}'))
             profile=uid('profile-'+chain); pv=uid('profile-version-'+chain)
             c.execute("insert into import_profiles(id,chain_id,name) values(%s,%s,'Synthetic monthly')",(profile,chain))
-            c.execute("insert into import_profile_versions(id,profile_id,chain_id,version,mapping_json,required_columns,created_by) values(%s,%s,%s,1,'{}','[]',%s)",(pv,profile,chain,ADMIN))
+            mapping = {}
+            if commercial_profiles:
+                mapping = {"scope": {"level": "COMMERCIAL_UNIT", "actual_bearing": True,
+                            "code": f"SYNTHETIC_{i}::SYNTHETIC", "parent_code": f"SYNTHETIC_{i}"},
+                           "products": [{"id": product, "identifier_mappings": [["", f"{j:07}"]]}
+                                        for j, (product, detail) in enumerate(PRODUCTS.items()) if detail["chain"] == chain]}
+            c.execute("insert into import_profile_versions(id,profile_id,chain_id,version,mapping_json,required_columns,created_by) values(%s,%s,%s,1,%s::jsonb,'[]',%s)",
+                      (pv,profile,chain,json.dumps(mapping),ADMIN))
             profiles[chain]=pv
             for period in [*PERIODS, *(['2024-10'] if include_prior_year else [])]:
                 batches[chain,period]=_batch(c,chain,pv,period,'base')
@@ -75,11 +83,21 @@ def seed(lab, *, stage_candidates=True, include_prior_year=False):
             for month in PERIODS:
                 for metric,value in (('SALES','7.125'),('ORDER','10'),('DELIVERY','8')):
                     if (i==1 and month==PERIODS[1] and metric=='ORDER') or (i==3 and month==PERIODS[1] and metric=='SALES'):continue
-                    if i==0 and month==PERIODS[0] and metric=='SALES':value='0'
+                    if i==0 and month==PERIODS[0] and metric=='SALES':
+                        value='0'
+                        if temporal_history:
+                            c.execute("""insert into monthly_observations
+                                (id,chain_id,product_id,period,metric_code,value,version_no,
+                                 availability_source,available_at,source_batch_id)
+                                select %s,chain_id,%s,period,'SALES',6,1,'SYSTEM_INGESTION',uploaded_at,id
+                                from import_batches where id=%s""",
+                                (uid('known-earlier-sale'),pid,batches[p['chain'],month]))
                     old.append(lab.put(c,chain=p['chain'],product=pid,period=month,metric=metric,value=value,batch=batches[p['chain'],month]))
             if include_prior_year:
                 old.append(lab.put(c,chain=p['chain'],product=pid,period='2024-10',metric='SALES',value='20',
                                    batch=batches[p['chain'],'2024-10']))
+        if not activate_initial:
+            return dict(old_ids=old,batches=batches)
         lab.build(c,A,document(c,old,'A'),old); hash_a=lab.seal(c,A)
         lab.activate(c,A,hash_a,None,0,'synthetic-first-activation')
     if not stage_candidates:

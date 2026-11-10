@@ -3,13 +3,14 @@
 import { useCallback, useMemo, useState } from "react";
 import { chooseCalculations, commercialRows, emptyReportChoice, leafScopeIds, reportSeries, type CommercialRow, type ReportChoice, type ReportSnapshot, type ReportSeries } from "@/lib/forecast-reporting";
 import type { Cursor, Filters, ForecastReadRepository, HistoricalRow } from "@/lib/supabase/types";
-import { useForecastFilters, useRead } from "./forecast-towell-app";
+import { useForecastFilters, useOperationPin, useRead } from "./forecast-towell-app";
 import { CalculationFilters, ReportPaging, ReportSelect, ReportState, ReportTable, reportNumber, reportPercent } from "./report-controls";
 
 const noReport: ReportSnapshot = { products: [], chains: [], categories: [], calculations: [], horizons: [], decisions: [], live: [], customers: [], provisionals: [], capabilities: { vintage_persistence: false, official_publication: false, champion_publication: false } };
 export function CommercialHistoryView() {
   const { repository, filters } = useForecastFilters();
-  const report = useRead(useCallback(() => repository.getReportSnapshot ? repository.getReportSnapshot(filters) : Promise.resolve(noReport), [repository, filters]));
+  const pin = useOperationPin();
+  const report = useRead(useCallback(async () => repository.getReportSnapshot ? repository.getReportSnapshot(filters, await pin()) : noReport, [repository, filters, pin]));
   return <section className="space-y-5"><h1 className="text-2xl font-semibold text-slate-950">Matriz histórica comercial</h1><ReportState loading={report.loading} error={report.error}/>{report.data && <History key={JSON.stringify(filters)} snapshot={report.data} repository={repository} filters={filters}/>}</section>;
 }
 function History({ snapshot, repository, filters }: { snapshot: ReportSnapshot; repository: ForecastReadRepository; filters: Filters }) {
@@ -23,7 +24,7 @@ function History({ snapshot, repository, filters }: { snapshot: ReportSnapshot; 
       const product = snapshot.products.find(p => p.id === c.product_id && p.chain_id === c.chain_id);
       if (!product) throw new Error("history_scope_invalid");
       const horizons = snapshot.horizons.filter(h => h.calculation_id === c.id).sort((a, b) => a.horizon - b.horizon);
-      const actual = await repository.getHistoricalObservations({ ...filters, chainId: c.chain_id, productId: c.product_id, periodRange: [horizons[0].target_period.slice(0, 7), horizons.at(-1)!.target_period.slice(0, 7)] }, { size: 50 });
+      const actual = await repository.getHistoricalObservations({ ...filters, chainId: c.chain_id, productId: c.product_id, periodRange: [horizons[0].target_period.slice(0, 7), horizons.at(-1)!.target_period.slice(0, 7)] }, { size: 50 }, snapshot.operationalVersion);
       if (actual.next) throw new Error("history_target_ambiguous");
       for (const h of horizons) {
         const period = h.target_period.slice(0, 7);
@@ -52,7 +53,7 @@ function CommercialPages({ snapshot, repository, filters, choice, metric, stored
   const page = useRead(useCallback(async () => {
     const result = stored ? { rows: stored.slice(index * size, (index + 1) * size), next: stored.length > (index + 1) * size ? { chain_id: "", product_id: "", period: "" } : null }
       : filters.periodRange[0] && filters.periodRange[1] && filters.periodRange[0] > filters.periodRange[1] ? { rows: [], next: null }
-      : await repository.getHistoricalObservations(filters, { size, cursor });
+      : await repository.getHistoricalObservations(filters, { size, cursor }, snapshot.operationalVersion);
     return { ...result, rows: commercialRows(result.rows, snapshot, choice, metric).filter(r => !choice.version && !choice.issue || r.calculation) };
   }, [stored, index, size, filters, repository, cursor, snapshot, choice, metric]));
   return <><ReportState loading={page.loading} error={page.error} empty={page.data?.rows.length === 0}/>{page.data && page.data.rows.length > 0 && <ReportTable label="Histórico comercial" headers={["Periodo", "Cadena", "Producto", "Código", "Forecast Cliente", "Forecast Estadístico", "Forecast ML", "Forecast Ensemble", "Forecast Towell adoptado", "Pedido", "Venta real", "Enviado", "Error absoluto", "WAPE LIVE", "Fill Rate", "Estado del dato", "Versión del cálculo"]} rows={page.data.rows.map(r => ({ id: `${r.chain_id}/${r.product_id}/${r.period}`, cells: [r.period.slice(0, 7), r.chain, <span key="product" className="block min-w-44 max-w-64 break-words">{r.product.description}</span>, <div key="code" className="min-w-28">{r.product.product_code}<p className="text-xs text-slate-500">{[...new Set(r.product.identifiers.map(i => i[1]).filter(Boolean))].join(" / ")}</p></div>, ...[r.customer, r.statistical, r.ml, r.ensemble, r.adopted, r.ORDER, r.SALES, r.DELIVERY].map(reportNumber), <div key="error">{reportNumber(r.absoluteError)}<p className="text-xs text-slate-500">{r.absoluteError !== null && r.liveError === null ? "Comparación no LIVE" : ""}</p></div>, reportPercent(r.wapeLive), reportPercent(r.fillRate), <div key="state" className="min-w-56"><p>{r.availability}</p><p className="mt-1 text-xs text-slate-500">{r.evidence}</p></div>, r.calculation ? <details key="calc" className="min-w-52 max-w-72 break-words"><summary className="cursor-pointer">{r.calculation.calculation_code} · {r.calculation.issue_period.slice(0, 7)}</summary><p className="mt-2 text-xs break-all">{r.calculation.id}</p><p className="text-xs">Creado {r.calculation.created_at}</p><p className="text-xs">Objetivo {r.period.slice(0, 7)}</p></details> : "Sin dato"] }))}/>}
@@ -78,7 +79,7 @@ function Performance({ snapshot, repository, filters, choice, metric, stored }: 
     else if (!(filters.periodRange[0] && filters.periodRange[1] && filters.periodRange[0] > filters.periodRange[1])) {
       let cursor: Cursor | null = null;
       for (let pages = 0; pages < 800; pages++) {
-        const page = await repository.getHistoricalObservations(filters, { size: 250, cursor });
+        const page = await repository.getHistoricalObservations(filters, { size: 250, cursor }, snapshot.operationalVersion);
         ingest(commercialRows(page.rows, snapshot, choice, metric));
         if (!page.next) return buckets;
         if (JSON.stringify(page.next) === JSON.stringify(cursor)) throw new Error("history_cursor_invalid");
@@ -88,5 +89,12 @@ function Performance({ snapshot, repository, filters, choice, metric, stored }: 
     }
     return buckets;
   }, [stored, snapshot, choice, metric, repository, filters]));
-  return <div className="space-y-3"><h2 className="text-lg font-semibold">Desempeño mensual y acumulado · Scopes hoja</h2><ReportState loading={totals.loading} error={totals.error} empty={totals.data?.size === 0}/>{totals.data && totals.data.size > 0 && <ReportTable label="Desempeño comercial" headers={["Periodo", "Filas", "Evidencia LIVE", "WAPE LIVE", "Pedido / Enviado", "Fill Rate"]} rows={[...totals.data].sort(([a], [b]) => a === "Acumulado" ? -1 : b === "Acumulado" ? 1 : a.localeCompare(b)).map(([id, t]) => ({ id, cells: [id, reportNumber(t.rows), reportNumber(t.live), reportPercent(t.actual > 0 ? t.error / t.actual * 100 : null), t.service ? `${reportNumber(t.orders)} / ${reportNumber(t.delivered)}` : "Sin dato", reportPercent(t.orders > 0 ? t.delivered / t.orders * 100 : null)] }))}/>}</div>;
+  const leaves = leafScopeIds(snapshot.chains);
+  const candidates = chooseCalculations(snapshot, choice);
+  const expectedProducts = snapshot.products.filter(product => (!snapshot.chains.length || leaves.has(product.chain_id)) && (!(choice.version || choice.issue) || candidates.has(product.id))).length;
+  const months = Math.max(0, (totals.data?.size ?? 0) - 1);
+  return <div className="space-y-3"><h2 className="text-lg font-semibold">Desempeño mensual y acumulado · Scopes hoja</h2><ReportState loading={totals.loading} error={totals.error} empty={totals.data?.size === 0}/>{totals.data && totals.data.size > 0 && <ReportTable label="Desempeño comercial" headers={["Periodo", "Filas", "Evidencia LIVE", "WAPE LIVE", "Pedido / Enviado", "Fill Rate", "Cobertura Fill Rate"]} rows={[...totals.data].sort(([a], [b]) => a === "Acumulado" ? -1 : b === "Acumulado" ? 1 : a.localeCompare(b)).map(([id, t]) => {
+    const expected = Math.max(t.rows, expectedProducts * (id === "Acumulado" ? months : 1));
+    return { id, cells: [id, reportNumber(t.rows), reportNumber(t.live), reportPercent(t.actual > 0 ? t.error / t.actual * 100 : null), t.service ? `${reportNumber(t.orders)} / ${reportNumber(t.delivered)}` : "Sin dato", reportPercent(t.orders > 0 ? t.delivered / t.orders * 100 : null), `${t.service}/${expected} pares${t.service < expected ? " · Parcial" : ""}`] };
+  })}/>}</div>;
 }

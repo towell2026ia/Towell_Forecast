@@ -40,13 +40,13 @@ describe("Multi-chain read-only UI", () => {
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Periodo desde" }).hasAttribute("disabled")).toBe(false));
     await pick("Periodo desde", "2025-02");
     await pick("Cadena / unidad comercial", chain1.name);
-    await waitFor(() => expect(repo.getPeriods).toHaveBeenLastCalledWith(chain1.id));
+    await waitFor(() => expect(repo.getPeriods).toHaveBeenLastCalledWith(chain1.id, undefined));
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Periodo desde" }).hasAttribute("disabled")).toBe(false));
     await userEvent.click(screen.getByRole("combobox", { name: "Periodo desde" }));
     expect(await screen.findByRole("option", { name: "2026-03" })).toBeTruthy();
     expect(screen.queryByRole("option", { name: "2025-02" })).toBeNull(); await userEvent.keyboard("{Escape}");
     await pick("Cadena / unidad comercial", "Todas las cadenas");
-    await waitFor(() => expect(repo.getPeriods).toHaveBeenLastCalledWith(null));
+    await waitFor(() => expect(repo.getPeriods).toHaveBeenLastCalledWith(null, undefined));
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Periodo desde" }).hasAttribute("disabled")).toBe(false));
     await userEvent.click(screen.getByRole("combobox", { name: "Periodo desde" }));
     expect(await screen.findByRole("option", { name: "2025-02" })).toBeTruthy();
@@ -128,16 +128,16 @@ describe("Multi-chain read-only UI", () => {
   it("PH24/UI12 tuple pagination defaults to 50, advances and returns to previous page", async () => {
     const repo = fixture(); filterHarness(repo, <HistoryView/>);
     await screen.findByText("Producto desde RLS");
-    expect(repo.getHistoricalObservations).toHaveBeenCalledWith(emptyFilters, { size: 50, cursor: null });
+    expect(repo.getHistoricalObservations).toHaveBeenCalledWith(emptyFilters, { size: 50, cursor: null }, undefined);
     await userEvent.click(screen.getByRole("button", { name: "Siguiente" }));
-    await waitFor(() => expect(repo.getHistoricalObservations).toHaveBeenLastCalledWith(emptyFilters, { size: 50, cursor: expect.any(Object) }));
+    await waitFor(() => expect(repo.getHistoricalObservations).toHaveBeenLastCalledWith(emptyFilters, { size: 50, cursor: expect.any(Object) }, undefined));
     await userEvent.click(screen.getByRole("button", { name: "Anterior" }));
-    await waitFor(() => expect(repo.getHistoricalObservations).toHaveBeenLastCalledWith(emptyFilters, { size: 50, cursor: null }));
+    await waitFor(() => expect(repo.getHistoricalObservations).toHaveBeenLastCalledWith(emptyFilters, { size: 50, cursor: null }, undefined));
   });
   it("UI13 historical filters passed upstream and zero is not missing", async () => {
     const repo = fixture(), filters: Filters = { ...emptyFilters, chainId: chain1.id, productId: product.id, periodRange: ["2026-03", "2026-03"] };
     filterHarness(repo, <HistoryView/>, filters); await screen.findByText("Producto desde RLS");
-    expect(repo.getHistoricalObservations).toHaveBeenCalledWith(filters, { size: 50, cursor: null });
+    expect(repo.getHistoricalObservations).toHaveBeenCalledWith(filters, { size: 50, cursor: null }, undefined);
     expect(screen.getAllByText("0").length).toBeGreaterThan(0); expect(screen.getAllByText("Sin dato").length).toBeGreaterThan(0);
   });
   it("UI14 empty state explicit", () => { render(<ReadState loading={false} error={false} empty/>); expect(screen.getByText("No hay histórico certificado para este filtro.")).toBeTruthy(); });

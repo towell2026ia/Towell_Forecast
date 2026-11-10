@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import json
 import math
+import re
 import time
 import uuid
 from typing import Any
@@ -29,6 +30,7 @@ class SupabaseReadClient:
                  transport: httpx.BaseTransport | None = None):
         self.url, self._key, self._token = url.rstrip("/"), key, token
         self.timeout, self.transport = timeout, transport
+        self._operational_context: dict[str, str | int] | None = None
 
     def __repr__(self) -> str:
         return "SupabaseReadClient(GET-only, credentials redacted)"
@@ -54,9 +56,40 @@ class SupabaseReadClient:
             raise PreviewError("DATA_READ_FAILED", 503) from None
 
     def rows(self, table: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+        if table in {"monthly_observations", "monthly_observations_current", "portal_monthly_observations_current"}:
+            raise PreviewError("DATA_READ_FAILED", 503)
+        return self._pages(f"/rest/v1/{table}", params)
+
+    def observation_rows(self, params: dict[str, Any], *, mode: str = "OPERATIONAL",
+                         available_through: str | None = None,
+                         chain_id: str | None = None) -> list[dict[str, Any]]:
+        if self._operational_context is None:
+            rows = self.get("/rest/v1/rpc/operational_read_context")
+            if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+                raise PreviewError("DATA_READ_FAILED", 503)
+            row = rows[0]
+            try:
+                version = str(uuid.UUID(row["version_id"]))
+                manifest = row["manifest_hash"]
+                generation = row["generation"]
+                if not isinstance(manifest, str) or not re.fullmatch("[0-9a-f]{64}", manifest) \
+                        or type(generation) is not int or generation < 0:
+                    raise ValueError()
+            except (TypeError, ValueError, KeyError, AttributeError):
+                raise PreviewError("DATA_READ_FAILED", 503) from None
+            self._operational_context = {"p_version_id": version, "p_manifest_hash": manifest,
+                                         "p_generation": generation}
+        arguments = {**params, **self._operational_context, "p_mode": mode}
+        if chain_id is not None:
+            arguments["p_chain_id"] = uuid_value(chain_id)
+        if available_through is not None:
+            arguments["p_available_through"] = available_through
+        return self._pages("/rest/v1/rpc/operational_read_observations", arguments)
+
+    def _pages(self, path: str, params: dict[str, Any]) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         for offset in range(0, 200000, 500):
-            page = self.get(f"/rest/v1/{table}", {**params, "limit": 500, "offset": offset})
+            page = self.get(path, {**params, "limit": 500, "offset": offset})
             if not isinstance(page, list) or any(not isinstance(row, dict) for row in page):
                 raise PreviewError("DATA_READ_FAILED", 503)
             result.extend(page)

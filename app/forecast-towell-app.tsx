@@ -11,7 +11,7 @@ import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupConte
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { logPortalEvent } from "@/lib/supabase/client";
 import { resetForChain } from "@/lib/forecast-data";
-import { emptyFilters, type Filters, type ForecastReadRepository, type Profile } from "@/lib/supabase/types";
+import { emptyFilters, type Filters, type ForecastReadRepository, type OperationalReadContext, type Profile } from "@/lib/supabase/types";
 import ForecastAssistant from "./forecast-assistant";
 import ForecastAssistantErrorBoundary from "./forecast-assistant-error-boundary";
 import type { AssistantContext } from "./assistant/assistant-service";
@@ -42,12 +42,16 @@ const modules = [
 ] as const;
 type ModuleId = typeof modules[number][0];
 export type PreviewView = { key: string; result: PreviewJob | null; job: PreviewJob | null; error: string; loading: boolean };
-type FilterState = { filters: Filters; setFilters: React.Dispatch<React.SetStateAction<Filters>>; repository: ForecastReadRepository; profile: Profile; seriesVisibility?: SeriesVisibility; setSeriesVisibility?: React.Dispatch<React.SetStateAction<SeriesVisibility>>; preview?: PreviewView | null; setPreview?: React.Dispatch<React.SetStateAction<PreviewView | null>> };
+type FilterState = { filters: Filters; setFilters: React.Dispatch<React.SetStateAction<Filters>>; repository: ForecastReadRepository; profile: Profile; pinOperational?: () => Promise<OperationalReadContext | undefined>; seriesVisibility?: SeriesVisibility; setSeriesVisibility?: React.Dispatch<React.SetStateAction<SeriesVisibility>>; preview?: PreviewView | null; setPreview?: React.Dispatch<React.SetStateAction<PreviewView | null>> };
 export const ForecastFiltersContext = createContext<FilterState | null>(null);
 export function useForecastFilters() {
   const state = useContext(ForecastFiltersContext);
   if (!state) throw new Error("filter_provider_required");
   return state;
+}
+export function useOperationPin() {
+  const { repository, pinOperational } = useForecastFilters();
+  return useCallback(() => pinOperational?.() ?? repository.openOperationalRead?.() ?? Promise.resolve(undefined), [repository, pinOperational]);
 }
 export function useRead<T>(load: () => Promise<T>) {
   const [result, setResult] = useState<{ load: typeof load; data: T | null; error: boolean } | null>(null);
@@ -77,6 +81,13 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
   const [motorVisited, setMotorVisited] = useState(false);
   const [seriesVisibility, setSeriesVisibility] = useState<SeriesVisibility>({ ...defaultVisibility });
   const [filters, setFilters] = useState<Filters>({ ...emptyFilters });
+  // One lazy read context for this module/filter interaction. A new interaction
+  // acquires the then-current release, while paging and downloads keep this one.
+  const pinOperational = useMemo(() => {
+    let pin: Promise<OperationalReadContext | undefined> | undefined;
+    return () => pin ??= repository.openOperationalRead?.() ?? Promise.resolve(undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- Module and filters define the lifetime of the read.
+  }, [repository, active, filters]);
   const [previewView, setPreview] = useState<PreviewView | null>(null);
   const previewKey = `${filters.chainId}/${filters.productId}`;
   useEffect(() => {
@@ -89,8 +100,8 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
     });
     return () => { alive = false; };
   }, [repository, filters.chainId, filters.productId, previewKey]);
-  const state = useMemo(() => ({ filters, setFilters, repository, profile, seriesVisibility, setSeriesVisibility, preview: previewView?.key === previewKey ? previewView : null, setPreview }), [filters, repository, profile, seriesVisibility, previewView, previewKey]);
-  const chains = useRead(useCallback(() => repository.getVisibleChains(), [repository]));
+  const state = useMemo(() => ({ filters, setFilters, repository, profile, pinOperational, seriesVisibility, setSeriesVisibility, preview: previewView?.key === previewKey ? previewView : null, setPreview }), [filters, repository, profile, pinOperational, seriesVisibility, previewView, previewKey]);
+  const chains = useRead(useCallback(async () => repository.getVisibleChains(await pinOperational()), [repository, pinOperational]));
   const subtitle = chains.data?.find(c => c.id === filters.chainId)?.name ?? (profile.global_role === "ADMIN" ? "Todas las cadenas" : "Todas las cadenas autorizadas");
   const title = modules.find(([id]) => id === active)?.[1] ?? "Inicio";
   const assistantContext: AssistantContext = {
@@ -126,9 +137,10 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
 
 export function GlobalFilters({ compact = false }: { compact?: boolean }) {
   const { repository, filters, setFilters, profile } = useForecastFilters();
+  const pin = useOperationPin();
   const [showEmpty, setShowEmpty] = useState(false);
   const [opened, setOpened] = useState(false);
-  const chains = useRead(useCallback(() => repository.getVisibleChains(), [repository]));
+  const chains = useRead(useCallback(async () => repository.getVisibleChains(await pin()), [repository, pin]));
   const categories = useRead(useCallback(() => repository.getCategories(filters.chainId), [repository, filters.chainId]));
   const products = useRead(useCallback(() => repository.getProducts(filters.chainId, filters.categoryId, filters.search), [repository, filters.chainId, filters.categoryId, filters.search]));
   const commercial = useRead(useCallback(() => repository.getCommercialCatalog?.() ?? Promise.resolve(null), [repository]));
@@ -138,7 +150,10 @@ export function GlobalFilters({ compact = false }: { compact?: boolean }) {
   }, [products.data, commercial.data]);
   const matching = catalog.filter(p => matchesCommercial(p, filters));
   const selectedProducts = matching.filter(p => !filters.productId || p.id === filters.productId);
-  const periods = useRead(useCallback(() => repository.getReportPeriods ? repository.getReportPeriods(filters.chainId) : repository.getPeriods(filters.chainId), [repository, filters.chainId]));
+  const periods = useRead(useCallback(async () => {
+    const context = await pin();
+    return repository.getReportPeriods ? repository.getReportPeriods(filters.chainId, context) : repository.getPeriods(filters.chainId, context);
+  }, [repository, filters.chainId, pin]));
   const chainMap = new Map(chains.data?.map(c => [c.id, c.name]) ?? []);
   const options = (chains.data ?? []).filter(c => c.has_history || showEmpty).map(c => ({ id: c.id, name: `${c.parentId && chainMap.has(c.parentId) ? chainMap.get(c.parentId) + " → " : ""}${c.name}${c.has_history ? "" : " · Sin histórico"}` }));
   return <section aria-label="Filtros globales" className="mb-6 rounded-lg border border-slate-200 bg-white p-4">
@@ -173,13 +188,14 @@ export function GlobalFilters({ compact = false }: { compact?: boolean }) {
 function Intro({ title, copy }: { title: string; copy: string }) { return <div className="mb-5"><h1 className="text-2xl font-semibold tracking-tight text-slate-950 sm:text-3xl">{title}</h1><p className="mt-2 text-sm leading-6 text-slate-500">{copy}</p></div>; }
 export function Dashboard() {
   const { repository, filters, preview, seriesVisibility, setSeriesVisibility } = useForecastFilters();
+  const pin = useOperationPin();
   const currentSelection = useCurrentForecastSelection(repository.previews, filters.chainId, filters.productId);
-  const summary = useRead(useCallback(() => repository.getHistoricalSummary(filters), [repository, filters]));
+  const summary = useRead(useCallback(async () => repository.getHistoricalSummary(filters, await pin()), [repository, filters, pin]));
   const scope = filters.chainId ? preview?.result?.scopes.find(s => s.chain_id === filters.chainId) ?? null : null;
   const validScope = currentRetrospectivePreview(preview?.result ?? null, scope) ? scope : null;
   const chartScope = validScope ?? (scope?.provisional_cold_start ? scope : null);
   const cutoff = String(chartScope?.issue_period ?? "");
-  const historical = useRead(useCallback(() => filters.chainId ? repository.getForecastHistory?.(filters) ?? Promise.resolve([]) : Promise.resolve([]), [repository, filters]));
+  const historical = useRead(useCallback(async () => filters.chainId ? repository.getForecastHistory?.(filters, await pin()) ?? [] : [], [repository, filters, pin]));
   const customer = useRead(useCallback(() => filters.chainId && cutoff ? repository.getCustomerForecast?.(filters, cutoff) ?? Promise.resolve([]) : Promise.resolve([]), [repository, filters, cutoff]));
   const gates = useRead(useCallback(() => filters.chainId && validScope && repository.previews?.qualityGates
     ? repository.previews.qualityGates(filters.chainId) : Promise.resolve(null),
@@ -203,20 +219,23 @@ export function Dashboard() {
 }
 function StoredScopeChart() {
   const { repository, filters } = useForecastFilters();
+  const pin = useOperationPin();
   const report = useRead(useCallback(async () => {
     if (!repository.getReportSnapshot || !repository.getReportHistory) throw new Error("report_unavailable");
-    const [snapshot, history] = await Promise.all([repository.getReportSnapshot(filters), repository.getReportHistory({ ...filters, periodRange: [null, null] })]);
+    const context = await pin();
+    const [snapshot, history] = await Promise.all([repository.getReportSnapshot(filters, context), repository.getReportHistory({ ...filters, periodRange: [null, null] }, context)]);
     return periodsDashboard(snapshot, history, emptyReportChoice, filters.periodRange);
-  }, [repository, filters]));
+  }, [repository, filters, pin]));
   return <><ReadState loading={report.loading} error={report.error}/>{report.data && <><p className="text-xs text-slate-600">Forecast almacenado: {report.data.available}/{report.data.matrix.rows.length} productos · Con decisión: {report.data.adopted}{report.data.available > 0 && report.data.available < report.data.matrix.rows.length ? " · TOTAL PARCIAL" : ""}</p><PeriodsComparisonChart points={report.data.points} cutoff={report.data.cutoff}/></>}</>;
 }
 function DashboardAllScopesChart({ scopes }: { scopes: import("@/lib/supabase/types").Summary["byScope"] }) {
   const { repository, filters, seriesVisibility, setSeriesVisibility } = useForecastFilters();
+  const pin = useOperationPin();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selected = scopes.find(row => row.chain.id === selectedId) ?? scopes[0];
   const chainId = selected?.chain.id ?? null;
   const chartFilters = useMemo<Filters>(() => ({ ...filters, chainId, productId: null }), [filters, chainId]);
-  const history = useRead(useCallback(() => chainId ? repository.getForecastHistory?.(chartFilters) ?? Promise.resolve([]) : Promise.resolve([]), [repository, chainId, chartFilters]));
+  const history = useRead(useCallback(async () => chainId ? repository.getForecastHistory?.(chartFilters, await pin()) ?? [] : [], [repository, chainId, chartFilters, pin]));
   const preview = useRead(useCallback(() => chainId ? repository.previews?.latest(chainId, null) ?? Promise.resolve(null) : Promise.resolve(null), [repository, chainId]));
   const scope = preview.data?.status === "READY_PREVIEW" ? preview.data.scopes.find(row => row.chain_id === chainId) ?? null : null;
   const validScope = currentRetrospectivePreview(preview.data ?? null, scope) ? scope : null;

@@ -95,12 +95,12 @@ def mount_e4_routes(app, config, identity, data, runner, writer):
             "status": "eq.CONFIRMED", "source_batch_id": "not.is.null"})
         batches = sorted({uuid_value(row["source_batch_id"]) for row in captures if row.get("source_batch_id")})
         periods = sorted({str(row["target_period"])[:10] for row in horizons})
-        actual_sales = client.rows("portal_monthly_observations_current", {
+        actual_sales = client.observation_rows({
             "select": "observation_id,period,value,version_no,available_at,source_batch_id",
             "chain_id": f"eq.{header['chain_id']}", "product_id": f"eq.{header['product_id']}",
             "metric_code": "eq.SALES", "available_at": "not.is.null",
             "source_batch_id": f"in.({','.join(batches)})", "period": f"in.({','.join(periods)})",
-            "order": "period.asc"}) if batches and periods else []
+            "order": "period.asc"}, chain_id=header["chain_id"]) if batches and periods else []
         return {**header,
             "horizons": horizons, "actual_sales": actual_sales,
             "selection_events": client.rows("forecast_selection_events", {
@@ -204,9 +204,10 @@ def mount_e4_routes(app, config, identity, data, runner, writer):
         return {"sessions": source.client.rows("forecast_capture_sessions", {"select": "*",
             "chain_id": f"eq.{chain}", "product_id": f"eq.{product}", "period": f"eq.{period}-01",
             "order": "created_at.desc"}),
-            "observations": source.client.rows("monthly_observations", {"select": "id,metric_code,value,version_no,available_at,source_batch_id",
+            "observations": source.client.observation_rows({"select": "id,metric_code,value,version_no,available_at,source_batch_id",
                 "chain_id": f"eq.{chain}", "product_id": f"eq.{product}", "period": f"eq.{period}-01",
-                "order": "metric_code.asc,version_no.desc"})}
+                "metric_code": "in.(ORDER,SALES,DELIVERY)", "order": "metric_code.asc,version_no.desc,id.asc"},
+                mode="AUDIT", chain_id=chain)}
 
     @router.post("/observations/capture/{session_id}/confirm")
     def confirm(session_id: str, request: Request, authorization: str | None = Header(default=None),

@@ -1,5 +1,5 @@
 import type { CalculationDetail, CalculationHorizon, SelectionEvent, VintageCapabilities } from "./forecast-preview";
-import type { Category, Chain, HistoricalRow, Product } from "./supabase/types";
+import type { Category, Chain, HistoricalRow, OperationalReadContext, Product } from "./supabase/types";
 
 export type ReportSeries = "STATISTICAL" | "ML" | "ENSEMBLE" | "COLD_START" | "TOWELL";
 export const reportSeries: Record<ReportSeries, string> = { STATISTICAL: "Estadístico", ML: "ML", ENSEMBLE: "Ensemble", COLD_START: "Cold Start provisional", TOWELL: "Forecast Towell adoptado" };
@@ -11,7 +11,7 @@ export type ReportDecision = SelectionEvent & { chain_id: string; product_id: st
 export type ReportLive = { id: string; calculation_id: string; chain_id: string; product_id: string; horizon: number; target_period: string; candidate: string; forecast_value: number; actual_sale: number; sale_observation_id: string; sale_version_no: number; absolute_error: number; signed_error: number; evaluated_at: string };
 export type ProvisionalForecast = { job_id: string; chain_id: string; product_id: string; issue_period: string; created_at: string; engine_version: string; model: string; confidence: string; horizons: { horizon: number; target_period: string; value: number }[] };
 export type CustomerForecast = { id: string; chain_id: string; product_id: string; forecast_version_id: string; issue_period: string; version_no: number; target_period: string; value: number };
-export type ReportSnapshot = { products: Product[]; chains: Chain[]; categories: Category[]; calculations: ReportCalculation[]; horizons: ReportHorizon[]; decisions: ReportDecision[]; live: ReportLive[]; provisionals: ProvisionalForecast[]; customers: CustomerForecast[]; capabilities: VintageCapabilities };
+export type ReportSnapshot = { products: Product[]; chains: Chain[]; categories: Category[]; calculations: ReportCalculation[]; horizons: ReportHorizon[]; decisions: ReportDecision[]; live: ReportLive[]; provisionals: ProvisionalForecast[]; customers: CustomerForecast[]; capabilities: VintageCapabilities; operationalVersion?: OperationalReadContext };
 export type ReportChoice = { version: string | null; issue: string | null; decision: "ALL" | "PENDING" | "ADOPTED"; calculationId?: string | null };
 export const emptyReportChoice: ReportChoice = { version: null, issue: null, decision: "ALL" };
 export type ForecastMatrixRow = { product: Product; chain: string; category: string; calculation: ReportCalculation | null; provisional: ProvisionalForecast | null; adopted: ReportDecision | null; values: Record<string, Record<ReportSeries, number | null>> };

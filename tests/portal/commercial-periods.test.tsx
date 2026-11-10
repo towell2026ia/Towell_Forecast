@@ -4,6 +4,8 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { attachCommercial, changeCommercial, commercialOptions, filteredProducts, matchesCommercial, modelKey, notApplicableCommercial, unknownCommercial } from "../../lib/commercial-filters";
 import { periodsDashboard } from "../../lib/periods-dashboard";
+import { operationalContext } from "./operational-context-fixture";
+import { operationalPeriodsSheets } from "../../lib/operational-periods-xlsx";
 import { addReportMonth, buildForecastMatrix, emptyReportChoice, type ReportSnapshot } from "../../lib/forecast-reporting";
 import { emptyFilters, type CommercialClassification, type Filters, type ForecastReadRepository, type HistoricalRow, type Product } from "../../lib/supabase/types";
 import { ForecastFiltersContext, GlobalFilters } from "../../app/forecast-towell-app";
@@ -134,26 +136,53 @@ describe("Multimodel reads remain scoped in history, snapshots and Database", ()
     const repo = { getProducts: async () => products, getCommercialCatalog: async () => classes, getVisibleChains: async () => [chain], getCategories: async () => [] } as unknown as ForecastReadRepository;
     const calls: { table: string; ids: string[] }[] = [];
     let foreign = false;
-    const client = { from: (table: string) => {
+    const from = (table: string) => {
       let ids: string[] = []; const q: Record<string, unknown> = {};
       for (const method of ["select", "order", "range", "eq", "gte", "lte", "abortSignal"]) q[method] = () => q;
-      q.in = (_field: string, selected: string[]) => { ids = selected; return q; };
+      q.in = (field: string, selected: string[]) => { if (field === "product_id") ids = selected; return q; };
       q.then = (accept: (r: unknown) => unknown) => {
         calls.push({ table, ids });
-        const data = table === "portal_monthly_observations_current" || table === "monthly_observations" ? ids.map((id, i) => ({ observation_id: `o${i}`, id: `o${i}`, chain_id: foreign ? "foreign" : "c", product_id: id, period: "2026-01-01", metric_code: "SALES", value: 10, version_no: 1, availability_source: "UNKNOWN" })) : [];
+        const data = table === "operational_read_observations" ? ids.map((id, i) => ({ observation_id: `o${i}`, id: `o${i}`, chain_id: foreign ? "foreign" : "c", product_id: id, period: "2026-01-01", metric_code: "SALES", value: 10, value_text: "10", version_no: 1, availability_source: "UNKNOWN" })) : [];
         return Promise.resolve({ data, error: null }).then(accept);
       }; return q;
-    } } as unknown as SupabaseClient;
+    };
+    const client = { from, rpc: from } as unknown as SupabaseClient;
     const reader = new SupabaseReportReader(client, repo, new AbortController().signal), f = { ...emptyFilters, commercialModels: ["Fendi", "FIORE", "FENDI"] };
-    expect(await filteredProducts(repo, f)).toHaveLength(2); expect(await reader.history(f)).toHaveLength(2); expect((await reader.snapshot(f)).products).toHaveLength(2);
-    expect((await reader.databasePage("history", f, 0, 50)).rows).toHaveLength(2);
-    for (const call of calls.filter(c => ["portal_monthly_observations_current", "customer_forecast_rows"].includes(c.table))) expect(call.ids).toEqual(["p", "p2"]);
-    foreign = true; await expect(reader.history(f)).rejects.toThrow("report_scope_mismatch");
-    expect(await reader.history({ ...f, commercialModels: [] })).toEqual([]);
+    expect(await filteredProducts(repo, f)).toHaveLength(2); expect(await reader.history(f, operationalContext)).toHaveLength(2); expect((await reader.snapshot(f, operationalContext)).products).toHaveLength(2);
+    expect((await reader.databasePage("history", f, 0, 50, operationalContext)).rows).toHaveLength(2);
+    for (const call of calls.filter(c => ["operational_read_observations", "customer_forecast_rows"].includes(c.table))) expect(call.ids).toEqual(["p", "p2"]);
+    foreign = true; await expect(reader.history(f, operationalContext)).rejects.toThrow("report_scope_mismatch");
+    expect(await reader.history({ ...f, commercialModels: [] }, operationalContext)).toEqual([]);
   });
 });
 
 describe("Commercial filters and compact Periodos UI", () => {
+  it("shares one pin across chart, historical series, inventory and downloadable workbook", async () => {
+    const s = { ...snapshot(), operationalVersion: operationalContext };
+    const exact = "10.1234567890123456";
+    const historical = [history("2026-07", Number(exact), { exact: { SALES: exact, FCST_TOWELL_HISTORY: "0.000" } })];
+    const inventory = [{ chain_id: "c", product_id: "p", format: "BD", upc: "001234", period: "2026-07-01", purchase_type: "RS", quantity_text: "0.000" }];
+    const repository = {
+      openOperationalRead: vi.fn(async () => operationalContext),
+      getReportSnapshot: vi.fn(async () => s),
+      getReportHistory: vi.fn(async () => historical),
+      getReportInventory: vi.fn(async () => inventory),
+    };
+    render(<ForecastFiltersContext.Provider value={{ repository: repository as unknown as ForecastReadRepository, filters: emptyFilters, setFilters: vi.fn(), profile: { id: "actor", full_name: "Test", global_role: "VIEWER", status: "ACTIVE" } }}><ForecastPeriodsView/></ForecastFiltersContext.Provider>);
+    expect(await screen.findByRole("button", { name: "Descargar XLSX de Períodos" })).toBeTruthy();
+    expect(repository.openOperationalRead).toHaveBeenCalledOnce();
+    for (const read of [repository.getReportSnapshot, repository.getReportHistory, repository.getReportInventory]) expect(read).toHaveBeenCalledWith(expect.anything(), operationalContext);
+    const dashboard = periodsDashboard(s, historical, emptyReportChoice, [null, null]);
+    const sheets = operationalPeriodsSheets(s, dashboard, historical, inventory);
+    const sheet = (name: string) => sheets.find(row => row.name === name)!;
+    expect(sheet("Trazabilidad").rows).toContainEqual(["Versión operativa", operationalContext.version_id]);
+    expect(sheet("Trazabilidad").rows).toContainEqual(["Cobertura Fill Rate", "Parcial"]);
+    expect(sheet("Comparativa").rows[8]).toContain(dashboard.points[8].values.actual);
+    expect(sheet("Histórico comercial").rows[0][4]).toBe(exact);
+    expect(sheet("Histórico comercial").rows[0].slice(-2)).toEqual(["0.000", null]);
+    expect(sheet("Inventario").rows[0]).toContain("001234");
+    expect(sheet("Inventario").rows[0]).toContain("0.000");
+  });
   it("updates one, multiple, none and all model selections without engine/decision writes", async () => {
     const s = snapshot(); s.products.push({ ...product, id: "missing", commercial: { ...classification, product_id: "missing", model: "FIORE" } });
     const repository = { getProducts: vi.fn(async () => s.products), getCommercialCatalog: vi.fn(async () => s.products.map(p => p.commercial!)), getVisibleChains: vi.fn(async () => s.chains), getCategories: vi.fn(async () => []), getPeriods: vi.fn(async () => []), getReportSnapshot: vi.fn(async (f: Filters) => ({ ...s, products: await filteredProducts(repository as unknown as ForecastReadRepository, f) })), getReportHistory: vi.fn(async () => [history("2026-01")]), previews: { create: vi.fn(), selectCalculation: vi.fn(), research: vi.fn() } };

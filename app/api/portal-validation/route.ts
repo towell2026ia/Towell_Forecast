@@ -41,15 +41,16 @@ export async function GET(request: Request) {
         return null;
       }
     }
+    const context = await repo.openOperationalRead();
     const [chains, categories, products, periods, history] = await Promise.all([
-      probe("getVisibleChains", "chains", "complete", () => repo.getVisibleChains()),
+      probe("getVisibleChains", "chains", "complete", () => repo.getVisibleChains(context)),
       probe("getCategories", "categories", "complete", () => repo.getCategories()),
       probe("getProducts", "products", "complete", () => repo.getProducts()),
-      probe("getPeriods", "portal_history_periods", "period_catalog", () => repo.getPeriods()),
-      probe("getHistoricalObservations", "portal_monthly_observations_current", "page_1", () => repo.getHistoricalObservations(emptyFilters, { size: 50 })),
+      probe("getPeriods", "operational_read_periods", "period_catalog", () => repo.getPeriods(undefined, context)),
+      probe("getHistoricalObservations", "operational_read_observations", "page_1", () => repo.getHistoricalObservations(emptyFilters, { size: 50 }, context)),
     ]);
     if (!chains || !categories || !products || !periods || !history) return Response.json({ error: "read_failed" }, { status: 502, headers: { "Cache-Control": "no-store" } });
-    const summary = await repo.getHistoricalSummary(emptyFilters);
+    const summary = await repo.getHistoricalSummary(emptyFilters, context);
     const profile = access.profile;
     const result = { status: "PASS_AUTHENTICATED_READ", role: profile.global_role, chains: chains.length, scopes_with_history: chains.filter(c => c.has_history).length, products: summary.productCount, categories: categories.length, observations: summary.observationCount };
     // Aggregate technical attestation only. No bearer, email or row-level data.

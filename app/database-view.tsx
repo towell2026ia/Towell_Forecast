@@ -3,7 +3,7 @@
 import { useCallback, useState } from "react";
 import { Database } from "lucide-react";
 import type { DatabaseSection } from "@/lib/forecast-reporting";
-import { useForecastFilters, useRead } from "./forecast-towell-app";
+import { useForecastFilters, useOperationPin, useRead } from "./forecast-towell-app";
 import { ReportPaging, ReportSelect, ReportState, ReportTable, reportNumber } from "./report-controls";
 
 const sections: { value: DatabaseSection; label: string }[] = [
@@ -20,8 +20,14 @@ export function DatabaseView() {
 function DatabasePages({ section }: { section: DatabaseSection }) {
   const { repository, filters } = useForecastFilters();
   const [page, setPage] = useState(0), [size, setSize] = useState<50 | 100 | 250>(50);
-  const read = useRead(useCallback(() => repository.getDatabasePage ? repository.getDatabasePage(section, filters, page, size) : Promise.reject(new Error("database_unavailable")), [repository, section, filters, page, size]));
-  return <><ReportState loading={read.loading} error={read.error} empty={read.data?.rows.length === 0}/>{read.data && read.data.rows.length > 0 && <ReportTable label={sections.find(s => s.value === section)!.label} headers={[...read.data.headers, "Trazabilidad"]} rows={read.data.rows.map(r => ({ id: r.id, cells: [...r.cells.map((cell, i) => <span key={i} className="block max-w-72 break-words">{cell === null ? "Sin dato" : typeof cell === "number" ? reportNumber(cell) : cell}</span>), r.detail ? <details key="detail" className="min-w-28"><summary className="cursor-pointer">Ver detalle</summary><pre className="mt-3 max-h-72 w-72 overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify(r.detail, null, 2)}</pre></details> : "Sin dato"] }))}/>}
+  const openPin = useOperationPin();
+  const pin = useRead(openPin);
+  const read = useRead(useCallback(() => {
+    if (pin.loading || pin.error) return Promise.resolve(null);
+    if (!repository.getDatabasePage) throw new Error("database_unavailable");
+    return pin.data ? repository.getDatabasePage(section, filters, page, size, pin.data) : repository.getDatabasePage(section, filters, page, size);
+  }, [repository, section, filters, page, size, pin.loading, pin.error, pin.data]));
+  return <><ReportState loading={pin.loading || read.loading} error={pin.error || read.error} empty={read.data?.rows.length === 0}/>{read.data && read.data.rows.length > 0 && <ReportTable label={sections.find(s => s.value === section)!.label} headers={[...read.data.headers, "Trazabilidad"]} rows={read.data.rows.map(r => ({ id: r.id, cells: [...r.cells.map((cell, i) => <span key={i} className="block max-w-72 break-words">{cell === null ? "Sin dato" : typeof cell === "number" ? reportNumber(cell) : cell}</span>), r.detail ? <details key="detail" className="min-w-28"><summary className="cursor-pointer">Ver detalle</summary><pre className="mt-3 max-h-72 w-72 overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify(r.detail, null, 2)}</pre></details> : "Sin dato"] }))}/>}
     <ReportPaging page={page + 1} previous={() => setPage(p => p - 1)} next={() => setPage(p => p + 1)} hasMore={Boolean(read.data?.hasMore)} loading={read.loading} size={size} setSize={v => { setSize(v); setPage(0); }}/>
   </>;
 }

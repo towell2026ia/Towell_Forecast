@@ -1,13 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { operationalContext } from "./operational-context-fixture";
 
 const state = vi.hoisted(() => ({
   getUser: vi.fn(), lookup: vi.fn(), createClient: vi.fn(),
-  chains: vi.fn(), categories: vi.fn(), products: vi.fn(), periods: vi.fn(), history: vi.fn(), summary: vi.fn(), dispose: vi.fn(),
+  chains: vi.fn(), categories: vi.fn(), products: vi.fn(), periods: vi.fn(), history: vi.fn(), summary: vi.fn(), pin: vi.fn(), dispose: vi.fn(),
 }));
 vi.mock("@supabase/supabase-js", () => ({ createClient: state.createClient }));
 vi.mock("../../lib/forecast-data", async importOriginal => {
   const original = await importOriginal<typeof import("../../lib/forecast-data")>();
   return { ...original, SupabaseForecastReadRepository: class {
+    openOperationalRead = state.pin;
     getVisibleChains = state.chains;
     getCategories = state.categories;
     getProducts = state.products;
@@ -32,6 +34,7 @@ beforeEach(() => {
   const query = { select: vi.fn().mockReturnThis(), eq: vi.fn().mockReturnThis(), maybeSingle: state.lookup };
   state.createClient.mockReturnValue({ auth: { getUser: state.getUser }, from: vi.fn().mockReturnValue(query) });
   state.chains.mockResolvedValue([{ has_history: true }]);
+  state.pin.mockResolvedValue(operationalContext);
   state.categories.mockResolvedValue([{}]);
   state.products.mockResolvedValue([{}, {}]);
   state.periods.mockResolvedValue(["2026-07"]);
@@ -83,7 +86,7 @@ describe("Read-only authenticated diagnostic", () => {
     state.periods.mockRejectedValue(new Error(`private upstream ${jwt}`));
     expect((await GET(request())).status).toBe(502);
     for (const read of [state.chains, state.categories, state.products, state.periods, state.history]) expect(read).toHaveBeenCalledOnce();
-    expect(state.history).toHaveBeenCalledWith(expect.any(Object), { size: 50 });
+    expect(state.history).toHaveBeenCalledWith(expect.any(Object), { size: 50 }, operationalContext);
     const logs = vi.mocked(console.info).mock.calls.flat().join("\n");
     expect(logs).toContain('"endpoint":"getPeriods"'); expect(logs).not.toContain(jwt);
     expect(state.summary).not.toHaveBeenCalled();

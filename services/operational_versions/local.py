@@ -91,7 +91,7 @@ class LocalLab:
             c.close()
             raise
 
-    def initialize(self):
+    def initialize(self, *, include_gateb=True):
         """New disposable database only; base migrations remain byte-for-byte intact."""
         with self.connect() as c:
             if c.execute("select to_regclass('public.monthly_observations') as name").fetchone()['name']:
@@ -103,8 +103,9 @@ class LocalLab:
                              '202609250005_auth_rls.sql', '202609280001_portal_published_history.sql',
                              '202609280002_portal_history_periods.sql'):
                     c.execute((REPO / 'supabase/migrations' / name).read_text())
-                for path in sorted((REPO / 'lab/prd3a8/supabase/migrations').glob('*.sql')):
-                    c.execute(path.read_text())
+                if include_gateb:
+                    for path in sorted((REPO / 'lab/prd3a8/supabase/migrations').glob('*.sql')):
+                        c.execute(path.read_text())
 
     def put(self, c, *, chain, product, period, metric, value, batch):
         self.checked(c)

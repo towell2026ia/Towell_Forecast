@@ -164,16 +164,14 @@ class SupabaseDataProvider(DataProvider):
             params["product_id"] = f"eq.{uuid_value(product_id)}"
         if issue_period:
             params["period"] = f"lte.{issue_period}-01"
-        if mode == "POINT_IN_TIME":
-            params["available_at"] = "not.is.null"
-            if issue_period:
-                params["and"] = f"(available_at.lte.{month_end(issue_period)}T23:59:59Z)"
-        table = "portal_monthly_observations_current" if mode == "RETROSPECTIVE_TRAINING" else "monthly_observations_current"
+        temporal = mode == "POINT_IN_TIME"
+        available_through = f"{month_end(issue_period)}T23:59:59Z" if temporal and issue_period else None
         categories = {row["id"]: row["name"] for row in self.client.rows("categories",
             {"select": "id,name", "chain_id": f"eq.{chain_id}", "order": "id.asc"})}
         products = {row["id"]: row for row in self.product_catalog(chain_id)}
         records, seen = [], set()
-        for row in self.client.rows(table, params):
+        for row in self.client.observation_rows(params, mode="TEMPORAL" if temporal else "OPERATIONAL",
+                                                available_through=available_through, chain_id=chain_id):
             if row.get("chain_id") != chain_id or row.get("metric_code") != "SALES" or row.get("product_id") not in products \
                     or product_id and row.get("product_id") != product_id:
                 raise PreviewError("DATA_READ_FAILED", 503)
