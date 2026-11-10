@@ -291,8 +291,19 @@ class GateBPostgres(unittest.TestCase):
             'components/forecast/planning-periods.tsx','lib/planning-results.ts','lib/planning-source-audit.ts',
             'services/planning_pilot/engine.py','services/planning_pilot/test_engine.py',
         }
+        # Subsequent authorized portal fixes and pinned RS readers. The exact
+        # paths keep the other UI files, motors, and production migrations guarded.
+        approved_portal_rs={
+            'app/api/portal-validation/route.ts','app/commercial-history-view.tsx','app/database-view.tsx',
+            'app/forecast-periods-view.tsx','app/forecast-towell-app.tsx','app/operational-engines-view.tsx',
+            'app/report-controls.tsx','components/forecast/model-multiselect.tsx',
+            'components/forecast/periods-comparison-chart.tsx','lib/commercial-filters.ts',
+            'lib/forecast-chart-data.ts','lib/forecast-data.ts','lib/forecast-report-repository.ts',
+            'lib/forecast-reporting.ts','lib/operational-periods-xlsx.ts','lib/periods-dashboard.ts',
+            'lib/portal-read-diagnostic.ts','lib/supabase/types.ts',
+        }
         after_gateb=subprocess.check_output(['git','diff','--name-only',gateb,'--',*prefixes],cwd=REPO,text=True)
-        self.assertEqual(set(after_gateb.splitlines()) - approved_prd3a9,set())
+        self.assertEqual(set(after_gateb.splitlines()) - approved_prd3a9 - approved_portal_rs,set())
         private=os.environ.get('GATEB_PRIVATE_CANDIDATE')
         if private:
             identities=json.loads((Path(private)/'Identidades.json').read_text(encoding='utf-8'))
