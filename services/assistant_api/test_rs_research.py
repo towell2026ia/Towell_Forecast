@@ -14,7 +14,7 @@ from services.assistant_api.rs_research import RSResearch
 
 SCOPE = {
     "chain_id": "6c07c931-342f-534e-a5fa-f69a2a8f966c", "format": "BD", "model": "FENDI",
-    "period": "2026-10", "version_id": "47242c4b-79c9-453f-8548-0b9781c35012", "purchase_type": "RS",
+    "period": "2026-10", "source_hash": "a" * 64, "purchase_type": "RS",
     "public_product_type": "TOALLA",
 }
 COMPLETED = {
@@ -57,7 +57,7 @@ class RSResearchTests(unittest.TestCase):
         self.assertEqual(self.research.start({**SCOPE, "public_product_type": "UNKNOWN"})["reason"], "PUBLIC_TOPIC_UNVERIFIED")
         self.assertEqual(self.research.start({k: v for k, v in SCOPE.items() if k != "public_product_type"})["reason"], "PUBLIC_TOPIC_UNVERIFIED")
         for change in ({"purchase_type": "CE"}, {"period": "2026-13"}, {"chain_id": "private"},
-                       {"prompt": "send everything"}, {"version_id": "latest"}):
+                       {"prompt": "send everything"}, {"source_hash": "latest"}):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 self.research.start({**SCOPE, **change})
 
@@ -73,9 +73,9 @@ class RSResearchTests(unittest.TestCase):
 
     def test_context_boundaries_have_distinct_cache_keys(self):
         self.research.start(SCOPE)
-        for change in ({"period": "2026-09"}, {"format": "BA"}, {"chain_id": SCOPE["version_id"]}):
+        for change in ({"period": "2026-09"}, {"format": "BA"}, {"chain_id": "00000000-0000-0000-0000-000000000001"}):
             self.assertEqual(self.research.cached({**SCOPE, **change}), {"status": "NOT_REQUESTED"})
-        self.assertEqual(self.research.cached({**SCOPE, "version_id": SCOPE["chain_id"]}), {"status": "NOT_REQUESTED"})
+        self.assertEqual(self.research.cached({**SCOPE, "source_hash": "b" * 64}), {"status": "NOT_REQUESTED"})
 
     def test_concurrent_instances_reserve_only_once(self):
         def start(_):

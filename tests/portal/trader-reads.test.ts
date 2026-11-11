@@ -7,11 +7,15 @@ import { operationalContext } from "./operational-context-fixture";
 const product = { id: "p", chain_id: "c", category_id: "cat", product_code: "code", variant_code: null, description: "Real", identifiers: [] };
 function fake(data: Record<string, unknown>, errorTable = "") {
   const calls: { table: string; method: string; args: unknown[] }[] = [];
-  const client = { from(table: string) { const q: Record<string, unknown> = {}; for (const method of ["select", "eq", "in", "gte", "lte", "order", "range", "limit", "abortSignal"]) q[method] = (...args: unknown[]) => { calls.push({ table, method, args }); return q; }; q.then = (resolve: (result: unknown) => unknown) => Promise.resolve({ data: data[table] ?? [], error: table === errorTable ? { code: "denied" } : null }).then(resolve); return q; } } as unknown as SupabaseClient;
-  return { repository: new SupabaseForecastReadRepository(client, "user"), calls };
+  const sdk = { from(table: string) { const q: Record<string, unknown> = {}; for (const method of ["select", "eq", "in", "gte", "lte", "order", "range", "limit", "abortSignal"]) q[method] = (...args: unknown[]) => { calls.push({ table, method, args }); return q; }; q.then = (resolve: (result: unknown) => unknown) => Promise.resolve({ data: table === "operational_read_context" ? [operationalContext] : data[table] ?? [], error: table === errorTable ? { code: "denied" } : null }).then(resolve); return q; }, rpc(table: string, ...args: unknown[]) { calls.push({ table, method: "rpc", args }); return this.from(table); } };
+  const client = sdk as unknown as SupabaseClient;
+  const repository = new SupabaseForecastReadRepository(client, "user");
+  vi.spyOn(repository.previews, "commercialCatalog").mockResolvedValue(((data.products ?? []) as typeof product[]).map(p => ({
+    chain_id: p.chain_id, product_id: p.id, model: "MODEL", color: null, size: null, product_type: null, source: "OFFICIAL_WORKBOOK", status: "PENDING_CLASSIFICATION", reasons: [],
+  })));
+  return { repository, calls };
 }
-const version = { id: "v", chain_id: "c", status: "VALIDATED", issue_period: "2026-07-01" };
-const customer = { chain_id: "c", product_id: "p", forecast_version_id: "v", target_period: "2026-08-01", value: 0 };
+const customer = { observation_id: "o", chain_id: "c", product_id: "p", period: "2026-08-01", metric_code: "FCST_CLIENTE_HISTORY", value: 0, value_text: "0.000", availability_source: "UNKNOWN" };
 describe("Trader scoped GET-only reads", () => {
   it("historical pages aggregate only one scope, zero is real, missing remains null", async () => {
     const { repository } = fake({});
@@ -21,9 +25,25 @@ describe("Trader scoped GET-only reads", () => {
   });
   it("all-chain history never fetches or combines facts", async () => { const { repository } = fake({}); const read = vi.spyOn(repository, "getHistoricalObservations"); expect(await repository.getForecastHistory(emptyFilters)).toEqual([]); expect(read).not.toHaveBeenCalled(); });
   it("foreign historical scope fails closed", async () => { const { repository } = fake({}); vi.spyOn(repository, "getHistoricalObservations").mockResolvedValue({ rows: [{ chain_id: "foreign", product_id: "p", period: "2026-07-01", product, chain: "foreign", SALES: 1, ORDER: null, DELIVERY: null, availability: "UNKNOWN" }], next: null, observationCount: 1 }); await expect(repository.getForecastHistory({ ...emptyFilters, chainId: "c" }, operationalContext)).rejects.toThrow("chart_identity_mismatch"); });
-  it("customer forecast absent has no rows query and no fabricated zeros", async () => { const { repository, calls } = fake({}); expect(await repository.getCustomerForecast({ ...emptyFilters, chainId: "c" }, "2026-07")).toEqual([]); expect(calls.some(c => c.table === "customer_forecast_rows")).toBe(false); });
-  it("customer reads visible validated/frozen version at cutoff and retains literal zero", async () => { const { repository, calls } = fake({ customer_forecast_versions: [version], customer_forecast_rows: [customer], products: [product] }); expect(await repository.getCustomerForecast({ ...emptyFilters, chainId: "c", productId: "p" }, "2026-07")).toEqual([{ period: "2026-08", value: 0 }]); expect(calls).toContainEqual({ table: "customer_forecast_versions", method: "in", args: ["status", ["VALIDATED", "FROZEN"]] }); expect(calls).toContainEqual({ table: "customer_forecast_versions", method: "lte", args: ["issue_period", "2026-07-01"] }); expect(calls).toContainEqual({ table: "customer_forecast_rows", method: "eq", args: ["chain_id", "c"] }); expect(calls).toContainEqual({ table: "customer_forecast_rows", method: "eq", args: ["forecast_version_id", "v"] }); expect(calls.every(c => !["insert", "update", "upsert", "rpc"].includes(c.method))).toBe(true); });
-  it.each([{ ...version, status: "DRAFT" }, { ...version, chain_id: "foreign" }, { ...version, issue_period: "2026-08-01" }])("invalid customer version never displayed", async invalid => { const { repository } = fake({ customer_forecast_versions: [invalid] }); await expect(repository.getCustomerForecast({ ...emptyFilters, chainId: "c" }, "2026-07")).rejects.toThrow("customer_version_invalid"); });
-  it("foreign chain row and duplicate forecast rows rejected", async () => { for (const rows of [[{ ...customer, chain_id: "foreign" }], [customer, customer]]) { const { repository } = fake({ customer_forecast_versions: [version], customer_forecast_rows: rows, products: [product] }); await expect(repository.getCustomerForecast({ ...emptyFilters, chainId: "c" }, "2026-07")).rejects.toThrow(); } });
-  it("RLS denied is a read error, not empty/demo customer forecast", async () => { const { repository } = fake({}, "customer_forecast_versions"); await expect(repository.getCustomerForecast({ ...emptyFilters, chainId: "c" }, "2026-07")).rejects.toThrow("read_failed"); });
+  it("missing client history remains empty and never queries the previous forecast contract", async () => {
+    const { repository, calls } = fake({ products: [product] });
+    expect(await repository.getCustomerForecast({ ...emptyFilters, chainId: "c" }, "2026-07")).toEqual([]);
+    expect(calls.some(c => c.table.startsWith("customer_forecast_"))).toBe(false);
+  });
+  it("reads client history from the current official source and preserves zero", async () => {
+    const { repository, calls } = fake({ operational_read_observations: [customer], products: [product] });
+    expect(await repository.getCustomerForecast({ ...emptyFilters, chainId: "c", productId: "p" }, "2026-07")).toEqual([{ period: "2026-08", value: 0 }]);
+    expect(calls).toContainEqual({ table: "operational_read_observations", method: "rpc", args: [expect.objectContaining({ p_source_hash: operationalContext.source_hash, p_generation: 2 })] });
+    expect(calls.some(c => c.table.startsWith("customer_forecast_"))).toBe(false);
+  });
+  it("rejects foreign scopes and duplicate official history rows", async () => {
+    for (const rows of [[{ ...customer, chain_id: "foreign" }], [customer, customer]]) {
+      const { repository } = fake({ operational_read_observations: rows, products: [product] });
+      await expect(repository.getCustomerForecast({ ...emptyFilters, chainId: "c" }, "2026-07")).rejects.toThrow();
+    }
+  });
+  it("fails an official source permission error without historical fallback", async () => {
+    const { repository } = fake({ products: [product] }, "operational_read_observations");
+    await expect(repository.getCustomerForecast({ ...emptyFilters, chainId: "c" }, "2026-07")).rejects.toThrow("report_read_failed");
+  });
 });

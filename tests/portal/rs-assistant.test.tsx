@@ -16,7 +16,7 @@ const context: AssistantContext = { user: "editor", role: "editor", globalRole: 
 function result(): RsAssistantResponse {
   return {
     message: "Datos del alcance consultado.",
-    scope: { chain_id: chain, chain: "Cadena de prueba", format: request.format, model: request.model, period: request.period, version_id: "00000000-0000-0000-0000-000000000010", generation: 3 },
+    scope: { chain_id: chain, chain: "Cadena de prueba", format: request.format, model: request.model, period: request.period, source_hash: "a".repeat(64), generation: 3 },
     quality: { products_classified: 2, temporal_certification: false },
     metrics: { by_month: [{ period: request.period, SALES: { pieces: "12.1234567890123456", products_with_data: 1, products_expected: 2 }, ORDER: { pieces: "20", products_with_data: 2, products_expected: 2 }, DELIVERY: { pieces: null, products_with_data: 0, products_expected: 2 }, fill_rate: { ratio: null, paired_products: 0, products_expected: 2 } }], inventory: { pieces: "0", products_with_data: 1, products_expected: 2 } },
     forecast: { status: "PROVISIONAL", engine: "test-engine", periods: [{ period: "2026-11", statistical: { pieces: "15.01", covered: 1, eligible: 2 }, ml: { pieces: null, covered: 0, eligible: 2 }, ensemble_value: { pieces: "14.12", covered: 1, eligible: 2 } }], retrospective: { statistical: { wape: 10, bias: -2 }, ml: { wape: null, bias: null } } },
@@ -101,8 +101,8 @@ describe("Scoped RS assistant transport", () => {
   });
   it("accepts only the requested normalized model, format and authorized archive", () => {
     const original = result();
-    expect(parseRsAssistantResponse({ ...original, scope: { ...original.scope, model: "módelo   de prueba", format: "FÓR-MA_TO", archive_id: "UNIF-20060057ee8e4dfdbcd9" } }, request).scope?.model).toBe("módelo   de prueba");
-    for (const scope of [{ ...original.scope, model: "Otro modelo" }, { ...original.scope, format: "Otro formato" }, { ...original.scope, archive_id: "otra-version" }]) {
+    expect(parseRsAssistantResponse({ ...original, scope: { ...original.scope, model: "módelo   de prueba", format: "FÓR-MA_TO" } }, request).scope?.model).toBe("módelo   de prueba");
+    for (const scope of [{ ...original.scope, model: "Otro modelo" }, { ...original.scope, format: "Otro formato" }, { ...original.scope, source_hash: "otra-fuente" }]) {
       expect(() => parseRsAssistantResponse({ ...original, scope }, request)).toThrow("RS_ASSISTANT_INVALID_RESPONSE");
     }
   });
@@ -159,14 +159,14 @@ describe("Existing assistant panel with explicit RS actions", () => {
     expect(client.mock.calls[1][0].action).toBe("research_status");
   });
   it("shows a concrete inactive-data blocker, and leaves old-scope answers outside the new conversation", async () => {
-    const client = vi.fn(async () => { throw new PreviewReadError("RS_CANDIDATE_NOT_ACTIVE"); });
+    const client = vi.fn(async () => { throw new PreviewReadError("OFFICIAL_SOURCE_UNAVAILABLE"); });
     const { rerender } = render(panel(client)); await open();
     await userEvent.type(screen.getByLabelText("Formato comercial"), request.format);
     await userEvent.type(screen.getByLabelText("Mensaje para el asistente"), "Consultar inventario");
     await userEvent.click(screen.getByRole("button", { name: "Enviar mensaje" }));
-    await screen.findByText(/La versión RS requerida todavía no está activa/);
+    await screen.findByText(/La fuente comercial oficial aún no está disponible/);
     rerender(panel(client, { ...context, chainId: "00000000-0000-0000-0000-000000000002" }));
-    expect(within(screen.getByLabelText("Conversación del asistente")).queryByText(/La versión RS requerida/)).toBeNull();
+    expect(within(screen.getByLabelText("Conversación del asistente")).queryByText(/La fuente comercial oficial/)).toBeNull();
     expect((screen.getByLabelText("Formato comercial") as HTMLInputElement).value).toBe("");
     expect(client).toHaveBeenCalledOnce();
   });

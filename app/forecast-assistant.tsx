@@ -38,8 +38,9 @@ const maxResearchPolls = 20;
 
 function sameResearchScope(previous: RsAssistantResponse["scope"], current: RsAssistantResponse["scope"]) {
   return previous && current && previous.chain_id === current.chain_id && previous.period === current.period
-    && previous.model === current.model && previous.format === current.format && previous.archive_id === current.archive_id
-    && previous.version_id === current.version_id && previous.generation === current.generation;
+    && previous.model === current.model && previous.format === current.format
+    && previous.presentation === current.presentation
+    && previous.source_hash === current.source_hash && previous.generation === current.generation;
 }
 
 function replaceResearch(messages: ConversationMessage[], id: string, research: RsAssistantResponse["research"]) {
@@ -70,7 +71,7 @@ const rsErrors: Record<string, string> = {
   SCOPE_FORBIDDEN: "Tu cuenta no tiene acceso a ese alcance o a la acción solicitada.",
   AUTH_REQUIRED: "La sesión debe renovarse antes de consultar el asistente.",
   RS_ASSISTANT_DISABLED: "El asistente RS está desactivado en el servidor.",
-  RS_CANDIDATE_NOT_ACTIVE: "La versión RS requerida todavía no está activa. No hay resultados operativos para esta consulta.",
+  OFFICIAL_SOURCE_UNAVAILABLE: "La fuente comercial oficial aún no está disponible.",
   RS_FORMAT_NOT_VERIFIED: "El formato no está acreditado para la cadena seleccionada.",
   RS_MODEL_NOT_VERIFIED: "El modelo no está acreditado para ese alcance RS.",
   RS_MODEL_PRESENTATION_AMBIGUOUS: "El modelo contiene presentaciones diferentes. Se necesita aclarar el alcance antes de calcular.",
@@ -89,7 +90,7 @@ function AssistantFacts({ response }: { response: RsAssistantResponse }) {
   return <details className="mt-2 border-t border-slate-200 pt-2 text-xs" open>
     <summary className="cursor-pointer font-medium">Datos y cobertura del alcance</summary>
     {response.scope && <p className="mt-1 break-words">{response.scope.chain} · {response.scope.format} · {response.scope.model} · {response.scope.presentation} · RS · {response.scope.period}</p>}
-    {response.scope?.version_id && <p className="break-all text-[10px] text-slate-500">Versión {response.scope.version_id} · Generación {response.scope.generation ?? "Sin dato"}</p>}
+    {response.scope?.source_hash && <p className="break-all text-[10px] text-slate-500">Fuente {response.scope.source_hash.slice(0, 12)} · Actualización {response.scope.generation}</p>}
     <dl className="mt-2 space-y-1">{(Object.keys(rsMetrics) as (keyof typeof rsMetrics)[]).map(key => <div key={key}><dt className="inline font-medium">{rsMetrics[key]} </dt><dd className="inline">{selected?.[key]?.pieces ?? "Sin dato"} piezas · {coverageLabel(selected?.[key])}</dd></div>)}
       <div><dt className="inline font-medium">Inventario agregado </dt><dd className="inline">{stock?.pieces ?? "Sin dato"} piezas · {coverageLabel(stock)}</dd></div>
       <div><dt className="inline font-medium">Fill Rate </dt><dd className="inline">{selected?.fill_rate?.ratio !== null && selected?.fill_rate?.ratio !== undefined ? metricValue(Number(selected.fill_rate.ratio) * 100) : "Sin dato"} · {selected?.fill_rate ? `${selected.fill_rate.paired_products}/${selected.fill_rate.products_expected} pares${selected.fill_rate.paired_products < selected.fill_rate.products_expected ? " · Parcial" : ""}` : "Cobertura sin dato"}</dd></div>
@@ -159,11 +160,12 @@ function ForecastAssistantContent({ apiEnabled, voiceEnabled, mode, context, rsA
   const models = context.commercialModels ?? [];
   const filterPeriod = context.periodRange?.[0] && context.periodRange[0] === context.periodRange[1] ? context.periodRange[0] : "";
   const filterKey = JSON.stringify([context.user, context.chainId, models, context.periodRange]);
-  const [selection, setSelection] = useState<{ key: string; format: string; model: string; period: string }>({ key: "", format: "", model: "", period: "" });
-  const activeSelection = selection.key === filterKey ? selection : { key: filterKey, format: "", model: "", period: "" };
+  const [selection, setSelection] = useState({ key: "", format: "", model: "", period: "", presentation: "" });
+  const activeSelection = selection.key === filterKey ? selection : { key: filterKey, format: "", model: "", period: "", presentation: "" };
   const scope = {
     chain_id: context.chainId ?? "", purchase_type: "RS" as const, format: activeSelection.format.trim(),
     model: (models.length === 1 ? models[0] : activeSelection.model).trim(), period: filterPeriod || activeSelection.period,
+    ...(activeSelection.presentation.trim() ? { presentation: activeSelection.presentation.trim() } : {}),
   };
   const scopeKey = JSON.stringify([context.user, context.globalRole ?? context.role, scope]);
   const draftKey = rsAssistant ? scopeKey : "";
@@ -174,7 +176,7 @@ function ForecastAssistantContent({ apiEnabled, voiceEnabled, mode, context, rsA
   const canExecute = context.globalRole
     ? context.globalRole === "ADMIN" || context.globalRole === "EDITOR"
     : context.role === "manager" || context.role === "editor";
-  const operationalNotice = "Consultas RS para una cadena, formato, modelo y mes. El pronóstico se calcula bajo demanda y queda provisional.";
+  const operationalNotice = "Consultas RS por cadena, formato, modelo y mes. Especifica la presentación cuando el modelo tenga varios tamaños. El pronóstico calculado es provisional.";
   const [messages, setMessages] = useState<ConversationMessage[]>([
     { id: "welcome", role: "assistant", text: apiEnabled
       ? "Puedes preguntarme por Forecast, WAPE, Bias, Fill Rate, Champion, Challenger y desempeño de productos."
@@ -325,6 +327,7 @@ function ForecastAssistantContent({ apiEnabled, voiceEnabled, mode, context, rsA
               <label className="block">Formato comercial<Input value={activeSelection.format} maxLength={60} onChange={event => setSelection({ ...activeSelection, format: event.target.value })}/></label>
               {models.length > 1 ? <label className="block">Modelo<select className="block w-full rounded border px-2 py-1" value={activeSelection.model} onChange={event => setSelection({ ...activeSelection, model: event.target.value })}><option value="">Seleccionar un modelo</option>{models.map(model => <option key={model}>{model}</option>)}</select></label> : <label className="block">Modelo<Input value={models.length === 1 ? models[0] : activeSelection.model} readOnly={models.length === 1} maxLength={80} onChange={event => setSelection({ ...activeSelection, model: event.target.value })}/></label>}
               <label className="block">Mes<Input type="month" value={scope.period} readOnly={Boolean(filterPeriod)} onChange={event => setSelection({ ...activeSelection, period: event.target.value })}/></label>
+              <label className="block">Presentación (cuando aplique)<Input value={activeSelection.presentation} maxLength={80} onChange={event => setSelection({ ...activeSelection, presentation: event.target.value })}/></label>
             </fieldset>}
             {messages.filter(message => rsAssistant ? message.scope === scopeKey : apiEnabled || message.id !== "welcome").map((message) => <div key={message.id} className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}>
               <div className={`max-w-[88%] rounded-2xl px-4 py-3 text-sm leading-6 ${message.role === "user" ? "rounded-br-md bg-blue-700 text-white" : "rounded-bl-md border border-slate-200 bg-white text-slate-700 shadow-sm"}`}>

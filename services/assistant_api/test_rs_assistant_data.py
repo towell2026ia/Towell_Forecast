@@ -2,7 +2,7 @@
 import unittest
 
 from services.assistant_api.auth import Principal, READ
-from services.assistant_api.rs_assistant_data import ARCHIVE_VERSION_ID, load_rs_scope
+from services.assistant_api.rs_assistant_data import load_rs_scope
 from services.assistant_api.supabase_access import PreviewError
 
 
@@ -17,7 +17,7 @@ CAT = "00000000-0000-0000-0000-000000000031"
 class Client:
     def __init__(self):
         self.calls = []
-        self.version = ARCHIVE_VERSION_ID
+        self.context = {"source_hash": "a" * 64, "generation": 2, "first_period": "2025-01", "last_period": "2026-10"}
         self.format = "BD"
         self.second_description = "TOALLA MB FENDI OXFORD"
         self.observations = [
@@ -41,7 +41,13 @@ class Client:
 
     def operational_context(self):
         self.calls.append(("pin", {}))
-        return {"version_id": self.version, "manifest_hash": "a" * 64, "generation": 2}
+        return self.context
+
+    def catalog_rows(self, *, chain_id=None, as_of=None):
+        self.calls.append(("catalog", {"chain_id": chain_id}))
+        return [{"chain_id": CHAIN, "product_id": product, "format": self.format, "purchase_type": "RS",
+                 "model": "FENDI", "presentation": "FACIAL" if product == OXFORD and "FACIAL" in self.second_description else "MEDIO BAÑO",
+                 "color": color, "product_type": "TOALLA"} for product, color in ((BLUE, "AZUL"), (OXFORD, "OXFORD"))]
 
     def rows(self, table, params):
         self.calls.append((table, params))
@@ -79,7 +85,7 @@ class RsAssistantDataTests(unittest.TestCase):
 
     def test_exact_separate_sources_coverage_and_retrospective_records(self):
         result = self.load()
-        self.assertEqual(result["scope"]["version_id"], ARCHIVE_VERSION_ID)
+        self.assertEqual(result["scope"]["source_hash"], "a" * 64)
         self.assertEqual(result["scope"]["format"], "BD")
         self.assertEqual(result["scope"]["presentation"], "MEDIO BAÑO")
         self.assertEqual(result["scope"]["public_product_type"], "TOALLA")
@@ -102,12 +108,7 @@ class RsAssistantDataTests(unittest.TestCase):
         self.assertEqual(queries["observations"]["p_product_ids"], "{" + BLUE + "," + OXFORD + "}")
         self.assertEqual(queries["inventory"]["purchase_type"], "eq.RS")
 
-    def test_active_A_no_catalog_or_data_calls_and_denied_chain_no_pin(self):
-        self.client.version = FOREIGN
-        with self.assertRaisesRegex(PreviewError, "RS_CANDIDATE_NOT_ACTIVE"):
-            self.load()
-        self.assertEqual(self.client.calls, [("pin", {})])
-        self.client.calls.clear()
+    def test_denied_chain_has_no_data_calls(self):
         with self.assertRaisesRegex(PreviewError, "SCOPE_FORBIDDEN"):
             self.load(chain_id=FOREIGN)
         self.assertEqual(self.client.calls, [])
@@ -116,7 +117,7 @@ class RsAssistantDataTests(unittest.TestCase):
         for filters in (dict(purchase_type="CE"), dict(period="2026-11"), dict(model="")):
             with self.assertRaisesRegex(PreviewError, "RS_SCOPE_INVALID"):
                 self.load(**filters)
-        self.assertEqual(self.client.calls, [])
+        self.assertNotIn("observations", dict(self.client.calls))
         with self.assertRaisesRegex(PreviewError, "RS_FORMAT_NOT_VERIFIED"):
             self.load(format="SC")
         self.assertNotIn("observations", dict(self.client.calls))
@@ -128,6 +129,8 @@ class RsAssistantDataTests(unittest.TestCase):
         with self.assertRaisesRegex(PreviewError, "RS_MODEL_PRESENTATION_AMBIGUOUS"):
             self.load()
         self.assertNotIn("observations", dict(self.client.calls))
+        self.client.observations = [row for row in self.client.observations if row["product_id"] == BLUE]
+        self.assertEqual(self.load(presentation="MEDIO BAÑO")["eligible_variants"], 1)
 
     def test_bad_provenance_duplicate_and_cross_scope_fail_closed(self):
         original = self.client.observations[0]
@@ -136,11 +139,10 @@ class RsAssistantDataTests(unittest.TestCase):
             with self.assertRaisesRegex(PreviewError, "DATA_READ_FAILED"):
                 self.load()
             self.client.observations.pop()
-        self.client.observations[0] = {**original, "available_at": "2026-01-01"}
-        with self.assertRaisesRegex(PreviewError, "DATA_READ_FAILED"):
-            self.load()
+        self.client.observations[0] = {**original, "available_at": "2026-11-01T00:00:00Z"}
+        self.assertEqual(self.load()["records"][0]["available_at"], "2026-11-01T00:00:00Z")
 
-    def test_only_archived_RS_lineage_can_train(self):
+    def test_only_official_RS_lineage_can_train(self):
         self.client.observations = [self.client.observation(BLUE, "SALES", "100", source=None)]
         self.client.inventory = []
         result = self.load()

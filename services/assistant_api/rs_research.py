@@ -15,7 +15,7 @@ from .persistence import content_hash
 POLICY = "RS-PUBLIC-CONTEXT-1"
 METHOD = "PUBLIC_WEB_SEARCH"
 MODEL = "gpt-5.5"
-SCOPE_FIELDS = frozenset({"chain_id", "format", "model", "period", "version_id"})
+SCOPE_FIELDS = frozenset({"chain_id", "format", "model", "period", "source_hash"})
 PUBLIC_PRODUCT_TYPES = {
     "TOALLA": "TEXTILES_TOALLAS_MX", "TAPETE": "TEXTILES_TAPETES_MX",
     "TRAPO": "TEXTILES_TRAPOS_MX", "BATA": "TEXTILES_BATAS_MX",
@@ -33,13 +33,16 @@ def _scope_key(scope):
     if not (0 < len(fmt) <= 120 and 0 < len(model) <= 120 and PUBLIC_CUTOFF.fullmatch(period)):
         raise ValueError("invalid_research_scope")
     try:
-        chain, version = str(UUID(scope["chain_id"])), str(UUID(scope["version_id"]))
+        chain = str(UUID(scope["chain_id"]))
+        source_hash = scope["source_hash"]
+        if len(source_hash) != 64 or any(char not in "0123456789abcdef" for char in source_hash):
+            raise ValueError()
     except ValueError:
         raise ValueError("invalid_research_scope") from None
     declared = scope.get("public_product_type")
     topic = PUBLIC_PRODUCT_TYPES.get(canonical(declared)) if isinstance(declared, str) else None
     key = content_hash({"policy": POLICY, "method": METHOD, "provider_model": MODEL, "purchase_type": "RS",
-                        "chain_id": chain, "format": fmt, "model": model, "period": period, "version_id": version,
+                        "chain_id": chain, "format": fmt, "model": model, "period": period, "source_hash": source_hash,
                         "public_topic": topic})
     return key, topic, period
 

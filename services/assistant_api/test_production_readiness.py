@@ -66,7 +66,9 @@ class ProductionReadinessTests(unittest.TestCase):
         production = replace(Settings(), app_env="production", frontend_url="https://forecast.example",
                              api_host="0.0.0.0", assistant_token="s" * 48,
                              manager_ids=frozenset({"manager-1"}),
-                             persistence_mode="hosted-volume").validate()
+                             persistence_mode="hosted-volume", data_provider="supabase", supabase_enabled=True,
+                             operational_preview_enabled=True, supabase_url="https://fixture.supabase.co",
+                             supabase_publishable_key="sb_publishable_synthetic_fixture_key", max_forecast_runs=2).validate()
         self.assertTrue(production.strict_auth)
         with self.assertRaisesRegex(ValueError, "host_must_bind_all_interfaces"):
             replace(production, api_host="127.0.0.1").validate()

@@ -29,6 +29,13 @@ class Source:
         self.calls.append(("bind", token))
         return self
 
+    def catalog_rows(self):
+        return [{"chain_id": "c", "product_id": "p", "model": "FENDI", "color": "OXFORD",
+                 "presentation": "MEDIO BAÑO", "product_type": "TOALLA"}]
+
+    def operational_context(self):
+        return {"source_hash": "a" * 64, "generation": 1, "first_period": "2025-01", "last_period": "2026-10"}
+
     def rows(self, table, params):
         self.calls.append((table, params))
         return copy.deepcopy(self.data.get(table, []))

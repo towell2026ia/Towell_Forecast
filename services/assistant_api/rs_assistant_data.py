@@ -1,53 +1,16 @@
-"""Read only the authorized, published RS archive under one request-scoped pin."""
+"""Read the official commercial source for one authorized RS selection."""
 from collections import Counter, defaultdict
 from decimal import Decimal, InvalidOperation, localcontext
-import json
-from pathlib import Path
 import re
-from types import SimpleNamespace
-from uuid import NAMESPACE_URL, uuid5
 
 from .auth import READ
-from .commercial_api import commercial_catalog
 from .commercial_catalog import key
 from .supabase_access import PreviewError, uuid_value
 
 
-ARCHIVE_ID = "UNIF-20060057ee8e4dfdbcd9"
-ARCHIVE_SHA = "72f4b1a25d7d26823c28d10f39326b2743d3eb2655ad009f017b0257a4dec20d"
-ARCHIVE_VERSION_ID = str(uuid5(NAMESPACE_URL, "towell-operational-release:" + ARCHIVE_SHA))
-START_PERIOD, CUTOFF = "2025-01", "2026-10"
 METRICS = ("SALES", "ORDER", "DELIVERY", "FCST_TOWELL_HISTORY", "FCST_CLIENTE_HISTORY")
 PERIOD = re.compile(r"20\d\d-(?:0[1-9]|1[0-2])")
-SOURCE = re.compile(r"BAASE!A([1-9][0-9]*):Z\1")
-MODEL_BLOCKERS = {
-    "DESCRIPTION_ALIAS_CONFLICT", "INSUFFICIENT_MODEL_COLOR_BOUNDARY_EVIDENCE",
-    "METADATA_IDENTITY_REVIEW_REQUIRED", "MODEL_BOUNDARY_UNVALIDATED",
-    "PRESENTATION_ALIAS_CONFLICT", "SAME_SCOPE_IDENTIFIER_COLLISION",
-    "SEASON_CODE_UNVALIDATED", "UNICODE_BOUNDARY_REVIEW_REQUIRED", "UNRESOLVED_ABBREVIATION",
-}
 PUBLIC_PRODUCT_TYPES = {"TOALLA", "TAPETE", "TRAPO", "BATA"}
-
-
-class _ScopedCatalog:
-    """Constrain the existing commercial resolver's queries to one chain."""
-
-    def __init__(self, client, chain_id):
-        self.client, self.chain_id = client, chain_id
-        self.data = {}
-
-    def rows(self, table, params):
-        if table.startswith("commercial_"):
-            return self.client.rows(table, params)
-        field = "id" if table == "chains" else "chain_id"
-        query = {**params, field: f"eq.{self.chain_id}"}
-        if table in {"chains", "products"}:
-            query.update(status="eq.ACTIVE")
-        rows = self.client.rows(table, query)
-        if any(row.get(field) != self.chain_id for row in rows):
-            raise PreviewError("DATA_READ_FAILED", 503)
-        self.data[table] = rows
-        return rows
 
 
 def _format(value):
@@ -55,37 +18,35 @@ def _format(value):
     return re.sub(r"[\s_-]+", "", str(value or "").strip().upper())
 
 
-def _model_scope(client, chain_id, requested_format, model):
-    catalog = _ScopedCatalog(client, chain_id)
-    rules = json.loads((Path(__file__).resolve().parents[2] / "config/commercial_catalog_rules.json").read_text(encoding="utf-8"))
-    try:
-        classifications = commercial_catalog(catalog, SimpleNamespace(chain_ids={chain_id}), rules)["products"]
-        chain, = catalog.data["chains"]
-        formats = set()
-        for profile in catalog.data["import_profile_versions"]:
-            scope = profile["mapping_json"].get("scope", {})
-            if scope.get("level") == "COMMERCIAL_UNIT" and scope.get("actual_bearing") is True:
-                parent, separator, child = scope["code"].partition("::")
-                value = child if separator else parent
-                if value:
-                    formats.add(value)
-    except (ValueError, KeyError, TypeError, AttributeError):
-        raise PreviewError("DATA_READ_FAILED", 503) from None
-    if {_format(value) for value in formats} != {_format(requested_format)}:
+def _model_scope(client, chain_id, requested_format, model, presentation, period):
+    native = client.catalog_rows(chain_id=chain_id, as_of=period)
+    if any(row["chain_id"] != chain_id or row["purchase_type"] != "RS" for row in native):
+        raise PreviewError("DATA_READ_FAILED", 503)
+    formatted = [row for row in native if _format(row["format"]) == _format(requested_format)]
+    if not formatted:
         raise PreviewError("RS_FORMAT_NOT_VERIFIED", 409)
-
-    matching = [row for row in classifications if key(row["model"]) == key(model)]
-    selected = {uuid_value(row["product_id"]): row for row in matching if row["status"] == "APPROVED" or
-                (row["source"].startswith("TRANSIENT_PROPOSAL:") and not MODEL_BLOCKERS.intersection(row["reasons"]))}
+    matching = [row for row in formatted if key(row["model"]) == key(model)]
+    if presentation:
+        matching = [row for row in matching if key(row["presentation"]) == key(presentation)]
+    selected = {uuid_value(row["product_id"]): {**row, "size": row["presentation"], "status": "SOURCE_DOCUMENTED"}
+                for row in matching}
+    if len(selected) != len(matching):
+        raise PreviewError("RS_MODEL_PRESENTATION_AMBIGUOUS", 409)
     if not selected:
         raise PreviewError("RS_MODEL_NOT_VERIFIED", 409)
-    presentations = {key(row["size"]) or ("NOT_APPLICABLE" if "size" in row["not_applicable"] else None)
-                     for row in selected.values()}
-    if len(presentations) != 1 or None in presentations:
+    presentations = {key(row["size"]) for row in selected.values()}
+    if len(presentations) != 1 or "" in presentations:
         raise PreviewError("RS_MODEL_PRESENTATION_AMBIGUOUS", 409)
-    products = {row["id"]: row for row in catalog.data["products"]}
-    categories = {row["id"]: row["name"] for row in catalog.data["categories"]}
-    return chain["name"], sorted(formats)[0], selected, products, categories, len(matching) - len(selected)
+    products = {row["id"]: row for row in client.rows("products", {
+        "select": "id,chain_id,product_code,variant_code,description,category_id",
+        "chain_id": f"eq.{chain_id}", "status": "eq.ACTIVE", "order": "id.asc"})}
+    chains = client.rows("chains", {"select": "id,name", "id": f"eq.{chain_id}"})
+    categories = {row["id"]: row["name"] for row in client.rows("categories", {
+        "select": "id,name", "chain_id": f"eq.{chain_id}", "order": "id.asc"})}
+    if (len(chains) != 1 or chains[0]["id"] != chain_id or not selected.keys() <= products.keys()
+            or any(row["chain_id"] != chain_id for row in products.values())):
+        raise PreviewError("DATA_READ_FAILED", 503)
+    return chains[0]["name"], formatted[0]["format"], selected, products, categories, 0
 
 
 def _exact(value):
@@ -93,7 +54,7 @@ def _exact(value):
         if not isinstance(value, str) or not re.fullmatch(r"(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)", value):
             raise ValueError()
         parsed = Decimal(value)
-        if parsed >= 10**15 or parsed.as_tuple().exponent < -16:
+        if not parsed.is_finite() or parsed < 0:
             raise ValueError()
         return parsed
     except (InvalidOperation, ValueError):
@@ -107,15 +68,16 @@ def _month_rows(start, end):
         year, month = (year + 1, 1) if month == 12 else (year, month + 1)
 
 
-def _read_facts(client, chain_id, selected, period, scope_format):
+def _read_facts(client, chain_id, selected, period, scope_format, first_period):
     facts, inventory, excluded, seen = defaultdict(dict), {}, Counter(), set()
     ids = sorted(selected)
     for offset in range(0, len(ids), 50):
         batch = ids[offset:offset + 50]
         observations = client.observation_rows({
             "select": "id,chain_id,product_id,period,metric_code,value_text,version_no,availability_source,available_at,source_batch_id,source_reference,source_value_literal",
-            "p_product_ids": "{" + ",".join(batch) + "}", "p_from": START_PERIOD + "-01",
+            "p_product_ids": "{" + ",".join(batch) + "}", "p_from": first_period + "-01",
             "p_to": period + "-01", "p_metric_codes": "{" + ",".join(METRICS) + "}",
+            "p_format": scope_format, "p_purchase_type": "RS",
             "order": "product_id.asc,period.asc,metric_code.asc,id.asc",
         }, chain_id=chain_id)
         for row in observations:
@@ -123,14 +85,14 @@ def _read_facts(client, chain_id, selected, period, scope_format):
             month = date[:7]
             identity = product, month, metric
             if (row["chain_id"] != chain_id or product not in batch or metric not in METRICS or identity in seen
-                    or not PERIOD.fullmatch(month) or date != month + "-01" or not START_PERIOD <= month <= period):
+                    or not PERIOD.fullmatch(month) or date != month + "-01" or not first_period <= month <= period):
                 raise PreviewError("DATA_READ_FAILED", 503)
             seen.add(identity)
             source, literal = row.get("source_reference"), row.get("source_value_literal")
-            if not source or not isinstance(source, str) or not SOURCE.fullmatch(source):
+            if not isinstance(source, str) or not source.strip():
                 excluded[metric] += 1
                 continue
-            if row["availability_source"] != "UNKNOWN" or row["available_at"] is not None or _exact(literal) != _exact(row["value_text"]):
+            if _exact(literal) != _exact(row["value_text"]):
                 raise PreviewError("DATA_READ_FAILED", 503)
             facts[month][product, metric] = row
 
@@ -144,17 +106,17 @@ def _read_facts(client, chain_id, selected, period, scope_format):
             if (row["chain_id"] != chain_id or product not in batch or product in inventory
                     or row["period"] != period + "-01" or row["purchase_type"] != "RS"
                     or _format(row["format"]) != _format(scope_format)
-                    or not SOURCE.fullmatch(row.get("source_reference") or "")):
+                    or not isinstance(row.get("source_reference"), str) or not row["source_reference"].strip()):
                 raise PreviewError("DATA_READ_FAILED", 503)
             inventory[product] = _exact(row["quantity_text"])
     return facts, inventory, excluded
 
 
-def _summary(facts, inventory, expected, period):
+def _summary(facts, inventory, expected, period, first_period):
     by_month = []
     with localcontext() as context:
         context.prec = 50
-        for month in _month_rows(START_PERIOD, period):
+        for month in _month_rows(first_period, period):
             values = {(product, metric): _exact(row["source_value_literal"])
                       for (product, metric), row in facts[month].items()}
             metrics = {}
@@ -175,22 +137,23 @@ def _summary(facts, inventory, expected, period):
     return {"by_month": by_month, "inventory": stock}
 
 
-def load_rs_scope(client, principal, *, chain_id, purchase_type, format, model, period):
-    """Use a caller-bound SupabaseReadClient; never substitute the active baseline."""
+def load_rs_scope(client, principal, *, chain_id, purchase_type, format, model, period, presentation=None):
+    """Use the current source contract and the caller's chain permissions."""
     chain_id = uuid_value(chain_id)
     if READ not in principal.permissions or chain_id not in principal.chain_ids:
         raise PreviewError("SCOPE_FORBIDDEN", 403)
     if (purchase_type != "RS" or not isinstance(period, str) or not PERIOD.fullmatch(period)
-            or not START_PERIOD <= period <= CUTOFF or not isinstance(format, str) or not _format(format)
+            or not isinstance(format, str) or not _format(format)
             or not isinstance(model, str) or not key(model)):
         raise PreviewError("RS_SCOPE_INVALID")
-    pin = client.operational_context()
-    if pin["version_id"] != ARCHIVE_VERSION_ID:
-        raise PreviewError("RS_CANDIDATE_NOT_ACTIVE", 409)
-    chain, scope_format, selected, products, categories, unresolved = _model_scope(client, chain_id, format, model)
+    context = client.operational_context()
+    first_period = context["first_period"]
+    if not first_period <= period <= context["last_period"]:
+        raise PreviewError("RS_SCOPE_INVALID")
+    chain, scope_format, selected, products, categories, unresolved = _model_scope(client, chain_id, format, model, presentation, period)
     try:
-        facts, inventory, excluded = _read_facts(client, chain_id, selected, period, scope_format)
-        metrics = _summary(facts, inventory, len(selected) + unresolved, period)
+        facts, inventory, excluded = _read_facts(client, chain_id, selected, period, scope_format, first_period)
+        metrics = _summary(facts, inventory, len(selected) + unresolved, period, first_period)
         records = []
         for month, rows in sorted(facts.items()):
             for (pid, metric), row in sorted(rows.items()):
@@ -200,30 +163,30 @@ def load_rs_scope(client, principal, *, chain_id, purchase_type, format, model, 
                 category = product.get("category_id")
                 records.append({
                     "chain_id": chain_id, "chain_name": chain, "product_id": pid, "product_code": product["product_code"],
-                    "description": product["description"], "variant": product.get("variant_code") or "",
-                    "category": category or "UNCLASSIFIED", "category_id": category,
-                    "category_name": categories.get(category, "Sin categoría"), "period": month,
-                    "objective": "Venta", "value": row["source_value_literal"], "available_at": None,
-                    "availability_source": "UNKNOWN", "evidence_mode": "RETROSPECTIVE_TRAINING",
+                    "description": product["description"], "variant": selected[pid].get("color") or "",
+                    "category": selected[pid].get("product_type") or "UNCLASSIFIED", "category_id": category,
+                    "category_name": selected[pid].get("product_type") or categories.get(category, "Sin categoría"), "period": month,
+                    "objective": "Venta", "value": row["source_value_literal"], "available_at": row["available_at"],
+                    "availability_source": row["availability_source"], "evidence_mode": "RETROSPECTIVE_TRAINING",
                     "source_id": uuid_value(row["id"]), "version_no": row["version_no"],
                     "source_batch_id": row["source_batch_id"],
                 })
     except (ValueError, KeyError, TypeError, AttributeError):
         raise PreviewError("DATA_READ_FAILED", 503) from None
     representative = next(iter(selected.values()))
-    product_types = {key(row["product_type"]) for row in selected.values()}
+    product_types = {key(row["product_type"]).split(" ")[0] for row in selected.values()}
     public_product_type = next(iter(product_types)) if len(product_types) == 1 and product_types <= PUBLIC_PRODUCT_TYPES else None
     return {
         "scope": {"chain_id": chain_id, "chain": chain, "purchase_type": "RS", "format": scope_format,
                   "model": key(representative["model"]), "presentation": representative["size"], "period": period,
                   "public_product_type": public_product_type,
-                  "version_id": pin["version_id"], "generation": pin["generation"], "archive_id": ARCHIVE_ID},
+                  "source_hash": context["source_hash"], "generation": context["generation"]},
         "eligible_variants": len(selected),
         "quality": {"products_classified": len(selected), "products_excluded_ambiguous": unresolved,
                     "products_approved": sum(row["status"] == "APPROVED" for row in selected.values()),
                     "excluded_without_rs_lineage": dict(sorted(excluded.items())), "sales_records": len(records),
                     "sales_products": len({row["product_id"] for row in records}),
-                    "temporal_certification": False, "scope_basis": "CATALOG_MODEL_AND_ARCHIVE_RS_LINEAGE",
+                    "temporal_certification": False, "scope_basis": "CATALOG_MODEL_AND_OFFICIAL_RS_LINEAGE",
                     "coverage_basis": "RESOLVABLE_CATALOG_MODEL_ONLY", "model_total_certified": False},
         "metrics": metrics,
         "records": records,

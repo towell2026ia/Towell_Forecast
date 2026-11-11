@@ -113,7 +113,7 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
     let alive = true;
     if (!filters.chainId) return;
     const readHistory = pin().then(context => repository.getForecastHistory?.(filters, context) ?? []);
-    const readCustomer = cutoff && repository.getCustomerForecast ? repository.getCustomerForecast(filters, cutoff) : Promise.resolve([]);
+    const readCustomer = cutoff && repository.getCustomerForecast ? pin().then(source => repository.getCustomerForecast!(filters, cutoff, source)) : Promise.resolve([]);
     const readCategories = filters.categoryId && repository.getCategories ? repository.getCategories(filters.chainId) : Promise.resolve([]);
     void Promise.allSettled([readHistory, readCustomer, readCategories]).then(([h, c, categories]) => { if (alive) setHistory({ key: historyKey, rows: h.status === "fulfilled" ? h.value : [], customer: c.status === "fulfilled" ? c.value : [], categoryName: categories.status === "fulfilled" ? categories.value.find(category => category.id === filters.categoryId && category.chain_id === filters.chainId)?.name ?? null : null, error: h.status === "rejected", customerError: c.status === "rejected" }); });
     return () => { alive = false; };

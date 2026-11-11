@@ -7,7 +7,7 @@ export type CommercialClassification = { product_id: string; chain_id: string; p
 export type Product = { id: string; chain_id: string; category_id: string | null; product_code: string; variant_code: string | null; description: string; identifiers: [string | null, string | null][]; commercial?: CommercialClassification };
 export type Filters = { chainId: string | null; productId: string | null; categoryId: string | null; periodRange: [string | null, string | null]; search: string; commercialType?: string | null; commercialModels?: string[] | null; commercialColor?: string | null; commercialSize?: string | null; classificationStatus?: string | null };
 export const emptyFilters: Filters = { chainId: null, productId: null, categoryId: null, periodRange: [null, null], search: "" };
-export type OperationalReadContext = { version_id: string; manifest_hash: string; generation: number };
+export type OperationalReadContext = { source_hash: string; generation: number; first_period: string; last_period: string };
 export type OperationalMetric = "SALES" | "ORDER" | "DELIVERY" | "FCST_TOWELL_HISTORY" | "FCST_CLIENTE_HISTORY";
 export type OperationalInventory = { chain_id: string; product_id: string; period: string; format: string; upc: string; purchase_type: string; quantity_text: string };
 export type Cursor = { chain_id: string; product_id: string; period: string; context?: OperationalReadContext };
@@ -18,7 +18,7 @@ export type HistoricalPage = { rows: HistoricalRow[]; next: Cursor | null; obser
 export type Summary = { scopeCount: number; productCount: number; observationCount: number; latestPeriod: string | null; byScope: { chain: Chain; observations: number }[] };
 export interface ForecastReadRepository {
   openOperationalRead?(): Promise<OperationalReadContext>;
-  getCommercialCatalog?(): Promise<CommercialClassification[]>;
+  getCommercialCatalog?(context?: OperationalReadContext): Promise<CommercialClassification[]>;
   getReportHistory?(filters: Filters, context?: OperationalReadContext): Promise<HistoricalRow[]>;
   getReportInventory?(filters: Filters, context: OperationalReadContext): Promise<OperationalInventory[]>;
   getReportSnapshot?(filters: Filters, context?: OperationalReadContext): Promise<import("../forecast-reporting").ReportSnapshot>;
@@ -26,7 +26,7 @@ export interface ForecastReadRepository {
   getDatabasePage?(section: import("../forecast-reporting").DatabaseSection, filters: Filters, page: number, size: 50 | 100 | 250, context?: OperationalReadContext): Promise<import("../forecast-reporting").DatabasePage>;
   getReadDiagnostic?(endpoint: "getPeriods"): { code: string; http_status: number } | null;
   getForecastHistory?(filters: Filters, context?: OperationalReadContext): Promise<import("../forecast-chart-data").HistoricalMonth[]>;
-  getCustomerForecast?(filters: Filters, issuePeriod: string): Promise<import("../forecast-chart-data").CustomerMonth[]>;
+  getCustomerForecast?(filters: Filters, issuePeriod: string, context?: OperationalReadContext): Promise<import("../forecast-chart-data").CustomerMonth[]>;
   previews?: import("../forecast-preview").PreviewClient;
   getCurrentProfile(): Promise<Profile>;
   getVisibleChains(context?: OperationalReadContext): Promise<Chain[]>;

@@ -123,9 +123,26 @@ class SupabaseDataProvider(DataProvider):
     def __init__(self, client=None):
         self.client = client
         self._catalogs = {}
+        self._source_catalogs = {}
 
     def bind(self, token: str):
         return SupabaseDataProvider(self.client.bind(token))
+
+    def source_context(self):
+        return self.client.operational_context()
+
+    def source_catalog(self, chain_id, issue_period=None):
+        cache_key = chain_id, issue_period
+        if cache_key not in self._source_catalogs:
+            from .supabase_access import PreviewError
+            rows = self.client.catalog_rows(chain_id=chain_id, as_of=issue_period)
+            if any(row["chain_id"] != chain_id or row["purchase_type"] != "RS" for row in rows):
+                raise PreviewError("DATA_READ_FAILED", 503)
+            selected = {row["product_id"]: row for row in rows}
+            if len(selected) != len(rows):
+                raise PreviewError("DATA_READ_FAILED", 503)
+            self._source_catalogs[cache_key] = selected
+        return self._source_catalogs[cache_key]
 
     def product_catalog(self, chain_id: str):
         from .supabase_access import uuid_value
@@ -137,6 +154,9 @@ class SupabaseDataProvider(DataProvider):
             from .supabase_access import PreviewError
             if any(row.get("chain_id") != chain_id for row in self._catalogs[chain_id]):
                 raise PreviewError("DATA_READ_FAILED", 503)
+            source = self.source_catalog(chain_id)
+            self._catalogs[chain_id] = [{**row, "engine_category": source[row["id"]].get("product_type") or "UNCLASSIFIED"}
+                                       for row in self._catalogs[chain_id] if row["id"] in source]
         return self._catalogs[chain_id]
 
     @property
@@ -169,6 +189,7 @@ class SupabaseDataProvider(DataProvider):
         categories = {row["id"]: row["name"] for row in self.client.rows("categories",
             {"select": "id,name", "chain_id": f"eq.{chain_id}", "order": "id.asc"})}
         products = {row["id"]: row for row in self.product_catalog(chain_id)}
+        source = self.source_catalog(chain_id, issue_period)
         records, seen = [], set()
         for row in self.client.observation_rows(params, mode="TEMPORAL" if temporal else "OPERATIONAL",
                                                 available_through=available_through, chain_id=chain_id):
@@ -186,9 +207,9 @@ class SupabaseDataProvider(DataProvider):
             records.append({"chain_id": chain_id, "product_id": row["product_id"],
                 "chain_name": row.get("chain_name", chain_id),
                 "product_code": product["product_code"], "description": product["description"],
-                "variant": product.get("variant_code") or "", "category_id": category,
-                "category": category or "UNCLASSIFIED", "category_name": categories.get(category, "Sin categoría"),
-                "period": row["period"][:7], "objective": "Venta", "value": row["value"],
+                "variant": source[product["id"]].get("color") or "", "category_id": category,
+                "category": source[product["id"]].get("product_type") or "UNCLASSIFIED", "category_name": source[product["id"]].get("product_type") or "Sin categoría",
+                "period": row["period"][:7], "objective": "Venta", "value": row.get("value_text", row["value"]),
                 "available_at": row.get("available_at"), "availability_source": row.get("availability_source"),
                 "source_id": row.get("observation_id") or row.get("id"), "version_no": row.get("version_no"),
                 "source_batch_id": row.get("source_batch_id"), "evidence_mode": mode})

@@ -42,6 +42,7 @@ jobs:
       - run: python -m unittest services.planning_pilot.test_engine -q
       - run: python -m unittest services.operational_update.test_preparation -q
       - run: python -m unittest services.operational_update.test_unification -q
+      - run: python -m unittest services.operational_update.test_official_source services.operational_update.test_official_forecast -q
       - run: python scripts/test_import_unit_catalog.py
       - run: python scripts/audit_forecast_engine.py
       - run: docker build -f Dockerfile.api -t forecast-towell-api:ci .
@@ -110,7 +111,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          GATEB_CONFIG="$RUNNER_TEMP/gateb-config.json" python -B -m unittest services.operational_versions.test_unification services.operational_versions.test_cutover -v 2>&1 | tee "$RUNNER_TEMP/unification-postgres.log"
+          GATEB_CONFIG="$RUNNER_TEMP/gateb-config.json" python -B -m unittest services.operational_versions.test_unification services.operational_versions.test_cutover services.operational_versions.test_official_source -v 2>&1 | tee "$RUNNER_TEMP/unification-postgres.log"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

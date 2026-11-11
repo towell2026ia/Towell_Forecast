@@ -17,7 +17,7 @@ from services.assistant_api.supabase_access import PreviewError
 
 CHAIN = "00000000-0000-4000-8000-000000000001"
 BODY = {"chain_id": CHAIN, "purchase_type": "RS", "format": "BD", "model": "FENDI", "period": "2026-10"}
-SCOPE = {**BODY, "version_id": "c139f367-df75-5ef3-8f9f-1627038e4496"}
+SCOPE = {**BODY, "source_hash": "a" * 64}
 
 
 class RSAssistantTests(unittest.TestCase):
@@ -119,12 +119,12 @@ class RSAssistantTests(unittest.TestCase):
                 self.assertEqual((await client.post(path, json=BODY)).status_code, 401)
                 self.assertEqual((await client.post(path, headers=headers, json={**BODY, "action": "research"})).status_code, 403)
                 response = await client.post(path, headers=headers, json=BODY)
-                self.assertEqual(response.json(), {"code": "RS_CANDIDATE_NOT_ACTIVE"})
+                self.assertEqual(response.json(), {"code": "OFFICIAL_SOURCE_UNAVAILABLE"})
                 self.assertEqual(response.status_code, 409)
                 self.assertEqual((await client.post(path, headers=headers, json={**BODY, "purchase_type": "CE"})).status_code, 422)
 
         with patch("services.assistant_api.rs_assistant.load_rs_scope",
-                   side_effect=PreviewError("RS_CANDIDATE_NOT_ACTIVE", 409)) as load:
+                   side_effect=PreviewError("OFFICIAL_SOURCE_UNAVAILABLE", 409)) as load:
             asyncio.run(requests())
             load.assert_called_once()
             workflow.answer.assert_not_called()

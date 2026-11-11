@@ -9,7 +9,7 @@ export type PortalReadDiagnostic = {
   code: string;
   operation: typeof readOperations[number];
 };
-const sqlCodes = ["42501", "42703", "42P01", "57014", "22007", "22P02", "23505", "23503", "23514", "P0001"];
+const sqlCodes = ["40001", "42501", "42703", "42P01", "57014", "22007", "22P02", "23505", "23503", "23514", "P0001"];
 const localCodes = ["OK", "READ_FAILED", "NETWORK_ERROR", "DUPLICATE_CURRENT_METRIC", "INVALID_OBSERVATION_VALUE", "INVALID_PERIOD", "TRANSFORM_FAILED"];
 export function controlledReadCode(code: unknown): string {
   return typeof code === "string" && (/^PGRST\d{3}$/.test(code) || sqlCodes.includes(code) || localCodes.includes(code)) ? code : "READ_FAILED";

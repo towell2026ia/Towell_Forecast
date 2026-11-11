@@ -10,6 +10,23 @@ from .commercial_catalog import analyze
 from .supabase_access import PreviewError
 
 
+def official_commercial_catalog(client, principal):
+    output, seen = [], set()
+    for row in client.catalog_rows():
+        identity = row["chain_id"], row["product_id"]
+        if row["chain_id"] not in principal.chain_ids or identity in seen:
+            raise PreviewError("DATA_READ_FAILED", 503)
+        seen.add(identity)
+        attributes = {field: row.get(column) for field, column in (
+            ("product_type", "product_type"), ("model", "model"), ("color", "color"), ("size", "presentation")
+        )}
+        output.append({"chain_id": row["chain_id"], "product_id": row["product_id"], **attributes,
+            "status": "PENDING_CLASSIFICATION", "source": "OFFICIAL_WORKBOOK",
+            "not_applicable": [], "reasons": ["SOURCE_ATTRIBUTE_MISSING:" + field
+                                               for field, value in attributes.items() if not value]})
+    return {"products": output, "rules_version": "OFFICIAL_WORKBOOK", "persisted": False,
+            "source_context": client.operational_context()}
+
 def commercial_catalog(client, principal, rules):
     chains = client.rows("chains", {"select": "id,name", "order": "id.asc"})
     allowed = set(principal.chain_ids)
@@ -71,6 +88,6 @@ def mount_commercial_routes(app, identity, client, limiter):
         try:
             if client is None:
                 raise PreviewError("DATA_READ_FAILED", 503)
-            return commercial_catalog(client.bind(token), principal, rules)
+            return official_commercial_catalog(client.bind(token), principal)
         except (ValueError, KeyError, TypeError):
             raise PreviewError("DATA_READ_FAILED", 503) from None

@@ -138,6 +138,7 @@ def candidate_payload(preview: dict[str, Any], sales: list[dict[str, Any]],
         "observed": item.get("observed_fill_rate"), "details": item}
         for item in (dq, fq, sl)]
     content = {"chain_id": preview["chain_id"], "objective": preview["objective"],
+        "source_context": preview.get("source_context"),
         "issue_period": preview["issue_period"], "cutoff": preview["cutoff"],
         "horizons": horizons, "engine_version": preview["engine_version"],
         "data_snapshot_hash": preview["dataset_hash"], "policy_version": policy.version}
@@ -147,6 +148,7 @@ def candidate_payload(preview: dict[str, Any], sales: list[dict[str, Any]],
         "cutoff_at": preview["cutoff"] + "T23:59:59Z", "actor_id": _uuid(actor_id),
         "engine_version": preview["engine_version"], "git_sha": git_sha,
         "data_snapshot_hash": preview["dataset_hash"], "policy_version": policy.version,
+        "source_context": preview.get("source_context"),
         "content_hash": digest, "preview_id": preview_id,
         "certification_status": "PROVISIONAL", "evidence_mode": preview["mode"],
         "horizons": horizons, "aggregates": aggregates,

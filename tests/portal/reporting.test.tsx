@@ -119,20 +119,20 @@ describe("E5 RLS-bound report repository", () => {
     return { client: { from, rpc } as unknown as SupabaseClient, calls };
   }
   it("preserves complete C1 and future period choices from stored horizons", async () => {
-    const s = snapshot(), repo = repository(s), mock = client({ forecast_calculations: s.calculations, forecast_calculation_horizons: s.horizons });
+    const s = snapshot(), repo = repository(s), mock = client({ forecast_calculations: s.calculations.map(c => ({ ...c, input_snapshot: { source_context: operationalContext } })), forecast_calculation_horizons: s.horizons });
     const reader = new SupabaseReportReader(mock.client, repo, new AbortController().signal); expect((await reader.snapshot(emptyFilters, operationalContext)).horizons).toHaveLength(12); expect(await reader.periods("c", operationalContext)).toContain("2026-08");
     expect(mock.calls).toContainEqual({ table: "forecast_calculations", method: "in", args: ["product_id", ["p", "missing"]] });
   });
   it("rejects foreign scope, missing horizon or wrong target", async () => {
     for (const bad of [snapshot().horizons.slice(1), snapshot().horizons.map(h => ({ ...h, chain_id: "foreign" })), snapshot().horizons.map(h => ({ ...h, target_period: "2026-07-01" }))]) {
-      const mock = client({ forecast_calculations: [calculation], forecast_calculation_horizons: bad }); await expect(new SupabaseReportReader(mock.client, repository(), new AbortController().signal).snapshot(emptyFilters, operationalContext)).rejects.toThrow();
+      const mock = client({ forecast_calculations: [{ ...calculation, input_snapshot: { source_context: operationalContext } }], forecast_calculation_horizons: bad }); await expect(new SupabaseReportReader(mock.client, repository(), new AbortController().signal).snapshot(emptyFilters, operationalContext)).rejects.toThrow();
     }
   });
   it("bounds commercial fact pagination upstream and preserves zero and observation metadata", async () => {
     const mock = client({ operational_read_observations: [{ id: "obs", chain_id: "c", product_id: "p", period: "2026-08-01", metric_code: "SALES", value_text: "0.000", version_no: 1, availability_source: "UNKNOWN", available_at: null, source_batch_id: "batch" }] });
     const filters = { ...emptyFilters, chainId: "c", productId: "p", periodRange: ["2026-08", "2026-09"] as [string, string] };
     const result = await new SupabaseReportReader(mock.client, repository(), new AbortController().signal).databasePage("observations", filters, 2, 50, operationalContext); expect(result.rows[0].cells[5]).toBe("0.000");
-    expect(mock.calls).toContainEqual({ table: "operational_read_observations", method: "rpc", args: [expect.objectContaining({ p_mode: "AUDIT", p_version_id: operationalContext.version_id, p_generation: 2 })] });
+    expect(mock.calls).toContainEqual({ table: "operational_read_observations", method: "rpc", args: [expect.objectContaining({ p_source_hash: operationalContext.source_hash, p_generation: 2 })] });
     expect(mock.calls).toContainEqual({ table: "operational_read_observations", method: "range", args: [100, 150] }); expect(mock.calls).toContainEqual({ table: "operational_read_observations", method: "eq", args: ["chain_id", "c"] }); expect(mock.calls).toContainEqual({ table: "operational_read_observations", method: "gte", args: ["period", "2026-08-01"] });
   });
   it("refuses reads after session disposal", async () => { const controller = new AbortController(); controller.abort(); await expect(new SupabaseReportReader(client({}).client, repository(), controller.signal).databasePage("history", emptyFilters, 0, 50, operationalContext)).rejects.toThrow("session_disposed"); });

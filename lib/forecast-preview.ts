@@ -1,5 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { assistantScopeIsValid, parseRsAssistantResponse, type RsAssistantClient } from "./rs-assistant";
+import type { OperationalReadContext } from "./supabase/types";
+import { matchesOfficialSource } from "./forecast-reporting";
 export type PreviewHorizon = { horizon: number; target_period: string; statistical_value: number; ml_value: number | null; forecast_towell: number; p10: number | null; p50: number; p90: number | null; p95: number | null;
   statistical_model?: string; ml_model?: string | null; model_strategy?: string; classification?: string; forecast_status?: string; certification_status?: string; confidence?: string; band_basis?: "PRODUCT" | "CATEGORY" | "CHAIN" | "INSUFFICIENT"; band_observations?: number; band_status?: "AVAILABLE" | "INSUFFICIENT_BAND_EVIDENCE" };
 export type PreviewProduct = { product_id: string; product_code: string; description: string; category_id: string | null; forecast_status: string; history_months?: number; minimum_history_months?: number; horizons?: PreviewHorizon[]; statistical_model?: string | null; classification?: string | null };
@@ -20,6 +22,7 @@ export type ProvisionalColdStart = { status: "PROVISIONAL_COLD_START"; observed_
   horizons: { horizon: number; target_period: string; value: number }[];
   research?: { status: "DISABLED" | "PENDING" | "COMPLETED" | "UNAVAILABLE"; reason?: string; summary?: string; sources?: { title: string; url: string }[] } };
 export type PreviewScope = { chain_id: string; chain_name?: string; status: string; error_code?: string; issue_period?: string; latest_actual_period?: string; engine_version?: string; mode?: string; preview_id?: string;
+  source_context?: Pick<OperationalReadContext, "source_hash" | "generation">;
   dataset_hash?: string;
   provisional_cold_start?: ProvisionalColdStart;
   eligibility?: Record<string, number>; evaluation_mode?: string; statistical?: { status: string; models: Record<string, number>; candidates: PreviewCandidate[]; scope_candidates?: PreviewCandidate[]; selected_metrics?: PreviewCandidate; available_candidates?: string[]; retrospective_wape: number | null; retrospective_bias: number | null };
@@ -55,17 +58,17 @@ export type CalculationDetail = CalculationSummary & { candidate_metrics: Record
   actual_sales?: { observation_id: string; period: string; value: number; version_no: number; available_at: string; source_batch_id: string }[] };
 export interface PreviewClient {
   rsAssistant?: RsAssistantClient;
-  commercialCatalog?(): Promise<import("./supabase/types").CommercialClassification[]>;
+  commercialCatalog?(context?: OperationalReadContext): Promise<import("./supabase/types").CommercialClassification[]>;
   create(chainId: string | null, productId: string | null, issuePeriod?: string | null): Promise<PreviewJob>;
   status(jobId: string): Promise<PreviewJob>;
   result(jobId: string, productId?: string | null): Promise<PreviewJob>;
   research?(jobId: string): Promise<PreviewJob>;
-  latest(chainId: string | null, productId: string | null): Promise<PreviewJob | null>;
+  latest(chainId: string | null, productId: string | null, context?: OperationalReadContext): Promise<PreviewJob | null>;
   qualityGates?(chainId: string): Promise<QualityGates>;
   vintages?(chainId: string): Promise<VintageSummary[]>;
   vintageDetail?(vintageId: string): Promise<VintageDetail>;
   vintageCapabilities?(): Promise<VintageCapabilities>;
-  provisionalForecasts?(chainId: string | null, productId: string | null): Promise<import("./forecast-reporting").ProvisionalForecast[]>;
+  provisionalForecasts?(chainId: string | null, productId: string | null, context?: OperationalReadContext): Promise<import("./forecast-reporting").ProvisionalForecast[]>;
   createCandidate?(chainId: string, previewId: string): Promise<string>;
   freezeVintage?(vintageId: string): Promise<string>;
   publishVintage?(vintageId: string, comment: string): Promise<string>;
@@ -102,9 +105,18 @@ export class RailwayPreviewClient implements PreviewClient {
       return url.origin;
     } catch { throw new PreviewReadError("PREVIEW_CONFIGURATION_REQUIRED"); }
   }
-  async commercialCatalog() {
-    const data = await this.e4<{ products: import("./supabase/types").CommercialClassification[]; persisted: boolean }>("/api/forecast/commercial-catalog");
-    if (!Array.isArray(data.products) || data.persisted !== false || data.products.some(p => !p.product_id || !p.chain_id || !["APPROVED", "PENDING_CLASSIFICATION"].includes(p.status) || !Array.isArray(p.reasons))) throw new PreviewReadError("DATA_READ_FAILED");
+  private async officialSource(context?: OperationalReadContext) {
+    const { data, error } = await this.auth.rpc("operational_read_context").abortSignal(this.controller.signal);
+    const source = Array.isArray(data) && data.length === 1 ? data[0] as OperationalReadContext : null;
+    if (error || !source || !/^[0-9a-f]{64}$/.test(source.source_hash) || !Number.isSafeInteger(source.generation)) throw new PreviewReadError("DATA_READ_FAILED");
+    if (context && !matchesOfficialSource(source, context)) throw new PreviewReadError("DATA_READ_FAILED");
+    return source;
+  }
+  async commercialCatalog(context?: OperationalReadContext) {
+    const source = await this.officialSource(context);
+    const data = await this.e4<{ products: import("./supabase/types").CommercialClassification[]; persisted: boolean; source_context?: unknown }>("/api/forecast/commercial-catalog");
+    if (!matchesOfficialSource(data.source_context, source) || !Array.isArray(data.products) || data.persisted !== false || data.products.some(p => !p.product_id || !p.chain_id || !["APPROVED", "PENDING_CLASSIFICATION"].includes(p.status) || !Array.isArray(p.reasons))) throw new PreviewReadError("DATA_READ_FAILED");
+    await this.officialSource(source);
     return data.products;
   }
   private async request(path: string, body?: unknown): Promise<PreviewJob> {
@@ -134,9 +146,14 @@ export class RailwayPreviewClient implements PreviewClient {
   status(jobId: string) { return this.request(`/api/forecast/preview-runs/${encodeURIComponent(jobId)}`); }
   result(jobId: string, productId?: string | null) { return this.request(`/api/forecast/preview-runs/${encodeURIComponent(jobId)}/result${productId ? `?product_id=${encodeURIComponent(productId)}` : ""}`); }
   research(jobId: string) { return this.request(`/api/forecast/preview-runs/${encodeURIComponent(jobId)}/research`); }
-  async latest(chainId: string | null, productId: string | null) {
+  async latest(chainId: string | null, productId: string | null, context?: OperationalReadContext) {
+    const source = await this.officialSource(context);
     const params = new URLSearchParams(); if (chainId) params.set("chain_id", chainId); if (productId) params.set("product_id", productId);
-    try { return await this.request(`/api/forecast/preview-latest?${params}`); }
+    try {
+      const result = await this.request(`/api/forecast/preview-latest?${params}`);
+      await this.officialSource(source);
+      return result.scopes.length && result.scopes.every(scope => matchesOfficialSource(scope.source_context, source)) ? result : null;
+    }
     catch (error) { if (error instanceof PreviewReadError && error.code === "PREVIEW_NOT_FOUND") return null; throw error; }
   }
   async qualityGates(chainId: string): Promise<QualityGates> {
@@ -217,7 +234,8 @@ export class RailwayPreviewClient implements PreviewClient {
     const result = await this.e4<{ calculations: CalculationSummary[] }>(`/api/forecast/calculations?chain_id=${encodeURIComponent(chainId)}&product_id=${encodeURIComponent(productId)}`);
     return result.calculations;
   }
-  async provisionalForecasts(chainId: string | null, productId: string | null) {
+  async provisionalForecasts(chainId: string | null, productId: string | null, context?: OperationalReadContext) {
+    const source = await this.officialSource(context);
     const rows: import("./forecast-reporting").ProvisionalForecast[] = [];
     for (let offset = 0; offset < 10000; offset += 100) {
       const params = new URLSearchParams({ offset: String(offset), limit: "100" });
@@ -225,8 +243,8 @@ export class RailwayPreviewClient implements PreviewClient {
       if (productId) params.set("product_id", productId);
       const result = await this.e4<{ rows: typeof rows; next_offset: number | null }>(`/api/forecast/provisional-forecasts?${params}`);
       if (!Array.isArray(result.rows) || result.rows.length > 100 || result.rows.some(r => chainId && r.chain_id !== chainId || productId && r.product_id !== productId || r.horizons.length !== 12)) throw new PreviewReadError("DATA_READ_FAILED");
-      rows.push(...result.rows);
-      if (result.next_offset === null) return rows;
+      rows.push(...result.rows.filter(row => matchesOfficialSource(row.source_context, source)));
+      if (result.next_offset === null) { await this.officialSource(source); return rows; }
       if (result.next_offset !== offset + 100) throw new PreviewReadError("DATA_READ_FAILED");
     }
     throw new PreviewReadError("DATA_READ_FAILED");

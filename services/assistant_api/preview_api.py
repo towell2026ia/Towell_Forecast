@@ -98,45 +98,46 @@ def mount_preview_routes(app, config, identity, data, runner, limiter, write_rep
 
     @router.get("/preview-runs/{job_id}")
     def status(job_id: str, request: Request, authorization: str | None = Header(default=None)):
-        principal, _ = actor(request, authorization)
-        return runner.get_job(job_id, principal)
+        principal, token = actor(request, authorization)
+        return runner.get_job(job_id, principal, source_context=data.bind(token).source_context())
 
     @router.get("/preview-runs/{job_id}/result")
     def result(job_id: str, request: Request, product_id: str | None = None, authorization: str | None = Header(default=None)):
-        principal, _ = actor(request, authorization)
+        principal, token = actor(request, authorization)
         if product_id:
             uuid_value(product_id)
-        return runner.result(job_id, principal, product_id)
+        return runner.result(job_id, principal, product_id, source_context=data.bind(token).source_context())
 
     @router.get("/preview-runs/{job_id}/research")
     def research(job_id: str, request: Request, authorization: str | None = Header(default=None)):
-        principal, _ = actor(request, authorization)
+        principal, token = actor(request, authorization)
         if not limiter.allow("research-poll:" + principal.user_id, config.forecast_rate_per_minute):
             raise PreviewError("RATE_001", 429)
-        return runner.poll_research(job_id, principal)
+        return runner.poll_research(job_id, principal, source_context=data.bind(token).source_context())
 
     @router.get("/preview-latest")
     def latest(request: Request, chain_id: str | None = None, product_id: str | None = None,
                mode: str = "RETROSPECTIVE_TRAINING", authorization: str | None = Header(default=None)):
-        principal, _ = actor(request, authorization)
+        principal, token = actor(request, authorization)
         if mode not in {"RETROSPECTIVE_TRAINING", "POINT_IN_TIME"}:
             raise PreviewError("REQUEST_001")
         if chain_id:
             uuid_value(chain_id)
         if product_id:
             uuid_value(product_id)
-        return runner.latest(principal, chain_id, product_id, mode)
+        return runner.latest(principal, chain_id, product_id, mode, source_context=data.bind(token).source_context())
 
     @router.get("/provisional-forecasts")
     def provisionals(request: Request, chain_id: str | None = None, product_id: str | None = None,
                      offset: int = Query(default=0, ge=0, le=10000), limit: int = Query(default=100, ge=1, le=100),
                      authorization: str | None = Header(default=None)):
-        principal, _ = actor(request, authorization)
+        principal, token = actor(request, authorization)
         if chain_id:
             uuid_value(chain_id)
         if product_id:
             uuid_value(product_id)
-        return runner.provisional_forecasts(principal, chain_id, product_id, offset, limit)
+        return runner.provisional_forecasts(principal, chain_id, product_id, offset, limit,
+                                          source_context=data.bind(token).source_context())
 
     @router.get("/quality-gates")
     def quality_gates(request: Request, chain_id: str, authorization: str | None = Header(default=None)):
@@ -144,7 +145,8 @@ def mount_preview_routes(app, config, identity, data, runner, limiter, write_rep
         chain_id = uuid_value(chain_id)
         if chain_id not in principal.chain_ids:
             raise PreviewError("SCOPE_FORBIDDEN", 403)
-        latest_job = runner.latest(principal, chain_id, None)
+        source = data.bind(token)
+        latest_job = runner.latest(principal, chain_id, None, source_context=source.source_context())
         if latest_job.get("status") != "READY_PREVIEW":
             raise PreviewError("PREVIEW_NOT_READY", 409)
         saved_job = runner.persistence.get("forecast_jobs", latest_job["job_id"])
@@ -154,7 +156,6 @@ def mount_preview_routes(app, config, identity, data, runner, limiter, write_rep
         preview = runner.persistence.get("forecast_previews", reference["preview_id"])
         if not preview:
             raise PreviewError("PREVIEW_NOT_READY", 409)
-        source = data.bind(token)
         sales = source.records(chain_id=chain_id, issue_period=preview["issue_period"], mode=preview["mode"])
         if snapshot_hash(sales) != preview["dataset_hash"]:
             raise PreviewError("PREVIEW_NOT_READY", 409)
@@ -240,7 +241,8 @@ def mount_preview_routes(app, config, identity, data, runner, limiter, write_rep
         chain_id = uuid_value(body.chain_id)
         if chain_id not in principal.execute_chain_ids:
             raise PreviewError("SCOPE_FORBIDDEN", 403)
-        latest_job = runner.latest(principal, chain_id, None)
+        source = data.bind(token)
+        latest_job = runner.latest(principal, chain_id, None, source_context=source.source_context())
         saved_job = runner.persistence.get("forecast_jobs", latest_job["job_id"])
         reference = next((scope for scope in (saved_job or {}).get("scopes", []) if scope.get("chain_id") == chain_id), None)
         if latest_job.get("status") != "READY_PREVIEW" or not reference or reference.get("status") != "READY_PREVIEW" or reference.get("preview_id") != body.preview_id:

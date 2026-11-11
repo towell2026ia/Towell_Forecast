@@ -58,13 +58,15 @@ class ProviderTests(unittest.TestCase):
             if path.endswith("/user"):
                 return httpx.Response(200, json={"id": USER})
             if path.endswith("/operational_read_context"):
-                return httpx.Response(200, json=[{"version_id": A, "manifest_hash": "a" * 64, "generation": 1}])
+                return httpx.Response(200, json=[{"source_hash": "a" * 64, "generation": 1,
+                                                 "first_period": "2025-01", "last_period": "2026-10"}])
             tables = {
                 "profiles": [{"id": USER, "status": "ACTIVE", "global_role": role}],
                 "chains": [{"id": chain, "name": "Fixture", "status": "ACTIVE"} for chain in ([A, B] if role == "ADMIN" else [A])],
                 "user_chain_access": [{"chain_id": A, "can_view": True, "can_run_forecast": role == "EDITOR"}],
                 "categories": [{"id": CAT, "name": "Actual category"}],
                 "products": [{"id": product, "chain_id": A, "product_code": product, "description": "Actual product", "category_id": CAT} for product in (PRODUCT, OTHER)],
+                "operational_read_catalog": [{"chain_id": A, "product_id": product, "purchase_type": "RS", "product_type": "Actual category", "color": "Source color"} for product in (PRODUCT, OTHER)],
                 "operational_read_observations": [{"chain_id": A, "product_id": PRODUCT, "period": "2026-05-01", "metric_code": "SALES", "value": 0, "available_at": None, "availability_source": "UNKNOWN", "version_no": 1},
                     {"chain_id": A, "product_id": PRODUCT, "period": "2026-07-01", "metric_code": "SALES", "value": 12, "available_at": None, "availability_source": "UNKNOWN", "version_no": 1}, *self.extra_rows],
             }
@@ -127,14 +129,14 @@ class ProviderTests(unittest.TestCase):
         self.assertNotIn(KEY, repr(self.client))
 
     def test_same_context_for_each_page_and_metric_of_an_operation(self):
-        active, pages = [A, "a" * 64, 3], []
+        active, pages = ["a" * 64, 3, "2025-01", "2026-10"], []
 
         def handle(request):
             if request.url.path.endswith("/operational_read_context"):
-                return httpx.Response(200, json=[dict(zip(("version_id", "manifest_hash", "generation"), active))])
+                return httpx.Response(200, json=[dict(zip(("source_hash", "generation", "first_period", "last_period"), active))])
             pages.append(request.url.params)
             if len(pages) == 1:
-                active[:] = [B, "b" * 64, 4]
+                active[:] = ["b" * 64, 4, "2025-01", "2026-10"]
                 return httpx.Response(200, json=[{"id": i} for i in range(500)])
             return httpx.Response(200, json=[])
 
@@ -143,8 +145,9 @@ class ProviderTests(unittest.TestCase):
         operation.observation_rows({"metric_code": "eq.SALES"})
         operation.observation_rows({"metric_code": "in.(ORDER,DELIVERY)"})
         unbound.bind(jwt()).observation_rows({}, mode="AUDIT")
-        self.assertEqual([(q["p_version_id"], q["p_generation"], q["p_manifest_hash"]) for q in pages],
-                         [(A, "3", "a" * 64)] * 3 + [(B, "4", "b" * 64)])
+        self.assertEqual([(q["p_source_hash"], q["p_generation"]) for q in pages],
+                         [("a" * 64, "3")] * 3 + [("b" * 64, "4")])
+        self.assertTrue(all("p_version_id" not in q and "p_manifest_hash" not in q for q in pages))
         self.assertEqual([q["offset"] for q in pages], ["0", "500", "0", "0"])
         self.assertEqual(pages[-1]["p_mode"], "AUDIT")
         with self.assertRaisesRegex(PreviewError, "DATA_READ_FAILED"):
@@ -194,6 +197,25 @@ class ProviderTests(unittest.TestCase):
                 return httpx.Response(200, json={"id": USER} if request.url.path.endswith("/user") else [{"id": USER, **profile}])
             with self.assertRaisesRegex(PreviewError, "SCOPE_FORBIDDEN"):
                 SupabaseReadClient(URL, KEY, jwt(), transport=httpx.MockTransport(handle)).identity()
+
+
+class OfficialPreviewIsolationTests(unittest.TestCase):
+    def test_previous_input_jobs_are_not_consultable_under_current_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = LocalPersistenceProvider(Path(tmp) / "state.sqlite")
+            runner = OperationalMultiChainForecastRunner(storage)
+            self.addCleanup(runner.close)
+            principal = Principal(USER, "reader", ROLE_PERMISSIONS["reader"], "session", frozenset({A}))
+            context = {"source_hash": "a" * 64, "generation": 1, "first_period": "2025-01", "last_period": "2026-10"}
+            storage.put("forecast_jobs", "old", {"job_id": "old", "kind": "OPERATIONAL_PREVIEW",
+                "status": "READY_PREVIEW", "mode": "RETROSPECTIVE_TRAINING", "chain_ids": [A],
+                "creator_id": USER, "created_at": 1, "product_id": None, "scopes": []})
+            with self.assertRaisesRegex(PreviewError, "PREVIEW_NOT_FOUND"):
+                runner.get_job("old", principal, source_context=context)
+            with self.assertRaisesRegex(PreviewError, "PREVIEW_NOT_FOUND"):
+                runner.latest(principal, A, source_context=context)
+            self.assertEqual(runner.provisional_forecasts(principal, source_context=context), {"rows": [], "next_offset": None})
+            self.assertIsNotNone(storage.get("forecast_jobs", "old"))
 
 
 class TemporalPreviewTests(unittest.TestCase):
@@ -687,11 +709,13 @@ class JobTests(unittest.TestCase):
         digest = snapshot_hash(sales)
         preview = {"status": "PREVIEW", "chain_id": A, "objective": "Venta", "issue_period": "2026-07",
             "mode": "RETROSPECTIVE_TRAINING", "dataset_hash": digest,
+            "source_context": data.bind(jwt()).source_context(),
             "products": [], "eligibility": {"visible_products": 0, "stat_eligible": 0, "ml_eligible": 0},
             "statistical": {}, "ml": {}, "selection": {}}
         self.storage.put("forecast_previews", "fixture-preview", preview)
         self.storage.put("forecast_jobs", "OPJ-fixture", {"job_id": "OPJ-fixture", "kind": "OPERATIONAL_PREVIEW",
             "status": "READY_PREVIEW", "creator_id": USER, "chain_ids": [A], "product_id": None,
+            "source_context": preview["source_context"],
             "mode": "RETROSPECTIVE_TRAINING", "created_at": time.time(),
             "scopes": [{"chain_id": A, "preview_id": "fixture-preview", "status": "READY_PREVIEW"}]})
         app = create_app(settings=config, persistence=self.storage, provider=data,

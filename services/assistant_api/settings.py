@@ -199,6 +199,8 @@ class Settings:
                 raise ValueError("runtime_path_must_be_absolute")
         if self.max_forecast_runs < 1 or self.max_historical_runs < 1:
             raise ValueError("invalid_concurrency_limit")
+        if self.app_env == "production" and not self.operational_preview_enabled:
+            raise ValueError("official_source_configuration_required")
         return self
 
     @classmethod

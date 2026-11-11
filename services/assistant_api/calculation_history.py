@@ -123,6 +123,7 @@ def snapshot_from_preview(preview: dict[str, Any], *, product_id: str, preview_i
         "issue_period": issue + "-01", "cutoff_at": preview["cutoff"],
         "preview_id": preview_id, "data_snapshot_hash": preview["dataset_hash"],
         "input_observation_ids": sorted(input_observation_ids or []),
+        "source_context": preview.get("source_context"),
         "product_snapshot": {key: product.get(key) for key in ("product_code", "description", "category_id", "forecast_status")},
         "candidates": {family: metric_by_family.get(family) for family in CANDIDATES},
         "suggested_reference": selected, "research_snapshot": research_snapshot,

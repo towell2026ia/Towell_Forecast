@@ -1,25 +1,35 @@
 import { addReportMonth, buildForecastMatrix, matrixTotal, type ForecastMatrixRow, type ReportChoice, type ReportSeries, type ReportSnapshot } from "./forecast-reporting";
-import type { Filters, HistoricalRow } from "./supabase/types";
+import type { Filters, HistoricalRow, OperationalInventory } from "./supabase/types";
 import { modelKey } from "./commercial-filters";
 
 export const monthNames = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
 export const dashboardSeries = {
   previous2: { label: "Venta año −2", color: "#a8b7ca" }, previous1: { label: "Venta año −1", color: "#5284bd" },
   actual: { label: "Venta real", color: "#132e46" }, order: { label: "Pedido", color: "#a36b10" }, delivery: { label: "Enviado", color: "#28836e" },
+  inventory: { label: "Inventario reportado", color: "#8a5a44" }, towellHistory: { label: "Fcst Towell histórico", color: "#6d7598" },
   STATISTICAL: { label: "Forecast Estadístico", color: "#d8891c" }, ML: { label: "Forecast ML", color: "#087fa0" }, ENSEMBLE: { label: "Forecast Ensemble", color: "#b34f78" },
   COLD_START: { label: "Cold Start provisional", color: "#867246" }, TOWELL: { label: "Forecast Towell adoptado", color: "#23834d" },
   customer: { label: "Forecast Cliente", color: "#8263a3" },
 };
 export type DashboardSeries = keyof typeof dashboardSeries;
-type Quantity = { value: number | null; covered: number; eligible: number };
+type Quantity = { value: number | null; exact?: string; covered: number; eligible: number };
 export type DashboardPoint = { month: string; period: string; horizon: number | null; values: Record<DashboardSeries, number | null>; coverage: Record<DashboardSeries, Quantity> };
 const inRange = (p: string, range: Filters["periodRange"]) => (!range[0] || p >= range[0]) && (!range[1] || p <= range[1]);
 function quantity(values: (number | null)[], eligible: number): Quantity {
   const found = values.filter((v): v is number => v !== null);
   return { value: found.length ? found.reduce((sum, n) => sum + n, 0) : null, covered: found.length, eligible };
 }
+function exactQuantity(values: (string | null)[], eligible: number): Quantity {
+  const parts = values.filter((value): value is string => value !== null).map(value => value.split("."));
+  if (!parts.length) return { value: null, covered: 0, eligible };
+  const scale = Math.max(...parts.map(([, decimals]) => decimals?.length ?? 0));
+  const total = parts.reduce((sum, [integer, decimals = ""]) => sum + BigInt(integer + decimals.padEnd(scale, "0")), BigInt(0));
+  const digits = total.toString().padStart(scale + 1, "0");
+  const exact = scale ? `${digits.slice(0, -scale)}.${digits.slice(-scale)}` : digits;
+  return { value: Number(exact), exact, covered: parts.length, eligible };
+}
 export const shortPeriod = (period: string) => `${monthNames[Number(period.slice(5, 7)) - 1]}-${period.slice(2, 4)}`;
-export function periodsDashboard(snapshot: ReportSnapshot, history: HistoricalRow[], choice: ReportChoice, range: Filters["periodRange"]) {
+export function periodsDashboard(snapshot: ReportSnapshot, history: HistoricalRow[], choice: ReportChoice, range: Filters["periodRange"], inventory: OperationalInventory[] = []) {
   const matrix = buildForecastMatrix(snapshot, choice, range);
   const allowed = new Map(matrix.rows.map(r => [r.product.id, r.product.chain_id]));
   const rows = history.filter(r => allowed.get(r.product_id) === r.chain_id);
@@ -29,22 +39,35 @@ export function periodsDashboard(snapshot: ReportSnapshot, history: HistoricalRo
     if (seen.has(key)) throw new Error("duplicate_dashboard_month");
     seen.add(key);
   }
-  const cutoff = matrix.issue ?? rows.filter(r => r.SALES !== null || r.ORDER !== null || r.DELIVERY !== null).map(r => r.period.slice(0, 7)).sort().at(-1) ?? null;
+  const stock = inventory.filter(row => allowed.get(row.product_id) === row.chain_id);
+  const stockKeys = new Set<string>();
+  for (const row of stock) {
+    const key = `${row.chain_id}/${row.product_id}/${row.period.slice(0, 7)}`;
+    if (stockKeys.has(key) || !/^\d+(?:\.\d+)?$/.test(row.quantity_text)) throw new Error("duplicate_or_invalid_inventory");
+    stockKeys.add(key);
+  }
+  const cutoff = matrix.issue ?? snapshot.sourceContext?.last_period ?? rows.filter(r => r.SALES !== null || r.ORDER !== null || r.DELIVERY !== null).map(r => r.period.slice(0, 7)).sort().at(-1) ?? null;
   const eligible = allowed.size;
   const points: DashboardPoint[] = cutoff ? Array.from({ length: 12 }, (_, i) => {
     const period = addReportMonth(cutoff, i - 8);
     const metrics = {} as Record<DashboardSeries, Quantity>;
     for (const [key, offset, field] of [["previous2", -24, "SALES"], ["previous1", -12, "SALES"], ["actual", 0, "SALES"], ["order", 0, "ORDER"], ["delivery", 0, "DELIVERY"]] as const) {
       const target = addReportMonth(period, offset);
-      metrics[key] = !inRange(period, range) || offset === 0 && i >= 9 ? { value: null, covered: 0, eligible } : quantity(rows.filter(r => r.period.slice(0, 7) === target).map(r => r[field]), eligible);
+      const members = rows.filter(row => row.period.slice(0, 7) === target);
+      metrics[key] = !inRange(period, range) || offset === 0 && i >= 9 ? { value: null, covered: 0, eligible }
+        : exactQuantity(members.map(row => row.exact?.[field] ?? (row[field] === null ? null : String(row[field]))), eligible);
     }
+    metrics.inventory = inRange(period, range) ? exactQuantity(stock.filter(row => row.period.slice(0, 7) === period).map(row => row.quantity_text), eligible) : { value: null, covered: 0, eligible };
+    metrics.towellHistory = inRange(period, range) ? exactQuantity(rows.filter(row => row.period.slice(0, 7) === period).map(row => row.exact?.FCST_TOWELL_HISTORY ?? null), eligible) : { value: null, covered: 0, eligible };
     for (const series of ["STATISTICAL", "ML", "ENSEMBLE", "COLD_START", "TOWELL"] as ReportSeries[]) {
       metrics[series] = i >= 9 && inRange(period, range) ? matrixTotal(matrix.rows, period, series) : { value: null, covered: 0, eligible };
     }
     // Latest validated version known at the selected cut; never sum versions.
     const customer = matrix.rows.map(r => snapshot.customers.filter(c => c.chain_id === r.product.chain_id && c.product_id === r.product.id && c.target_period.slice(0, 7) === period && c.issue_period.slice(0, 7) <= cutoff)
       .sort((a, b) => a.issue_period.localeCompare(b.issue_period) || a.version_no - b.version_no).at(-1)?.value ?? null);
-    metrics.customer = i >= 9 && inRange(period, range) ? quantity(customer, eligible) : { value: null, covered: 0, eligible };
+    metrics.customer = snapshot.sourceContext
+      ? inRange(period, range) ? exactQuantity(rows.filter(row => row.period.slice(0, 7) === period).map(row => row.exact?.FCST_CLIENTE_HISTORY ?? null), eligible) : { value: null, covered: 0, eligible }
+      : i >= 9 && inRange(period, range) ? quantity(customer, eligible) : { value: null, covered: 0, eligible };
     return { month: shortPeriod(period), period, horizon: i >= 9 ? i - 8 : null, coverage: metrics, values: Object.fromEntries(Object.entries(metrics).map(([k, q]) => [k, q.value])) as DashboardPoint["values"] };
   }) : [];
   const historicalPeriods = new Set(points.slice(0, 9).filter(p => inRange(p.period, range)).map(p => p.period));

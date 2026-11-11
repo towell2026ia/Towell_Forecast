@@ -28,7 +28,7 @@ describe("PF compact published period read", () => {
   it("PF01/PF02/PF03 uses a compact period query after the pin, no HEAD/count/bounds", async () => {
     const c = client(rows); await new SupabaseForecastReadRepository(c.sdk, "fixture").getPeriods(null);
     expect(c.requests).toHaveLength(1);
-    expect(c.requests[0]).toEqual({ table: "operational_read_periods", selection: ["period"], parameters: { p_version_id: operationalContext.version_id, p_manifest_hash: operationalContext.manifest_hash, p_generation: 2, p_chain_id: null }, orders: [["period", { ascending: true }]] });
+    expect(c.requests[0]).toEqual({ table: "operational_read_periods", selection: ["period"], parameters: { p_source_hash: operationalContext.source_hash, p_generation: 2, p_chain_id: null }, orders: [["period", { ascending: true }]] });
   });
   it("PF04/PF06/PF07/PF08 unions visible scopes, deduplicates, sorts and never fills February", async () => {
     const c = client(rows);
@@ -42,7 +42,7 @@ describe("PF compact published period read", () => {
   it("no visible facts returns an empty catalog, not inferred dates", async () => {
     expect(await new SupabaseForecastReadRepository(client([]).sdk, "fixture").getPeriods()).toEqual([]);
   });
-  it("retries a failed all-scope period read by authorized scope without inventing months", async () => {
+  it("fails a rejected current-source period read without a second route", async () => {
     const requests: (string | null)[] = [];
     const sdk = { rpc: vi.fn((name: string, parameters?: { p_chain_id: string | null }) => {
       const chain = parameters?.p_chain_id ?? null;
@@ -63,9 +63,10 @@ describe("PF compact published period read", () => {
       { id: "a", code: "A", name: "A", status: "ACTIVE", has_history: true, parentId: null, scopeType: null },
       { id: "b", code: "B", name: "B", status: "ACTIVE", has_history: true, parentId: null, scopeType: null },
     ]);
-    expect(await repo.getPeriods()).toEqual(["2026-01", "2026-03"]);
-    expect(requests).toEqual([null, "a", "b"]);
-    expect(repo.getReadDiagnostic("getPeriods")?.code).toBe("OK");
+    await expect(repo.getPeriods()).rejects.toBeInstanceOf(PortalReadError);
+    expect(requests).toEqual([null]);
+    expect(repo.getVisibleChains).not.toHaveBeenCalled();
+    expect(repo.getReadDiagnostic("getPeriods")?.code).toBe("57014");
   });
   it("a missing view/permission fails with only the new safe diagnostic", async () => {
     const log = vi.spyOn(console, "info").mockImplementation(() => {}), report = vi.fn();

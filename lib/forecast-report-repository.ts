@@ -2,7 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Filters, ForecastReadRepository, OperationalInventory, OperationalReadContext, Product } from "./supabase/types";
 import { emptyFilters } from "./supabase/types";
 import type { CustomerForecast, DatabasePage, DatabaseSection, ReportCalculation, ReportDecision, ReportHorizon, ReportLive, ReportSnapshot } from "./forecast-reporting";
-import { addReportMonth, amount } from "./forecast-reporting";
+import { addReportMonth, amount, matchesOfficialSource } from "./forecast-reporting";
 import { attachCommercial, filteredProducts, hasCommercialFilters } from "./commercial-filters";
 import { actualMetrics, combineObservations, observationFields, observationScope, operationalArguments } from "./forecast-data";
 
@@ -13,19 +13,19 @@ const liveFields = "id,calculation_id,chain_id,product_id,horizon,target_period,
 export class SupabaseReportReader {
   constructor(private client: SupabaseClient, private repository: ForecastReadRepository, private signal: AbortSignal) {}
   private ensureOpen() { if (this.signal.aborted) throw new Error("session_disposed"); }
-  private observations(context: OperationalReadContext, fields: string, mode: "OPERATIONAL" | "AUDIT", includeForecasts: boolean, filters: Filters, productIds?: string[]) {
-    const query = this.client.rpc("operational_read_observations", { ...operationalArguments(context), ...observationScope(filters, productIds), p_mode: mode, p_metric_codes: includeForecasts ? undefined : actualMetrics }).select(fields);
+  private observations(context: OperationalReadContext, fields: string, includeForecasts: boolean, filters: Filters, productIds?: string[]) {
+    const query = this.client.rpc("operational_read_observations", { ...operationalArguments(context), ...observationScope(filters, productIds), p_metric_codes: includeForecasts ? undefined : actualMetrics }).select(fields);
     return includeForecasts ? query : query.in("metric_code", actualMetrics);
   }
-  private async read<T>(table: string, fields: string, filters: Filters, products?: Product[], pin?: { context: OperationalReadContext; mode: "OPERATIONAL" | "AUDIT"; includeForecasts: boolean }) {
+  private async read<T>(table: string, fields: string, filters: Filters, products?: Product[], pin?: { context: OperationalReadContext; includeForecasts: boolean }) {
     this.ensureOpen();
     const output: T[] = [];
     if (products && !products.length) return output;
     const chunks = products ? Array.from({ length: Math.ceil(products.length / 80) }, (_, i) => products.slice(i * 80, i * 80 + 80).map(p => p.id)) : [null];
     for (const ids of chunks) {
       for (let offset = 0; offset < 100000; offset += 500) {
-        let query = (pin ? this.observations(pin.context, fields, pin.mode, pin.includeForecasts, filters, ids ?? undefined) : this.client.from(table).select(fields))
-          .order(pin?.mode === "OPERATIONAL" ? "observation_id" : "id").range(offset, offset + 499);
+        let query = (pin ? this.observations(pin.context, fields, pin.includeForecasts, filters, ids ?? undefined) : this.client.from(table).select(fields))
+          .order(pin ? "observation_id" : "id").range(offset, offset + 499);
         if (filters.chainId) query = query.eq("chain_id", filters.chainId);
         if (ids) query = query.in("product_id", ids);
         if (pin) {
@@ -51,10 +51,19 @@ export class SupabaseReportReader {
     const capabilities = this.repository.previews?.vintageCapabilities ? await this.repository.previews.vintageCapabilities() : { vintage_persistence: false, official_publication: false, champion_publication: false };
     let calculations: ReportCalculation[] = [], horizons: ReportHorizon[] = [], decisions: ReportDecision[] = [], live: ReportLive[] = [];
     if (capabilities.forecast_calculation_history) {
-      calculations = await this.read("forecast_calculations", calculationFields, filters, products);
-      horizons = await this.read("forecast_calculation_horizons", horizonFields, filters, products);
-      decisions = await this.read("forecast_selection_events", decisionFields, filters, products);
-      live = await this.read("forecast_live_evaluations", liveFields, filters, products);
+      const stored = await this.read<ReportCalculation>("forecast_calculations", calculationFields, filters, products);
+      calculations = stored.filter(row => matchesOfficialSource(row.input_snapshot?.source_context, context));
+      const currentIds = new Set(calculations.map(row => row.id));
+      if (currentIds.size) {
+        const [storedHorizons, storedDecisions, storedLive] = await Promise.all([
+          this.read<ReportHorizon>("forecast_calculation_horizons", horizonFields, filters, products),
+          this.read<ReportDecision>("forecast_selection_events", decisionFields, filters, products),
+          this.read<ReportLive>("forecast_live_evaluations", liveFields, filters, products),
+        ]);
+        horizons = storedHorizons.filter(row => currentIds.has(row.calculation_id));
+        decisions = storedDecisions.filter(row => currentIds.has(row.calculation_id));
+        live = storedLive.filter(row => currentIds.has(row.calculation_id));
+      }
       const calculationMap = new Map(calculations.map(c => [c.id, c]));
       for (const row of [...horizons, ...decisions, ...live]) {
         const calculation = calculationMap.get(row.calculation_id);
@@ -65,27 +74,19 @@ export class SupabaseReportReader {
         if (rows.length !== 12 || new Set(rows.map(h => h.horizon)).size !== 12 || rows.some(h => h.horizon < 1 || h.horizon > 12 || h.target_period.slice(0, 7) !== addReportMonth(c.issue_period, h.horizon) || amount(h.statistical_value) === null)) throw new Error("report_horizon_lineage");
       }
     }
-    const versions = await this.read<{ id: string; chain_id: string; issue_period: string; version_no: number; status: string }>("customer_forecast_versions", "id,chain_id,issue_period,version_no,status", filters);
-    const customerRows = await this.read<{ id: string; chain_id: string; product_id: string; forecast_version_id: string; target_period: string; value: number }>("customer_forecast_rows", "id,chain_id,product_id,forecast_version_id,target_period,value", filters, products);
-    const customerVersions = new Map(versions.filter(v => ["VALIDATED", "FROZEN"].includes(v.status)).map(v => [v.id, v]));
     const customers: CustomerForecast[] = [];
-    for (const row of customerRows) {
-      const version = customerVersions.get(row.forecast_version_id);
-      if (!version) continue;
-      if (row.chain_id !== version.chain_id || amount(row.value) === null) throw new Error("customer_report_lineage");
-      customers.push({ ...row, issue_period: version.issue_period, version_no: version.version_no });
-    }
-    const provisionals = this.repository.previews?.provisionalForecasts ? await this.repository.previews.provisionalForecasts(filters.chainId, filters.productId) : [];
+    const provisionals = this.repository.previews?.provisionalForecasts ? await this.repository.previews.provisionalForecasts(filters.chainId, filters.productId, context) : [];
     const allowed = new Map(products.map(p => [p.id, p.chain_id]));
     for (const row of [...calculations, ...horizons, ...decisions, ...live, ...customers]) {
       if (allowed.get(row.product_id) !== row.chain_id) throw new Error("report_scope_mismatch");
     }
-    return { products, chains, categories, calculations, horizons, decisions, live, customers, operationalVersion: context,
-      provisionals: provisionals.filter(p => allowed.get(p.product_id) === p.chain_id), capabilities };
+    if (this.repository.openOperationalRead && !matchesOfficialSource(await this.repository.openOperationalRead(), context)) throw new Error("official_source_changed");
+    return { products, chains, categories, calculations, horizons, decisions, live, customers, sourceContext: context,
+      provisionals: provisionals.filter(p => allowed.get(p.product_id) === p.chain_id && matchesOfficialSource(p.source_context, context)), capabilities };
   }
   async history(filters: Filters, context: OperationalReadContext, includeForecasts = false) {
     const products = await filteredProducts(this.repository, filters);
-    const observations = await this.read<Parameters<typeof combineObservations>[0][number]>("operational_read_observations", observationFields, filters, products, { context, mode: "OPERATIONAL", includeForecasts });
+    const observations = await this.read<Parameters<typeof combineObservations>[0][number]>("operational_read_observations", observationFields, filters, products, { context, includeForecasts });
     const catalog = new Map(products.map(p => [p.id, p]));
     if (observations.some(o => catalog.get(o.product_id)?.chain_id !== o.chain_id)) throw new Error("report_scope_mismatch");
     return combineObservations(observations, catalog, observations.length, true);
@@ -98,7 +99,7 @@ export class SupabaseReportReader {
     for (let start = 0; start < products.length; start += 80) {
       const ids = products.slice(start, start + 80).map(p => p.id);
       for (let offset = 0; ; offset += 500) {
-        let query = this.client.rpc("operational_read_inventory", operationalArguments(context))
+        let query = this.client.rpc("operational_read_inventory", { ...operationalArguments(context), ...observationScope(filters, ids) })
           .select("chain_id,product_id,period,format,upc,purchase_type,quantity_text")
           .in("product_id", ids).order("chain_id").order("product_id").order("period").range(offset, offset + 499);
         if (filters.periodRange[0]) query = query.gte("period", `${filters.periodRange[0]}-01`);
@@ -121,10 +122,8 @@ export class SupabaseReportReader {
     const historical = await this.repository.getPeriods(chainId, context);
     const caps = this.repository.previews?.vintageCapabilities ? await this.repository.previews.vintageCapabilities() : null;
     if (!caps?.forecast_calculation_history) return historical;
-    const products = await this.repository.getProducts(chainId);
-    const horizons = await this.read<ReportHorizon>("forecast_calculation_horizons", "id,chain_id,product_id,target_period", { ...emptyFilters, chainId }, products);
-    const provisionals = await this.repository.previews?.provisionalForecasts?.(chainId, null) ?? [];
-    return [...new Set([...historical, ...horizons.map(h => h.target_period.slice(0, 7)), ...provisionals.flatMap(p => p.horizons.map(h => h.target_period.slice(0, 7)))])].sort();
+    const snapshot = await this.snapshot({ ...emptyFilters, chainId }, context);
+    return [...new Set([...historical, ...snapshot.horizons.map(h => h.target_period.slice(0, 7)), ...snapshot.provisionals.flatMap(p => p.horizons.map(h => h.target_period.slice(0, 7)))])].sort();
   }
   async databasePage(section: DatabaseSection, filters: Filters, page: number, size: 50 | 100 | 250, context: OperationalReadContext): Promise<DatabasePage> {
     if (!Number.isInteger(page) || page < 0 || ![50, 100, 250].includes(size)) throw new Error("invalid_report_page");
@@ -149,16 +148,14 @@ export class SupabaseReportReader {
       records = snapshot.decisions.map(e => ({ id: e.id, cells: [chain.get(e.chain_id) ?? e.chain_id, product.get(e.product_id)?.description ?? e.product_id, calc.get(e.calculation_id)?.calculation_code ?? null, e.selected_candidate, e.selected_by, e.selected_at, e.decision_reason, e.id], detail: { comment: e.comment, selected_curve: e.selected_curve, calculation_id: e.calculation_id } }));
     } else if (section === "research") {
       headers = ["Cadena", "Proveedor", "Corte", "Estado", "Creado", "Snapshot ID"];
-      const research = filters.productId || filters.categoryId || filters.search ? [] : await this.read<{ id: string; chain_id: string; provider: string; cutoff_at: string; status: string; created_at: string; summary_json: Record<string, unknown> }>("research_snapshots", "id,chain_id,provider,cutoff_at,status,created_at,summary_json", filters);
-      records = research.map(r => ({ id: r.id, cells: [chain.get(r.chain_id) ?? r.chain_id, r.provider, r.cutoff_at, r.status, r.created_at, r.id], detail: r.summary_json }));
-      records.push(...snapshot.calculations.filter(c => c.research_snapshot).map(c => ({ id: c.id, cells: [chain.get(c.chain_id) ?? c.chain_id, "Snapshot del cálculo", c.issue_period, "Conservado", c.created_at, c.id], detail: c.research_snapshot! })));
+      records = snapshot.calculations.filter(c => c.research_snapshot).map(c => ({ id: c.id, cells: [chain.get(c.chain_id) ?? c.chain_id, "Snapshot del cálculo", c.issue_period, "Conservado", c.created_at, c.id], detail: c.research_snapshot! }));
     } else if (section === "performance") {
       headers = ["Tipo", "Cadena", "Producto", "Cálculo", "Periodo", "H", "Candidato", "Error absoluto", "ID"];
       records = snapshot.live.map(v => ({ id: v.id, cells: ["LIVE almacenado", chain.get(v.chain_id) ?? v.chain_id, product.get(v.product_id)?.description ?? v.product_id, calc.get(v.calculation_id)?.calculation_code ?? null, v.target_period.slice(0, 7), v.horizon, v.candidate, v.absolute_error, v.id], detail: { sale_observation_id: v.sale_observation_id, sale_version_no: v.sale_version_no, actual_sale: v.actual_sale, forecast_value: v.forecast_value, evaluated_at: v.evaluated_at } }));
       for (const c of snapshot.calculations) for (const [family, metric] of Object.entries(c.candidate_metrics)) if (metric) records.push({ id: `${c.id}/${family}`, cells: ["Validación retrospectiva", chain.get(c.chain_id) ?? c.chain_id, product.get(c.product_id)?.description ?? c.product_id, c.calculation_code, c.issue_period.slice(0, 7), null, family, null, c.id], detail: { wape_retrospective: metric.wape, bias_retrospective: metric.bias, observations: metric.observations, windows: metric.windows } });
       if (snapshot.capabilities.forecast_calculation_history) {
         const learning = await this.read<{ id: string; calculation_id: string; chain_id: string; product_id: string; target_period: string; horizon: number; metrics_json: Record<string, unknown>; signals_json: unknown[] }>("forecast_learning_events", "id,calculation_id,chain_id,product_id,target_period,horizon,metrics_json,signals_json", filters, snapshot.products);
-        records.push(...learning.map(v => ({ id: v.id, cells: ["Aprendizaje almacenado", chain.get(v.chain_id) ?? v.chain_id, product.get(v.product_id)?.description ?? v.product_id, calc.get(v.calculation_id)?.calculation_code ?? null, v.target_period.slice(0, 7), v.horizon, null, null, v.id], detail: { metrics: v.metrics_json, signals: v.signals_json } })));
+        records.push(...learning.filter(v => calc.has(v.calculation_id)).map(v => ({ id: v.id, cells: ["Aprendizaje almacenado", chain.get(v.chain_id) ?? v.chain_id, product.get(v.product_id)?.description ?? v.product_id, calc.get(v.calculation_id)?.calculation_code ?? null, v.target_period.slice(0, 7), v.horizon, null, null, v.id], detail: { metrics: v.metrics_json, signals: v.signals_json } })));
       }
     }
     if (section === "models" || section === "performance") records = records.filter(r => { const period = String(r.cells[section === "models" ? 2 : 4] ?? ""); return !period || (!filters.periodRange[0] || period >= filters.periodRange[0]) && (!filters.periodRange[1] || period <= filters.periodRange[1]); });
@@ -176,17 +173,16 @@ export class SupabaseReportReader {
     const headers = ["Periodo", "Cadena", "Producto", "Código", "Métrica", "Valor", "Versión", "Disponibilidad", "Observation ID"];
     if (!products.length) return { headers, rows: [], hasMore: false };
     const raw = section === "observations", id = raw ? "id" : "observation_id";
-    const mode = raw ? "AUDIT" : "OPERATIONAL";
     const fields = `${id},chain_id,product_id,period,metric_code,value_text,version_no,availability_source,available_at,source_batch_id,source_reference`;
     type AuditObservation = { id?: string; observation_id?: string; chain_id: string; product_id: string; period: string; metric_code: string; value_text: string; version_no: number; availability_source: string; available_at: string | null; source_batch_id: string; source_reference: string | null };
     if (hasCommercialFilters(filters)) {
-      const rows = await this.read<AuditObservation>("operational_read_observations", fields, filters, products, { context, mode, includeForecasts: true });
+      const rows = await this.read<AuditObservation>("operational_read_observations", fields, filters, products, { context, includeForecasts: true });
       rows.sort((a, b) => a.chain_id.localeCompare(b.chain_id) || a.product_id.localeCompare(b.product_id) || a.period.localeCompare(b.period) || a.metric_code.localeCompare(b.metric_code) || (a.id ?? a.observation_id ?? "").localeCompare(b.id ?? b.observation_id ?? ""));
       const catalog = new Map(products.map(p => [p.id, p])), scopes = new Map(chains.map(c => [c.id, c.name]));
       if (rows.some(r => catalog.get(r.product_id)?.chain_id !== r.chain_id)) throw new Error("report_scope_mismatch");
       return { headers, rows: rows.slice(page * size, (page + 1) * size).map(o => ({ id: (o.id ?? o.observation_id)!, cells: [o.period.slice(0, 7), scopes.get(o.chain_id) ?? o.chain_id, catalog.get(o.product_id)!.description, catalog.get(o.product_id)!.product_code, o.metric_code, o.value_text, o.version_no, o.availability_source, (o.id ?? o.observation_id)!], detail: { available_at: o.available_at, source_batch_id: o.source_batch_id, source_reference: o.source_reference ?? null } })), hasMore: rows.length > (page + 1) * size };
     }
-    let query = this.observations(context, fields, mode, true, filters)
+    let query = this.observations(context, fields, true, filters)
       .order("chain_id").order("product_id").order("period").order("metric_code").order(id).range(page * size, (page + 1) * size);
     if (filters.chainId) query = query.eq("chain_id", filters.chainId);
     if (filters.productId) query = query.eq("product_id", filters.productId);

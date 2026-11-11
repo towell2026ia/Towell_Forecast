@@ -10,6 +10,7 @@ import { addReportMonth, buildForecastMatrix, emptyReportChoice, type ReportSnap
 import { emptyFilters, type CommercialClassification, type Filters, type ForecastReadRepository, type HistoricalRow, type Product } from "../../lib/supabase/types";
 import { ForecastFiltersContext, GlobalFilters } from "../../app/forecast-towell-app";
 import { ForecastPeriodsView } from "../../app/forecast-periods-view";
+import { PeriodsComparisonChart } from "../../components/forecast/periods-comparison-chart";
 import { RailwayPreviewClient } from "../../lib/forecast-preview";
 import { SupabaseReportReader } from "../../lib/forecast-report-repository";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -66,9 +67,20 @@ describe("Model comparison keys and dependent multiselection", () => {
     await expect(filteredProducts({ getProducts: async () => [product] } as ForecastReadRepository, { ...emptyFilters, commercialModels: ["FENDI"] })).rejects.toThrow();
   });
   it("uses only GET for the authorized commercial response", async () => {
-    const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ products: [classification], persisted: false }), { status: 200 }));
-    const client = new RailwayPreviewClient({ auth: { getSession: async () => ({ data: { session: { access_token: "isolated-test-token" } } }) } } as unknown as SupabaseClient, "https://example.test");
+    const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ products: [classification], persisted: false, source_context: operationalContext }), { status: 200 }));
+    const client = new RailwayPreviewClient({ rpc: () => ({ abortSignal: async () => ({ data: [operationalContext], error: null }) }), auth: { getSession: async () => ({ data: { session: { access_token: "isolated-test-token" } } }) } } as unknown as SupabaseClient, "https://example.test");
     expect(await client.commercialCatalog()).toEqual([classification]); expect(fetcher).toHaveBeenCalledWith("https://example.test/api/forecast/commercial-catalog", expect.objectContaining({ method: "GET", cache: "no-store" })); client.dispose();
+  });
+  it("rejects commercial attributes from a different source or a change during its read", async () => {
+    for (const changedDuringRead of [false, true]) {
+      let read = 0;
+      const current = { ...operationalContext, source_hash: "b".repeat(64), generation: 3 };
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ products: [classification], persisted: false,
+        source_context: changedDuringRead ? operationalContext : current }), { status: 200 }));
+      const client = new RailwayPreviewClient({ rpc: () => ({ abortSignal: async () => ({ data: [changedDuringRead && read++ ? current : operationalContext], error: null }) }), auth: { getSession: async () => ({ data: { session: { access_token: "isolated-test-token" } } }) } } as unknown as SupabaseClient, "https://example.test");
+      await expect(client.commercialCatalog(operationalContext)).rejects.toThrow("DATA_READ_FAILED");
+      client.dispose();
+    }
   });
 });
 
@@ -95,7 +107,7 @@ describe("Rolling 9+3 and compatible frozen calculations", () => {
   it("preserves zero, missing months and partial model coverage without inventing totals", () => {
     const s = snapshot(); s.products.push({ ...product, id: "missing", commercial: { ...classification, product_id: "missing", model: "Fendi" } });
     const d = periodsDashboard(s, [history("2026-01", 0), history("2026-03", null)], emptyReportChoice, [null, null]);
-    expect(d.points[2].coverage.actual).toEqual({ value: 0, covered: 1, eligible: 2 }); expect(d.points[3].values.actual).toBeNull();
+    expect(d.points[2].coverage.actual).toEqual({ value: 0, exact: "0", covered: 1, eligible: 2 }); expect(d.points[3].values.actual).toBeNull();
     expect(d.points[9].coverage.ENSEMBLE).toEqual({ value: 9973.79, covered: 1, eligible: 2 });
     expect(d.coverage).toEqual([{ model: "FENDI", total: 2, calculated: 1, pending: 1, decided: 0, undecided: 2 }]);
   });
@@ -157,8 +169,35 @@ describe("Multimodel reads remain scoped in history, snapshots and Database", ()
 });
 
 describe("Commercial filters and compact Periodos UI", () => {
+  it("uses the official closing month, hides previous-source calculations and never accumulates inventory over time", () => {
+    const s = { ...snapshot(), sourceContext: operationalContext };
+    const historical = [history("2026-09", 10, { exact: { SALES: "10", FCST_TOWELL_HISTORY: "12", FCST_CLIENTE_HISTORY: "14" } }), history("2026-10", 20)];
+    const inventory = [
+      { chain_id: "c", product_id: "p", format: "BD", upc: "001234", period: "2026-09-01", purchase_type: "RS", quantity_text: "10.1234567890123456" },
+      { chain_id: "c", product_id: "p", format: "BD", upc: "001234", period: "2026-10-01", purchase_type: "RS", quantity_text: "0.000" },
+    ];
+    const d = periodsDashboard(s, historical, emptyReportChoice, [null, null], inventory);
+    expect(d.available).toBe(0);
+    expect(d.cutoff).toBe("2026-10");
+    expect(d.points[7].coverage.inventory).toEqual({ value: Number(inventory[0].quantity_text), exact: inventory[0].quantity_text, covered: 1, eligible: 1 });
+    expect(d.points[8].values.inventory).toBe(0);
+    expect(d.points[9].values.inventory).toBeNull();
+    expect(d.points[7].values.towellHistory).toBe(12);
+    expect(d.points[7].values.customer).toBe(14);
+    expect(() => periodsDashboard(s, historical, emptyReportChoice, [null, null], [inventory[0], inventory[0]])).toThrow("duplicate_or_invalid_inventory");
+    const sheet = operationalPeriodsSheets(s, d, historical, inventory).find(row => row.name === "Comparativa")!;
+    const column = sheet.headers.indexOf("Inventario reportado");
+    expect(sheet.rows[7][column]).toBe(inventory[0].quantity_text);
+    expect(sheet.rows[8][column]).toBe("0.000");
+    expect(sheet.rows[9][column]).toBeNull();
+    render(<PeriodsComparisonChart points={d.points} cutoff={d.cutoff}/>);
+    const table = screen.getByRole("table", { name: "Datos de la gráfica 9+3" });
+    expect(within(table).getByText(inventory[0].quantity_text)).toBeTruthy();
+    expect(screen.getByRole("checkbox", { name: "Inventario reportado" })).toBeTruthy();
+  });
   it("shares one pin across chart, historical series, inventory and downloadable workbook", async () => {
-    const s = { ...snapshot(), operationalVersion: operationalContext };
+    const s = { ...snapshot(), sourceContext: operationalContext };
+    s.calculations = s.calculations.map(row => ({ ...row, input_snapshot: { source_context: operationalContext } }));
     const exact = "10.1234567890123456";
     const historical = [history("2026-07", Number(exact), { exact: { SALES: exact, FCST_TOWELL_HISTORY: "0.000" } })];
     const inventory = [{ chain_id: "c", product_id: "p", format: "BD", upc: "001234", period: "2026-07-01", purchase_type: "RS", quantity_text: "0.000" }];
@@ -175,13 +214,16 @@ describe("Commercial filters and compact Periodos UI", () => {
     const dashboard = periodsDashboard(s, historical, emptyReportChoice, [null, null]);
     const sheets = operationalPeriodsSheets(s, dashboard, historical, inventory);
     const sheet = (name: string) => sheets.find(row => row.name === name)!;
-    expect(sheet("Trazabilidad").rows).toContainEqual(["Versión operativa", operationalContext.version_id]);
+    expect(sheet("Trazabilidad").rows).toContainEqual(["Fuente oficial SHA-256", operationalContext.source_hash]);
     expect(sheet("Trazabilidad").rows).toContainEqual(["Cobertura Fill Rate", "Parcial"]);
-    expect(sheet("Comparativa").rows[8]).toContain(dashboard.points[8].values.actual);
+    expect(sheet("Comparativa").rows[8]).toContain(dashboard.points[8].coverage.actual.exact);
     expect(sheet("Histórico comercial").rows[0][4]).toBe(exact);
     expect(sheet("Histórico comercial").rows[0].slice(-2)).toEqual(["0.000", null]);
     expect(sheet("Inventario").rows[0]).toContain("001234");
     expect(sheet("Inventario").rows[0]).toContain("0.000");
+    repository.openOperationalRead.mockResolvedValue({ ...operationalContext, generation: 3 });
+    await userEvent.click(screen.getByRole("button", { name: "Descargar XLSX de Períodos" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("La fuente oficial cambió");
   });
   it("updates one, multiple, none and all model selections without engine/decision writes", async () => {
     const s = snapshot(); s.products.push({ ...product, id: "missing", commercial: { ...classification, product_id: "missing", model: "FIORE" } });

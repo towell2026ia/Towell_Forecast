@@ -14,6 +14,7 @@ from services.forecast_engine.engine import ENGINE_VERSION, ForecastPolicy, fore
 
 from .auth import AuthFailure, EXECUTE, READ, authorize
 from .orchestrator import ForecastOrchestrator
+from .forecast_execution import execute_forecast
 from .persistence import content_hash
 from .rs_assistant_data import load_rs_scope
 from .supabase_access import PreviewError, uuid_value
@@ -31,6 +32,7 @@ class RSAssistantRequest(BaseModel):
     purchase_type: Literal["RS"]
     format: str = Field(min_length=1, max_length=60)
     model: str = Field(min_length=1, max_length=80)
+    presentation: str | None = Field(default=None, min_length=1, max_length=80)
     period: str = Field(pattern=r"^20\d{2}-(0[1-9]|1[0-2])$")
     message: str = Field(default="", max_length=2000)
     action: Literal["answer", "forecast", "research", "research_status"] = "answer"
@@ -87,17 +89,18 @@ class RSAssistantWorkflow:
             try:
                 forecast = self.storage.get("rs_assistant_forecasts", key)
                 if forecast is None:
-                    result = self.compute(usable, scope["period"], objective="Venta",
-                                          evidence_mode="RETROSPECTIVE_TRAINING")
+                    result, exclusions = execute_forecast(usable, scope["period"], compute=self.compute, objective="Venta",
+                                                         evidence_mode="RETROSPECTIVE_TRAINING")
                     if not result.get("chains"):
                         raise PreviewError("RS_FORECAST_SCOPE_UNAVAILABLE", 409)
                     forecast = summarize_forecast(result, scoped.get("eligible_variants", len(variants)))
+                    forecast["execution_exclusions"] = exclusions
                     self.storage.put("rs_assistant_forecasts", key, forecast)
             finally:
                 self.compute_slot.release()
         report = None
         research_scope = {key: scope[key] for key in (
-            "chain_id", "format", "model", "period", "version_id", "purchase_type", "public_product_type"
+            "chain_id", "format", "model", "period", "source_hash", "purchase_type", "public_product_type"
         ) if key in scope}
         context_requested = body.action == "answer" and PUBLIC_CONTEXT.search(fold(body.message))
         try:
@@ -137,7 +140,7 @@ def mount_rs_assistant(app, config, identity, client, limiter, workflow):
         if not limiter.allow("rs-assistant:" + principal.user_id, 20):
             raise PreviewError("RATE_001", 429)
         scoped = load_rs_scope(client.bind(token), principal, chain_id=chain, purchase_type=body.purchase_type,
-                               format=body.format, model=body.model, period=body.period)
+                               format=body.format, model=body.model, period=body.period, presentation=body.presentation)
         try:
             return workflow.answer(body, scoped, may_start_research=(
                 EXECUTE in principal.permissions and chain in principal.execute_chain_ids

@@ -34,6 +34,9 @@ class FakeSource:
     def bind(self, token):
         return self
 
+    def operational_context(self):
+        return {"source_hash": "a" * 64, "generation": 1, "first_period": "2025-01", "last_period": "2026-10"}
+
     def records(self, **kwargs):
         return self._records
 
@@ -73,7 +76,8 @@ class FakeWriter:
             data = payload["p"]
             self.saved["calculation"] = {"id": "00000000-0000-4000-8000-000000000100",
                 "chain_id": CHAIN, "product_id": PRODUCT, "issue_period": data["issue_period"],
-                "status": "READY_FOR_DECISION", "suggested_reference": data["suggested_reference"]}
+                "status": "READY_FOR_DECISION", "suggested_reference": data["suggested_reference"],
+                "input_snapshot": {"source_context": data["source_context"]}}
             self.saved["horizons"] = data["horizons"]
             return self.saved["calculation"]["id"]
         if name == "e4_save_capture":
@@ -117,6 +121,7 @@ class E4ApiTests(unittest.TestCase):
             "objective": "Venta", "value": 100, "source_id": "00000000-0000-4000-8000-000000000400",
             "version_no": 1, "availability_source": "UNKNOWN", "available_at": None}]
         self.preview = preview()
+        self.preview["source_context"] = {"source_hash": "a" * 64, "generation": 1}
         self.preview["dataset_hash"] = snapshot_hash(records)
         self.saved = {"horizons": []}
         self.source = FakeSource(records, self.saved)

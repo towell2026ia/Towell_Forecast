@@ -4,6 +4,7 @@ export type RsAssistantRequest = {
   purchase_type: "RS";
   format: string;
   model: string;
+  presentation?: string;
   period: string;
   message: string;
   action: RsAssistantAction;
@@ -12,7 +13,7 @@ export type RsAssistantRequest = {
 export type RsAssistantResponse = {
   message: string;
   uncertainty?: string;
-  scope?: { chain_id: string; chain: string; format: string; model: string; presentation?: string; period: string; archive_id?: string; version_id?: string; generation?: number };
+  scope?: { chain_id: string; chain: string; format: string; model: string; presentation?: string; period: string; source_hash: string; generation: number };
   metrics?: { by_month: RsMonth[]; inventory?: RsCoverage };
   quality?: { products_classified?: number; products_excluded_ambiguous?: number; temporal_certification?: boolean };
   forecast?: {
@@ -90,7 +91,9 @@ export function parseRsAssistantResponse(value: unknown, request: RsAssistantReq
   if (typeof result.message !== "string" || !result.message.trim() || result.scope?.chain_id !== request.chain_id || result.scope.period !== request.period
       || ![result.scope.chain, result.scope.format, result.scope.model].every(v => typeof v === "string" && v.trim())) throw new Error("RS_ASSISTANT_INVALID_RESPONSE");
   if (commercialKey(result.scope.model) !== commercialKey(request.model) || formatKey(result.scope.format) !== formatKey(request.format)
-      || result.scope.archive_id !== undefined && result.scope.archive_id !== "UNIF-20060057ee8e4dfdbcd9") throw new Error("RS_ASSISTANT_INVALID_RESPONSE");
+      || request.presentation && commercialKey(result.scope.presentation ?? "") !== commercialKey(request.presentation)
+      || !/^[0-9a-f]{64}$/.test(result.scope.source_hash) || !Number.isSafeInteger(result.scope.generation)
+      || result.scope.generation < 1) throw new Error("RS_ASSISTANT_INVALID_RESPONSE");
   const research = result.research;
   const startedAt = researchTimestamp(research?.started_at);
   let finishedAt = research?.finished_at === null ? null : researchTimestamp(research?.finished_at);

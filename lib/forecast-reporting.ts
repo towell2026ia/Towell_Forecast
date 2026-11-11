@@ -9,11 +9,16 @@ export type ReportCalculation = Omit<CalculationDetail, "horizons" | "selection_
 export type ReportHorizon = CalculationHorizon & { id: string; calculation_id: string; chain_id: string; product_id: string };
 export type ReportDecision = SelectionEvent & { chain_id: string; product_id: string; selected_by: string; system_suggestion: string | null };
 export type ReportLive = { id: string; calculation_id: string; chain_id: string; product_id: string; horizon: number; target_period: string; candidate: string; forecast_value: number; actual_sale: number; sale_observation_id: string; sale_version_no: number; absolute_error: number; signed_error: number; evaluated_at: string };
-export type ProvisionalForecast = { job_id: string; chain_id: string; product_id: string; issue_period: string; created_at: string; engine_version: string; model: string; confidence: string; horizons: { horizon: number; target_period: string; value: number }[] };
+export type ProvisionalForecast = { job_id: string; chain_id: string; product_id: string; issue_period: string; created_at: string; engine_version: string; model: string; confidence: string; source_context?: Pick<OperationalReadContext, "source_hash" | "generation">; horizons: { horizon: number; target_period: string; value: number }[] };
 export type CustomerForecast = { id: string; chain_id: string; product_id: string; forecast_version_id: string; issue_period: string; version_no: number; target_period: string; value: number };
-export type ReportSnapshot = { products: Product[]; chains: Chain[]; categories: Category[]; calculations: ReportCalculation[]; horizons: ReportHorizon[]; decisions: ReportDecision[]; live: ReportLive[]; provisionals: ProvisionalForecast[]; customers: CustomerForecast[]; capabilities: VintageCapabilities; operationalVersion?: OperationalReadContext };
+export type ReportSnapshot = { products: Product[]; chains: Chain[]; categories: Category[]; calculations: ReportCalculation[]; horizons: ReportHorizon[]; decisions: ReportDecision[]; live: ReportLive[]; provisionals: ProvisionalForecast[]; customers: CustomerForecast[]; capabilities: VintageCapabilities; sourceContext?: OperationalReadContext };
 export type ReportChoice = { version: string | null; issue: string | null; decision: "ALL" | "PENDING" | "ADOPTED"; calculationId?: string | null };
 export const emptyReportChoice: ReportChoice = { version: null, issue: null, decision: "ALL" };
+export function matchesOfficialSource(value: unknown, context: Pick<OperationalReadContext, "source_hash" | "generation">) {
+  if (!value || typeof value !== "object") return false;
+  const source = value as Partial<OperationalReadContext>;
+  return source.source_hash === context.source_hash && source.generation === context.generation;
+}
 export type ForecastMatrixRow = { product: Product; chain: string; category: string; calculation: ReportCalculation | null; provisional: ProvisionalForecast | null; adopted: ReportDecision | null; values: Record<string, Record<ReportSeries, number | null>> };
 export type DatabaseSection = "history" | "observations" | "catalog" | "calculations" | "models" | "decisions" | "research" | "performance";
 export type DatabasePage = { headers: string[]; rows: { id: string; cells: (string | number | null)[]; detail?: Record<string, unknown> }[]; hasMore: boolean };
@@ -54,6 +59,7 @@ export function leafScopeIds(chains: Chain[], selected?: Set<string>) {
 export function chooseCalculations(snapshot: ReportSnapshot, choice: ReportChoice) {
   const grouped = new Map<string, ReportCalculation>();
   for (const calculation of snapshot.calculations) {
+    if (snapshot.sourceContext && !matchesOfficialSource(calculation.input_snapshot?.source_context, snapshot.sourceContext)) continue;
     if (calculation.objective !== "Venta" || !["READY_FOR_DECISION", "DECIDED", "SUPERSEDED"].includes(calculation.status) ||
       choice.calculationId && calculation.id !== choice.calculationId || choice.version && calculation.calculation_code !== choice.version || choice.issue && calculation.issue_period.slice(0, 7) !== choice.issue) continue;
     const key = `${calculation.chain_id}/${calculation.product_id}`;
@@ -75,9 +81,10 @@ export function validDecision(snapshot: ReportSnapshot, calculation: ReportCalcu
   return event;
 }
 export function buildForecastMatrix(snapshot: ReportSnapshot, choice: ReportChoice, periodRange: [string | null, string | null]) {
+  const provisionals = snapshot.sourceContext ? snapshot.provisionals.filter(row => matchesOfficialSource(row.source_context, snapshot.sourceContext!)) : snapshot.provisionals;
   let selected = chooseCalculations(snapshot, choice);
   const anchor = [...selected.values()].sort((a, b) => a.issue_period.localeCompare(b.issue_period) || a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id)).at(-1);
-  const issue = anchor?.issue_period.slice(0, 7) ?? choice.issue ?? snapshot.provisionals.map(p => p.issue_period).sort().at(-1) ?? null;
+  const issue = anchor?.issue_period.slice(0, 7) ?? choice.issue ?? provisionals.map(p => p.issue_period).sort().at(-1) ?? null;
   // Product datasets and winners stay separate. Only compatible frozen curves
   // with the same objective, cut, engine and evidence mode may be consolidated.
   if (anchor) selected = chooseCalculations({ ...snapshot, calculations: snapshot.calculations.filter(c => c.objective === anchor.objective && c.issue_period.slice(0, 7) === issue && c.engine_version === anchor.engine_version && c.evidence_mode === anchor.evidence_mode) }, choice);
@@ -92,7 +99,7 @@ export function buildForecastMatrix(snapshot: ReportSnapshot, choice: ReportChoi
     const calculation = found?.issue_period.slice(0, 7) === issue ? found : null;
     const adopted = calculation ? validDecision(snapshot, calculation) : null;
     if (choice.decision === "ADOPTED" && !adopted || choice.decision === "PENDING" && adopted) continue;
-    const provisional = snapshot.provisionals.filter(p => p.chain_id === product.chain_id && p.product_id === product.id && p.issue_period === issue)
+    const provisional = provisionals.filter(p => p.chain_id === product.chain_id && p.product_id === product.id && p.issue_period === issue)
       .sort((a, b) => a.created_at.localeCompare(b.created_at)).at(-1) ?? null;
     const values: ForecastMatrixRow["values"] = {};
     for (const period of periods) {
@@ -108,7 +115,7 @@ export function matrixTotal(rows: ForecastMatrixRow[], period: string, series: R
   const values = rows.map(row => row.values[period]?.[series] ?? null).filter((v): v is number => v !== null);
   return { value: values.length ? values.reduce((sum, v) => sum + v, 0) : null, covered: values.length, eligible: rows.length };
 }
-export type CommercialRow = HistoricalRow & { calculation: ReportCalculation | null; customer: number | null; statistical: number | null; ml: number | null; ensemble: number | null; adopted: number | null; absoluteError: number | null; liveError: number | null; liveActual: number | null; wapeLive: number | null; fillRate: number | null; evidence: string };
+export type CommercialRow = HistoricalRow & { calculation: ReportCalculation | null; customer: number | null; towellHistory: number | null; statistical: number | null; ml: number | null; ensemble: number | null; adopted: number | null; absoluteError: number | null; liveError: number | null; liveActual: number | null; wapeLive: number | null; fillRate: number | null; evidence: string };
 export function commercialRows(history: HistoricalRow[], snapshot: ReportSnapshot, choice: ReportChoice, metric: Exclude<ReportSeries, "COLD_START"> = "TOWELL", now = new Date()): CommercialRow[] {
   return history.map(row => {
     const compatible = snapshot.calculations.filter(c => snapshot.horizons.some(h => h.calculation_id === c.id && h.target_period.slice(0, 7) === row.period.slice(0, 7)));
@@ -125,7 +132,7 @@ export function commercialRows(history: HistoricalRow[], snapshot: ReportSnapsho
       Date.parse(calculation.created_at) < Date.parse(row.period.slice(0, 7) + "-01T00:00:00Z") && Date.parse(calculation.created_at) < Date.parse(sale.availableAt) &&
       Date.parse(sale.availableAt) <= now.getTime() && Date.parse(addReportMonth(row.period, 1) + "-01T00:00:00Z") <= now.getTime()) : null;
     const absoluteError = forecast !== null && row.SALES !== null ? Math.abs(row.SALES - forecast) : null;
-    return { ...row, calculation: h ? calculation : null, customer: amount(customer?.value), statistical: values.STATISTICAL, ml: values.ML, ensemble: values.ENSEMBLE,
+    return { ...row, calculation: h ? calculation : null, customer: snapshot.sourceContext ? amount(row.exact?.FCST_CLIENTE_HISTORY) : amount(customer?.value), towellHistory: amount(row.exact?.FCST_TOWELL_HISTORY), statistical: values.STATISTICAL, ml: values.ML, ensemble: values.ENSEMBLE,
       adopted, absoluteError, liveError: live ? Math.abs(Number(live.actual_sale) - Number(live.forecast_value)) : null, liveActual: live ? Number(live.actual_sale) : null,
       wapeLive: live && Number(live.actual_sale) > 0 ? Math.abs(Number(live.actual_sale) - Number(live.forecast_value)) / Number(live.actual_sale) * 100 : null,
       fillRate: row.ORDER !== null && row.DELIVERY !== null && row.ORDER > 0 ? row.DELIVERY / row.ORDER * 100 : null,

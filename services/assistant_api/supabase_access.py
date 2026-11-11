@@ -25,6 +25,10 @@ def uuid_value(value: str) -> str:
         raise PreviewError("SCOPE_FORBIDDEN", 403) from None
 
 
+def matches_source(value, context):
+    return isinstance(value, dict) and all(value.get(field) == context[field] for field in ("source_hash", "generation"))
+
+
 class SupabaseReadClient:
     def __init__(self, url: str, key: str, token: str | None = None, *, timeout: int = 10,
                  transport: httpx.BaseTransport | None = None):
@@ -67,22 +71,26 @@ class SupabaseReadClient:
                 raise PreviewError("DATA_READ_FAILED", 503)
             row = rows[0]
             try:
-                version = str(uuid.UUID(row["version_id"]))
-                manifest = row["manifest_hash"]
+                source_hash = row["source_hash"]
                 generation = row["generation"]
-                if not isinstance(manifest, str) or not re.fullmatch("[0-9a-f]{64}", manifest) \
-                        or type(generation) is not int or generation < 0:
+                first, last = row["first_period"], row["last_period"]
+                if (not isinstance(source_hash, str) or not re.fullmatch("[0-9a-f]{64}", source_hash)
+                        or type(generation) is not int or generation < 1
+                        or any(not isinstance(period, str) or not re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", period)
+                               for period in (first, last)) or first > last):
                     raise ValueError()
             except (TypeError, ValueError, KeyError, AttributeError):
                 raise PreviewError("DATA_READ_FAILED", 503) from None
-            self._operational_context = {"version_id": version, "manifest_hash": manifest,
-                                         "generation": generation}
+            self._operational_context = {"source_hash": source_hash, "generation": generation,
+                                         "first_period": first, "last_period": last}
         return dict(self._operational_context)
 
     def observation_rows(self, params: dict[str, Any], *, mode: str = "OPERATIONAL",
                          available_through: str | None = None,
                          chain_id: str | None = None) -> list[dict[str, Any]]:
-        arguments = {**params, **{f"p_{k}": v for k, v in self.operational_context().items()}, "p_mode": mode}
+        context = self.operational_context()
+        arguments = {**params, "p_source_hash": context["source_hash"],
+                     "p_generation": context["generation"], "p_mode": mode}
         if chain_id is not None:
             arguments["p_chain_id"] = uuid_value(chain_id)
         if available_through is not None:
@@ -90,8 +98,19 @@ class SupabaseReadClient:
         return self._pages("/rest/v1/rpc/operational_read_observations", arguments)
 
     def inventory_rows(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+        context = self.operational_context()
         return self._pages("/rest/v1/rpc/operational_read_inventory",
-                           {**params, **{f"p_{k}": v for k, v in self.operational_context().items()}})
+                           {**params, "p_source_hash": context["source_hash"], "p_generation": context["generation"]})
+
+    def catalog_rows(self, *, chain_id=None, as_of=None):
+        context = self.operational_context()
+        params = {"p_source_hash": context["source_hash"], "p_generation": context["generation"],
+                  "order": "chain_id.asc,product_id.asc"}
+        if chain_id:
+            params["p_chain_id"] = uuid_value(chain_id)
+        if as_of:
+            params["p_as_of"] = as_of + "-01"
+        return self._pages("/rest/v1/rpc/operational_read_catalog", params)
 
     def _pages(self, path: str, params: dict[str, Any]) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []

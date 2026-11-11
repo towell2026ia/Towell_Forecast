@@ -32,7 +32,7 @@ import { attachCommercial, changeCommercial, commercialOptions, hasCommercialFil
 import { ModelMultiselect } from "@/components/forecast/model-multiselect";
 import { PeriodsComparisonChart } from "@/components/forecast/periods-comparison-chart";
 import { periodsDashboard } from "@/lib/periods-dashboard";
-import { emptyReportChoice } from "@/lib/forecast-reporting";
+import { emptyReportChoice, matchesOfficialSource } from "@/lib/forecast-reporting";
 
 const modules = [
   ["inicio", "Inicio", Home], ["historico", "Histórico", History],
@@ -81,8 +81,8 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
   const [motorVisited, setMotorVisited] = useState(false);
   const [seriesVisibility, setSeriesVisibility] = useState<SeriesVisibility>({ ...defaultVisibility });
   const [filters, setFilters] = useState<Filters>({ ...emptyFilters });
-  // One lazy read context for this module/filter interaction. A new interaction
-  // acquires the then-current release, while paging and downloads keep this one.
+  // One source fingerprint per interaction. A source update invalidates its
+  // pending reads, so paging and exports cannot combine different inputs.
   const pinOperational = useMemo(() => {
     let pin: Promise<OperationalReadContext | undefined> | undefined;
     return () => pin ??= repository.openOperationalRead?.() ?? Promise.resolve(undefined);
@@ -93,13 +93,16 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
   useEffect(() => {
     let alive = true;
     const client = repository.previews;
-    if (client) void client.latest(filters.chainId, filters.productId).then(job => {
-      if (alive) setPreview(previous => previous?.key === previewKey && (previous.loading || previous.job) ? previous : { key: previewKey, result: ["READY_PREVIEW", "READY_PROVISIONAL"].includes(job?.status ?? "") ? job : null, job, error: "", loading: false });
+    if (client) void pinOperational().then(async source => ({ source, job: await client.latest(filters.chainId, filters.productId, source) })).then(({ source, job }) => {
+      if (alive) setPreview(previous => {
+        const compatible = !source || Boolean(previous?.result?.scopes.length && previous.result.scopes.every(scope => matchesOfficialSource(scope.source_context, source)));
+        return compatible && previous?.key === previewKey && (previous.loading || previous.job) ? previous : { key: previewKey, result: ["READY_PREVIEW", "READY_PROVISIONAL"].includes(job?.status ?? "") ? job : null, job, error: "", loading: false };
+      });
     }).catch(error => {
-      if (alive) setPreview(previous => previous?.key === previewKey && (previous.loading || previous.job) ? previous : { key: previewKey, result: null, job: null, error: error instanceof PreviewReadError ? error.code : "DATA_READ_FAILED", loading: false });
+      if (alive) setPreview({ key: previewKey, result: null, job: null, error: error instanceof PreviewReadError ? error.code : "DATA_READ_FAILED", loading: false });
     });
     return () => { alive = false; };
-  }, [repository, filters.chainId, filters.productId, previewKey]);
+  }, [repository, filters.chainId, filters.productId, previewKey, pinOperational]);
   const state = useMemo(() => ({ filters, setFilters, repository, profile, pinOperational, seriesVisibility, setSeriesVisibility, preview: previewView?.key === previewKey ? previewView : null, setPreview }), [filters, repository, profile, pinOperational, seriesVisibility, previewView, previewKey]);
   const chains = useRead(useCallback(async () => repository.getVisibleChains(await pinOperational()), [repository, pinOperational]));
   const subtitle = chains.data?.find(c => c.id === filters.chainId)?.name ?? (profile.global_role === "ADMIN" ? "Todas las cadenas" : "Todas las cadenas autorizadas");
@@ -196,7 +199,7 @@ export function Dashboard() {
   const chartScope = validScope ?? (scope?.provisional_cold_start ? scope : null);
   const cutoff = String(chartScope?.issue_period ?? "");
   const historical = useRead(useCallback(async () => filters.chainId ? repository.getForecastHistory?.(filters, await pin()) ?? [] : [], [repository, filters, pin]));
-  const customer = useRead(useCallback(() => filters.chainId && cutoff ? repository.getCustomerForecast?.(filters, cutoff) ?? Promise.resolve([]) : Promise.resolve([]), [repository, filters, cutoff]));
+  const customer = useRead(useCallback(async () => filters.chainId && cutoff ? repository.getCustomerForecast?.(filters, cutoff, await pin()) ?? [] : [], [repository, filters, cutoff, pin]));
   const gates = useRead(useCallback(() => filters.chainId && validScope && repository.previews?.qualityGates
     ? repository.previews.qualityGates(filters.chainId) : Promise.resolve(null),
     [repository, filters.chainId, validScope]));
@@ -223,8 +226,8 @@ function StoredScopeChart() {
   const report = useRead(useCallback(async () => {
     if (!repository.getReportSnapshot || !repository.getReportHistory) throw new Error("report_unavailable");
     const context = await pin();
-    const [snapshot, history] = await Promise.all([repository.getReportSnapshot(filters, context), repository.getReportHistory({ ...filters, periodRange: [null, null] }, context)]);
-    return periodsDashboard(snapshot, history, emptyReportChoice, filters.periodRange);
+    const [snapshot, history, inventory] = await Promise.all([repository.getReportSnapshot(filters, context), repository.getReportHistory({ ...filters, periodRange: [null, null] }, context), context ? repository.getReportInventory?.(filters, context) ?? Promise.resolve([]) : Promise.resolve([])]);
+    return periodsDashboard(snapshot, history, emptyReportChoice, filters.periodRange, inventory);
   }, [repository, filters, pin]));
   return <><ReadState loading={report.loading} error={report.error}/>{report.data && <><p className="text-xs text-slate-600">Forecast almacenado: {report.data.available}/{report.data.matrix.rows.length} productos · Con decisión: {report.data.adopted}{report.data.available > 0 && report.data.available < report.data.matrix.rows.length ? " · TOTAL PARCIAL" : ""}</p><PeriodsComparisonChart points={report.data.points} cutoff={report.data.cutoff}/></>}</>;
 }
@@ -236,11 +239,11 @@ function DashboardAllScopesChart({ scopes }: { scopes: import("@/lib/supabase/ty
   const chainId = selected?.chain.id ?? null;
   const chartFilters = useMemo<Filters>(() => ({ ...filters, chainId, productId: null }), [filters, chainId]);
   const history = useRead(useCallback(async () => chainId ? repository.getForecastHistory?.(chartFilters, await pin()) ?? [] : [], [repository, chainId, chartFilters, pin]));
-  const preview = useRead(useCallback(() => chainId ? repository.previews?.latest(chainId, null) ?? Promise.resolve(null) : Promise.resolve(null), [repository, chainId]));
+  const preview = useRead(useCallback(async () => chainId ? repository.previews?.latest(chainId, null, await pin()) ?? null : null, [repository, chainId, pin]));
   const scope = preview.data?.status === "READY_PREVIEW" ? preview.data.scopes.find(row => row.chain_id === chainId) ?? null : null;
   const validScope = currentRetrospectivePreview(preview.data ?? null, scope) ? scope : null;
   const cutoff = String(validScope?.issue_period ?? history.data?.at(-1)?.period ?? "");
-  const customer = useRead(useCallback(() => chainId && cutoff ? repository.getCustomerForecast?.(chartFilters, cutoff) ?? Promise.resolve([]) : Promise.resolve([]), [repository, chainId, chartFilters, cutoff]));
+  const customer = useRead(useCallback(async () => chainId && cutoff ? repository.getCustomerForecast?.(chartFilters, cutoff, await pin()) ?? [] : [], [repository, chainId, chartFilters, cutoff, pin]));
   if (!selected) return <p className="rounded-xl border bg-white p-5 text-sm text-slate-500">No hay un scope con histórico visible para graficar.</p>;
   const points = traderPoints(history.data ?? [], customer.data ?? [], scopeHorizons(validScope, chartFilters), cutoff, chartFilters);
   if (!repository.getForecastHistory) return <p className="rounded-xl border bg-white p-5 text-sm text-slate-500">La lectura histórica para la gráfica no está disponible.</p>;

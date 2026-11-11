@@ -1,12 +1,11 @@
 "use client";
 
 import { useCallback, useMemo, useState } from "react";
-import { addReportMonth, emptyReportChoice, matrixTotal, reportSeries, temporalLabel, type ForecastMatrixRow, type ReportSnapshot } from "@/lib/forecast-reporting";
+import { addReportMonth, emptyReportChoice, matchesOfficialSource, matrixTotal, reportSeries, temporalLabel, type ForecastMatrixRow, type ReportSnapshot } from "@/lib/forecast-reporting";
 import type { Filters, HistoricalRow, OperationalInventory } from "@/lib/supabase/types";
 import { detailMetrics, periodsDashboard, shortPeriod } from "@/lib/periods-dashboard";
 import { modelKey } from "@/lib/commercial-filters";
 import { PeriodsComparisonChart } from "@/components/forecast/periods-comparison-chart";
-import { PlanningPeriods } from "@/components/forecast/planning-periods";
 import { operationalPeriodsSheets } from "@/lib/operational-periods-xlsx";
 import { planningXlsx } from "@/lib/planning-xlsx";
 import { useForecastFilters, useOperationPin, useRead } from "./forecast-towell-app";
@@ -17,8 +16,7 @@ const exactNumber = (n: number | null) => n === null ? "Sin dato" : n.toLocaleSt
 const modelName = (r: ForecastMatrixRow) => r.product.commercial?.model ? modelKey(r.product.commercial.model) : "Sin identificar";
 
 export function ForecastPeriodsView() {
-  const [privatePilot, setPrivatePilot] = useState(false);
-  return <><button type="button" className="mb-4 text-sm underline" onClick={() => setPrivatePilot(v => !v)}>{privatePilot ? "Volver a cálculos almacenados" : "Abrir planeación privada"}</button>{privatePilot ? <PlanningPeriods/> : <StoredPeriods/>}</>;
+  return <StoredPeriods/>;
 }
 function StoredPeriods() {
   const { repository, filters } = useForecastFilters();
@@ -37,9 +35,9 @@ function StoredPeriods() {
 function Matrix({ snapshot, history, inventory, periods }: { snapshot: ReportSnapshot; history: HistoricalRow[]; inventory: OperationalInventory[]; periods: Filters["periodRange"] }) {
   const [choice, setChoice] = useState({ ...emptyReportChoice });
   const matrix = useMemo(() => {
-    try { return { data: periodsDashboard(snapshot, history, choice, periods), error: false }; }
+    try { return { data: periodsDashboard(snapshot, history, choice, periods, inventory), error: false }; }
     catch { return { data: null, error: true }; }
-  }, [snapshot, history, choice, periods]);
+  }, [snapshot, history, choice, periods, inventory]);
   const dashboard = matrix.data, data = dashboard?.matrix;
   const ready = data?.rows.filter(r => r.calculation) ?? [];
   const pending = data?.rows.filter(r => !r.calculation) ?? [];
@@ -48,7 +46,7 @@ function Matrix({ snapshot, history, inventory, periods }: { snapshot: ReportSna
     <ReportSelect label="Cálculo de comparación" value={choice.calculationId ?? "compatible"} onChange={id => setChoice({ ...choice, calculationId: id === "compatible" ? null : id, version: null, issue: null })} options={[{ value: "compatible", label: "Consolidado de cálculos compatibles" }, ...snapshot.calculations.map(c => ({ value: c.id, label: `${c.calculation_code} · ${snapshot.products.find(p => p.id === c.product_id)?.description ?? c.product_id} · Corte ${c.issue_period.slice(0, 7)} · ${c.id}` }))]}/>
     <ReportState loading={false} error={matrix.error}/>
     {dashboard && data && <>
-      {snapshot.operationalVersion && <OperationalDownload snapshot={snapshot} dashboard={dashboard} history={history} inventory={inventory}/>}
+      {snapshot.sourceContext && <OperationalDownload snapshot={snapshot} dashboard={dashboard} history={history} inventory={inventory}/>}
       <div aria-label="Alcance de Periodos" className="space-y-2"><p className="text-sm font-semibold text-slate-900">{[...new Set(data.rows.map(r => r.chain))].join(" · ") || "Sin productos coincidentes"}</p><p className="text-xs text-slate-600">{dashboard.coverage.length <= 5 ? dashboard.coverage.map(c => c.model).join(" + ") : `${dashboard.coverage.length} modelos`} · {data.rows.length} productos · Corte {dashboard.cutoff ?? "Sin dato"}{!data.issue ? " (histórico; sin cálculo)" : ""}</p><p className="text-xs text-slate-500">{data.excludedParentScopes} scopes padre superpuestos excluidos. Las curvas se consolidan por corte, objetivo, versión de motor y modo de evidencia compatibles.</p></div>
       <dl aria-label="Indicadores comerciales" className="grid grid-cols-2 gap-y-5 border-y border-slate-200 py-5 lg:grid-cols-6">{[["Venta real · 9 meses", reportNumber(dashboard.kpis.sales)], ["Pedido · 9 meses", reportNumber(dashboard.kpis.orders)], ["Enviado · 9 meses", reportNumber(dashboard.kpis.delivery)], ["Fill Rate", reportPercent(dashboard.kpis.fillRate)], ["Productos con cálculo / Total", `${dashboard.available}/${data.rows.length}`], ["Con decisión / Total", `${dashboard.adopted}/${data.rows.length}`]].map(([label, value]) => <div key={label} className="min-w-0 border-l border-slate-200 px-3 first:border-l-0"><dt className="text-xs text-slate-500">{label}</dt><dd className="mt-2 break-words text-xl font-semibold tabular-nums text-slate-950">{value}</dd></div>)}</dl>
       {ready.length > 0 && ready.length < data.rows.length && <p role="status" className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"><strong>TOTAL PARCIAL</strong> · Forecast de {ready.length}/{data.rows.length} productos del alcance. No representa el total completo de los modelos seleccionados.</p>}
@@ -64,23 +62,29 @@ function Matrix({ snapshot, history, inventory, periods }: { snapshot: ReportSna
   </>;
 }
 function OperationalDownload({ snapshot, dashboard, history, inventory }: { snapshot: ReportSnapshot; dashboard: ReturnType<typeof periodsDashboard>; history: HistoricalRow[]; inventory: OperationalInventory[] }) {
-  const [error, setError] = useState(false);
-  const context = snapshot.operationalVersion!;
+  const { repository } = useForecastFilters();
+  const [error, setError] = useState("");
+  const context = snapshot.sourceContext!;
   const scope = new Set(dashboard.matrix.rows.map(row => row.product.id));
   const selectedInventory = inventory.filter(row => scope.has(row.product_id));
-  function download() {
-    setError(false);
+  async function download() {
+    setError("");
     try {
+      const current = await repository.openOperationalRead?.();
+      if (!current || !matchesOfficialSource(current, context)) {
+        setError("La fuente oficial cambió. Actualiza la consulta antes de descargar.");
+        return;
+      }
       const bytes = planningXlsx(operationalPeriodsSheets(snapshot, dashboard, history, selectedInventory));
       const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
       const link = document.createElement("a");
       link.href = url;
-      link.download = `FORECAST_Towell_Periodos_${context.version_id}_g${context.generation}.xlsx`;
+      link.download = `FORECAST_Towell_Periodos_${context.source_hash.slice(0, 12)}_g${context.generation}.xlsx`;
       link.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch { setError(true); }
+    } catch { setError("No fue posible descargar el XLSX."); }
   }
-  return <div className="flex flex-wrap items-center gap-3 text-xs text-slate-600"><span className="break-all">Versión de datos {context.version_id} · Generación {context.generation}</span><span>Inventario: {selectedInventory.length ? `${selectedInventory.length} producto-meses con dato` : "Sin dato"}</span><button type="button" className="underline" onClick={download}>Descargar XLSX de Períodos</button>{error && <p role="alert">No fue posible descargar el XLSX.</p>}</div>;
+  return <div className="flex flex-wrap items-center gap-3 text-xs text-slate-600"><span title={context.source_hash}>Fuente oficial · {context.first_period} a {context.last_period} · Actualización {context.generation}</span><span>Inventario: {selectedInventory.length ? `${selectedInventory.length} producto-meses con dato` : "Sin dato"}</span><button type="button" className="underline" onClick={() => void download()}>Descargar XLSX de Períodos</button>{error && <p role="alert">{error}</p>}</div>;
 }
 function CompactMatrix({ rows, scope, periods, issue }: { rows: ForecastMatrixRow[]; scope: ForecastMatrixRow[]; periods: string[]; issue: string | null }) {
   const [id, setId] = useState(rows.length === 1 ? rows[0].product.id : "all");
@@ -95,5 +99,5 @@ function CompactMatrix({ rows, scope, periods, issue }: { rows: ForecastMatrixRo
 }
 function PendingProducts({ rows, snapshot }: { rows: ForecastMatrixRow[]; snapshot: ReportSnapshot }) {
   const [page, setPage] = useState(1), [size, setSize] = useState<50 | 100 | 250>(50);
-  return <details className="space-y-4 border-t border-slate-200 py-5"><summary className="cursor-pointer text-lg font-semibold">Productos pendientes de cálculo ({rows.length})</summary><p className="text-xs text-slate-500">Permanecen en el alcance. Cambiar filtros no ejecuta motores.</p><ReportTable label="Productos pendientes de cálculo" headers={["Producto", "Modelo", "Color", "Tamaño", "Estado", "Motivo"]} rows={rows.slice((page - 1) * size, page * size).map(r => ({ id: r.product.id, cells: [<div key="product">{r.product.description}<p className="mt-1 text-xs text-slate-500">{r.chain} · {r.product.product_code} · {r.product.id}</p></div>, modelName(r), r.product.commercial?.color ?? "Sin identificar", r.product.commercial?.size ?? (r.product.commercial?.not_applicable?.includes("size") ? "No aplica (documentado)" : "Sin identificar"), r.product.commercial?.status ?? "PENDING_CLASSIFICATION", snapshot.calculations.some(c => c.product_id === r.product.id && c.chain_id === r.product.chain_id) ? "Cálculo almacenado fuera del grupo compatible seleccionado" : "Sin cálculo almacenado en la lectura autorizada"] }))}/><ReportPaging page={page} previous={() => setPage(p => p - 1)} next={() => setPage(p => p + 1)} hasMore={rows.length > page * size} loading={false} size={size} setSize={v => { setSize(v); setPage(1); }}/></details>;
+  return <details className="space-y-4 border-t border-slate-200 py-5"><summary className="cursor-pointer text-lg font-semibold">Productos pendientes de cálculo ({rows.length})</summary><p className="text-xs text-slate-500">Permanecen en el alcance. Cambiar filtros no ejecuta motores.</p><ReportTable label="Productos pendientes de cálculo" headers={["Producto", "Modelo", "Color", "Tamaño", "Estado", "Motivo"]} rows={rows.slice((page - 1) * size, page * size).map(r => ({ id: r.product.id, cells: [<div key="product">{r.product.description}<p className="mt-1 text-xs text-slate-500">{r.chain} · {r.product.product_code} · {r.product.id}</p></div>, modelName(r), r.product.commercial?.color ?? "Sin identificar", r.product.commercial?.size ?? (r.product.commercial?.not_applicable?.includes("size") ? "No aplica (documentado)" : "Sin identificar"), r.product.commercial?.status ?? "PENDING_CLASSIFICATION", snapshot.calculations.some(c => c.product_id === r.product.id && c.chain_id === r.product.chain_id) ? "Cálculo almacenado fuera del grupo compatible seleccionado" : snapshot.sourceContext ? "Sin cálculo compatible con la fuente oficial" : "Sin cálculo almacenado en la lectura autorizada"] }))}/><ReportPaging page={page} previous={() => setPage(p => p - 1)} next={() => setPage(p => p + 1)} hasMore={rows.length > page * size} loading={false} size={size} setSize={v => { setSize(v); setPage(1); }}/></details>;
 }

@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .auth import ADMIN, EXECUTE, AuthFailure, authorize
 from .calculation_history import snapshot_from_preview, live_metrics, validate_selection
 from .operational_preview import snapshot_hash
-from .supabase_access import PreviewError, uuid_value
+from .supabase_access import PreviewError, matches_source, uuid_value
 
 
 class CalculationRequest(BaseModel):
@@ -82,7 +82,7 @@ def mount_e4_routes(app, config, identity, data, runner, writer):
 
     def calculation(client, calculation_id):
         rows = client.rows("forecast_calculations", {"select": "*", "id": f"eq.{uuid_value(calculation_id)}"})
-        if len(rows) != 1:
+        if len(rows) != 1 or not matches_source((rows[0].get("input_snapshot") or {}).get("source_context"), client.operational_context()):
             raise PreviewError("CALCULATION_NOT_FOUND", 404)
         return rows[0]
 
@@ -123,6 +123,8 @@ def mount_e4_routes(app, config, identity, data, runner, writer):
         preview = runner.persistence.get("forecast_previews", body.preview_id)
         if not preview or preview.get("chain_id") != chain or preview.get("objective") != "Venta":
             raise PreviewError("PREVIEW_NOT_READY", 409)
+        if not matches_source(preview.get("source_context"), source.client.operational_context()):
+            raise PreviewError("PREVIEW_NOT_READY", 409)
         rows = source.records(chain_id=chain, issue_period=preview["issue_period"],
             mode=preview.get("mode") or preview.get("evidence_mode") or "RETROSPECTIVE_TRAINING")
         if snapshot_hash(rows) != preview.get("dataset_hash"):
@@ -143,9 +145,11 @@ def mount_e4_routes(app, config, identity, data, runner, writer):
         enabled("forecast_calculation_history_enabled")
         principal, source = actor(request, authorization, None)
         chain, product = allowed(principal, chain_id), uuid_value(product_id)
-        return {"calculations": source.client.rows("forecast_calculations", {
-            "select": "id,chain_id,product_id,calculation_no,calculation_code,issue_period,status,created_at,created_by,suggested_reference,recalculation_reason",
-            "chain_id": f"eq.{chain}", "product_id": f"eq.{product}", "order": "calculation_no.desc"})}
+        context = source.client.operational_context()
+        rows = source.client.rows("forecast_calculations", {
+            "select": "id,chain_id,product_id,calculation_no,calculation_code,issue_period,status,created_at,created_by,suggested_reference,recalculation_reason,input_snapshot",
+            "chain_id": f"eq.{chain}", "product_id": f"eq.{product}", "order": "calculation_no.desc"})
+        return {"calculations": [row for row in rows if matches_source((row.get("input_snapshot") or {}).get("source_context"), context)]}
 
     @router.get("/calculations/{calculation_id}")
     def get_calculation(calculation_id: str, request: Request,
@@ -180,6 +184,13 @@ def mount_e4_routes(app, config, identity, data, runner, writer):
         chain, product = allowed(principal, chain_id), uuid_value(product_id)
         rows = source.client.rows("current_forecast_selection", {"select": "*", "chain_id": f"eq.{chain}",
             "product_id": f"eq.{product}", "objective": "eq.Venta"})
+        if rows:
+            try:
+                calculation(source.client, rows[0]["calculation_id"])
+            except PreviewError as error:
+                if error.code == "CALCULATION_NOT_FOUND":
+                    return {"selection": None}
+                raise
         return {"selection": rows[0] if rows else None}
 
     @router.post("/observations/capture")

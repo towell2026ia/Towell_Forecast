@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { operationalContext } from "./operational-context-fixture";
 import { ForecastFiltersContext } from "../../app/forecast-towell-app";
 import { ForecastEnginesView } from "../../app/operational-engines-view";
 import { RailwayPreviewClient, PreviewReadError, type PreviewClient, type PreviewJob } from "../../lib/forecast-preview";
@@ -121,7 +122,7 @@ describe("E2 operational UI", () => {
   });
 });
 describe("E2 Railway browser boundary", () => {
-  function auth(token: string | null = "synthetic-access-token") { return { auth: { getSession: vi.fn(async () => ({ data: { session: token ? { access_token: token } : null } })) } } as unknown as SupabaseClient; }
+  function auth(token: string | null = "synthetic-access-token") { return { auth: { getSession: vi.fn(async () => ({ data: { session: token ? { access_token: token } : null } })) }, rpc: vi.fn(() => ({ abortSignal: async () => ({ data: [operationalContext], error: null }) })) } as unknown as SupabaseClient; }
   it("sends Bearer only to Railway, keeps role/id out and no historical browser dataset", async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify(job), { status: 202 })); vi.stubGlobal("fetch", fetcher);
     const client = new RailwayPreviewClient(auth(), "https://backend.example"); await client.create("a", "p");
@@ -165,6 +166,17 @@ describe("E2 Railway browser boundary", () => {
     const client = new RailwayPreviewClient(auth(), "https://backend.example"); expect(await client.latest(null, null)).toBeNull();
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error_code: "SCOPE_FORBIDDEN" }), { status: 403 })));
     await expect(client.result("job", "foreign")).rejects.toThrow("SCOPE_FORBIDDEN");
+  });
+  it("hides a latest preview without the official source fingerprint and rejects a source change during its read", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(job)));
+    expect(await new RailwayPreviewClient(auth(), "https://backend.example").latest(null, null)).toBeNull();
+    const matching = { ...job, scopes: job.scopes.map(scope => ({ ...scope, source_context: operationalContext })) };
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(matching)));
+    expect((await new RailwayPreviewClient(auth(), "https://backend.example").latest(null, null))?.job_id).toBe(job.job_id);
+    const sdk = auth();
+    vi.mocked(sdk.rpc).mockImplementationOnce(() => ({ abortSignal: async () => ({ data: [operationalContext], error: null }) }) as never)
+      .mockImplementationOnce(() => ({ abortSignal: async () => ({ data: [{ ...operationalContext, generation: 3 }], error: null }) }) as never);
+    await expect(new RailwayPreviewClient(sdk, "https://backend.example").latest(null, null)).rejects.toThrow("DATA_READ_FAILED");
   });
   it("surfaces the backend's safe scope-validation code for a rejected preview", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error_code: "REQUEST_001" }), { status: 400 })));
