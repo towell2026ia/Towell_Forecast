@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { BrainCircuit, CalendarRange, ClipboardCheck, Database, History, Home, LogOut, PanelLeft, ShieldCheck, Users, RotateCcw, SlidersHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -89,17 +89,31 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
     // eslint-disable-next-line react-hooks/exhaustive-deps -- Module and filters define the lifetime of the read.
   }, [repository, active, filters]);
   const [previewView, setPreview] = useState<PreviewView | null>(null);
+  const previewRead = useRef<{ repository: ForecastReadRepository; key: string; source?: OperationalReadContext; task: Promise<PreviewJob | null> } | null>(null);
   const previewKey = `${filters.chainId}/${filters.productId}`;
   useEffect(() => {
     let alive = true;
     const client = repository.previews;
-    if (client) void pinOperational().then(async source => ({ source, job: await client.latest(filters.chainId, filters.productId, source) })).then(({ source, job }) => {
+    if (client) void pinOperational().then(async source => {
+      const cached = previewRead.current;
+      const sameSource = source ? Boolean(cached?.source && matchesOfficialSource(cached.source, source)) : !cached?.source;
+      // Revalidate provenance on navigation, but reuse the same endpoint read
+      // (including an in-flight request) while its scope and source are fixed.
+      const read = cached?.repository === repository && cached.key === previewKey && sameSource ? cached : {
+        repository, key: previewKey, source, task: client.latest(filters.chainId, filters.productId, source),
+      };
+      previewRead.current = read;
+      return { source, job: await read.task };
+    }).then(({ source, job }) => {
       if (alive) setPreview(previous => {
         const compatible = !source || Boolean(previous?.result?.scopes.length && previous.result.scopes.every(scope => matchesOfficialSource(scope.source_context, source)));
         return compatible && previous?.key === previewKey && (previous.loading || previous.job) ? previous : { key: previewKey, result: ["READY_PREVIEW", "READY_PROVISIONAL"].includes(job?.status ?? "") ? job : null, job, error: "", loading: false };
       });
     }).catch(error => {
-      if (alive) setPreview({ key: previewKey, result: null, job: null, error: error instanceof PreviewReadError ? error.code : "DATA_READ_FAILED", loading: false });
+      if (alive) {
+        previewRead.current = null;
+        setPreview({ key: previewKey, result: null, job: null, error: error instanceof PreviewReadError ? error.code : "DATA_READ_FAILED", loading: false });
+      }
     });
     return () => { alive = false; };
   }, [repository, filters.chainId, filters.productId, previewKey, pinOperational]);

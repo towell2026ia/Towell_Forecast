@@ -30,6 +30,11 @@ it("clears the previous official preview if refreshing against a changed source 
   await waitFor(() => expect(latest).toHaveBeenCalled());
   await userEvent.click(screen.getByRole("button", { name: "Motores de Forecast" }));
   expect(await screen.findByText("SOURCE_A_RESULT")).toBeTruthy();
+  const sourceACalls = latest.mock.calls.length;
+  await userEvent.click(screen.getByRole("button", { name: "Inicio" }));
+  await userEvent.click(screen.getByRole("button", { name: "Motores de Forecast" }));
+  expect(screen.getByTestId("shared-preview").textContent).toBe("SOURCE_A_RESULT");
+  expect(latest).toHaveBeenCalledTimes(sourceACalls);
   source = { ...operationalContext, source_hash: "b".repeat(64), generation: 3 };
   await userEvent.click(screen.getByRole("button", { name: "Inicio" }));
   await waitFor(() => expect(latest).toHaveBeenLastCalledWith(null, null, source));

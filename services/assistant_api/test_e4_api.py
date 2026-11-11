@@ -155,6 +155,7 @@ class E4ApiTests(unittest.TestCase):
         for field in ("statistical_weight", "ensemble_ml_model", "ml_component"):
             with self.subTest(field=field):
                 self.preview = preview()
+                self.preview["source_context"] = self.source.operational_context()
                 self.preview["dataset_hash"] = snapshot_hash(self.source._records)
                 self.preview["selection"]["scope_leader"].update(statistical_weight=.5, ml_model="Scope Forest")
                 candidate = self.preview["selection"]["product_candidates"][2]

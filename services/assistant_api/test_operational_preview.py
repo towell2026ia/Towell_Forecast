@@ -321,6 +321,8 @@ class JobTests(unittest.TestCase):
         from unittest.mock import Mock
 
         provider = Mock()
+        provider.source_context.return_value = {"source_hash": "a" * 64, "generation": 1,
+                                                "first_period": "2025-01", "last_period": "2026-10"}
         provider.records.side_effect = [[{"period": "2026-07"}], []]
         self.runner.submit(provider, self.actor, chain_ids=[A],
                            mode="POINT_IN_TIME", issue_period="2026-05")
@@ -526,6 +528,7 @@ class JobTests(unittest.TestCase):
         case = ProviderTests(); case.setUp()
         self.storage.put("forecast_jobs", "OPJ-research-test", {"job_id": "OPJ-research-test",
             "kind": "OPERATIONAL_PREVIEW", "status": "READY_PROVISIONAL", "creator_id": USER,
+            "source_context": case.client.bind(jwt()).operational_context(),
             "chain_ids": [A], "product_id": PRODUCT, "mode": "RETROSPECTIVE_TRAINING",
             "scopes": [{"chain_id": A, "status": "PROVISIONAL_COLD_START",
                 "provisional_cold_start": {"research": {"status": "DISABLED"}, "horizons": []}}]})
