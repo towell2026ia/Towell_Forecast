@@ -6,7 +6,9 @@ import { ForecastFiltersContext } from "../../app/forecast-towell-app";
 import { ForecastEnginesView } from "../../app/operational-engines-view";
 import { ForecastPeriodsView } from "../../app/forecast-periods-view";
 import { scopeHorizons, storedCommercialScope } from "../../lib/forecast-chart-data";
-import { addReportMonth, type ReportSnapshot } from "../../lib/forecast-reporting";
+import { addReportMonth, emptyReportChoice, type ReportSnapshot } from "../../lib/forecast-reporting";
+import { periodsDashboard } from "../../lib/periods-dashboard";
+import { operationalPeriodsSheets } from "../../lib/operational-periods-xlsx";
 import type { PreviewJob, PreviewScope } from "../../lib/forecast-preview";
 import { emptyFilters, type ForecastReadRepository } from "../../lib/supabase/types";
 import { operationalContext } from "./operational-context-fixture";
@@ -95,5 +97,24 @@ describe("Commercial engine selection uses stored filtered curves", () => {
     expect(cells[3].textContent).toContain("PARCIAL 1/2");
     expect(cells[2].textContent).not.toContain("PARCIAL");
     expect(screen.getAllByText("PARCIAL 1/2").length).toBeGreaterThan(12);
+  });
+  it("formats floating-point aggregate tails without changing data, export quantities, zero or missing values", async () => {
+    const { repository, snapshot } = fixture();
+    snapshot.horizons = snapshot.horizons.map(h => ({ ...h, statistical_value: h.product_id === "blue" ? 10002.74 : 47125.67,
+      ml_value: h.product_id === "blue" ? 0 : null, ensemble_value: null }));
+    const original = JSON.stringify(snapshot);
+    const sheets = () => operationalPeriodsSheets(snapshot, periodsDashboard(snapshot, [], emptyReportChoice, [null, null]), [], []);
+    const exportBefore = JSON.stringify(sheets());
+    const comparative = sheets().find(s => s.name === "Comparativa")!;
+    expect(comparative.rows.find(row => row[0] === "2026-11")![comparative.headers.indexOf("Forecast Estadístico")]).toBe(10002.74 + 47125.67);
+    mount(repository, <ForecastPeriodsView/>);
+    const table = await screen.findByRole("table", { name: "Matriz compacta de forecast" });
+    const cells = within(within(table).getByText("Nov-26").closest("tr")!).getAllByRole("cell");
+    expect(cells[2].textContent).toBe("57,128.41");
+    expect(cells[3].textContent).toBe("0PARCIAL 1/2");
+    expect(cells[4].textContent).toBe("Sin dato0/2");
+    expect(JSON.stringify(snapshot)).toBe(original);
+    expect(JSON.stringify(sheets())).toBe(exportBefore);
+    expect(repository.previews!.create).not.toHaveBeenCalled();
   });
 });
