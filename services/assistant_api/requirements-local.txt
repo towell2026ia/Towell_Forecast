@@ -1,0 +1,3 @@
+# Optional native development adapter; never installed by the Railway Dockerfile.
+-r requirements.txt
+psycopg[binary]==3.3.8

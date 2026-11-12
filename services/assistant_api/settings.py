@@ -99,6 +99,7 @@ class Settings:
     build_time: str = "unknown"
     app_version: str = "0.11.0-prd09"
     railway_runtime: bool = False
+    local_postgres_config: Path | None = None
 
     @property
     def database_path(self) -> Path:
@@ -113,6 +114,14 @@ class Settings:
         return f"forecast-towell-frontend:{self.app_env}"
 
     def validate(self) -> "Settings":
+        if self.local_postgres_config is not None:
+            local_url = urlparse(self.supabase_url)
+            if (self.app_env not in {"development", "test"} or self.railway_runtime
+                    or self.api_host != "127.0.0.1" or not self.local_postgres_config.is_absolute()
+                    or local_url.scheme != "http" or local_url.hostname != "127.0.0.1"
+                    or local_url.port != self.api_port or local_url.path not in {"", "/"}
+                    or local_url.username or local_url.password or local_url.query or local_url.fragment):
+                raise ValueError("local_postgres_development_only")
         if self.app_env not in ENVIRONMENTS:
             raise ValueError("invalid_app_env")
         if not 1 <= self.api_port <= 65535:
@@ -171,9 +180,9 @@ class Settings:
             if self.legacy_pilot_enabled:
                 raise ValueError("preview_only_configuration_required")
             supabase = urlparse(self.supabase_url)
-            if supabase.scheme != "https" or not supabase.hostname or not supabase.hostname.endswith(".supabase.co") \
+            if self.local_postgres_config is None and (supabase.scheme != "https" or not supabase.hostname or not supabase.hostname.endswith(".supabase.co") \
                     or supabase.username or supabase.password or supabase.path not in {"", "/"} \
-                    or supabase.query or supabase.fragment:
+                    or supabase.query or supabase.fragment):
                 raise ValueError("invalid_supabase_url")
             if not self.supabase_publishable_key.startswith("sb_publishable_") or len(self.supabase_publishable_key) < 24:
                 raise ValueError("supabase_publishable_key_required")
@@ -281,5 +290,6 @@ class Settings:
             build_time=env.get("BUILD_TIME", "unknown"),
             app_version=env.get("APP_VERSION", "0.11.0-prd09"),
             railway_runtime=bool(env.get("RAILWAY_ENVIRONMENT_ID") or env.get("RAILWAY_SERVICE_ID")),
+            local_postgres_config=path("LOCAL_POSTGRES_CONFIG", ROOT) if env.get("LOCAL_POSTGRES_CONFIG") else None,
         )
         return settings.validate()

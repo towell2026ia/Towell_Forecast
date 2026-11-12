@@ -91,8 +91,13 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
     from .preview_api import mount_preview_routes
     from .e4_api import mount_e4_routes
     from .vintage_service import SupabaseForecastWriteRepository
+    local_database = None
+    if config.local_postgres_config is not None:
+        from .local_postgres import LocalPostgresGateway
+        local_database = LocalPostgresGateway(config)
     supabase_client = SupabaseReadClient(config.supabase_url, config.supabase_publishable_key,
-        timeout=config.external_timeout_seconds) if config.operational_preview_enabled else None
+        timeout=config.external_timeout_seconds,
+        transport=local_database.transport if local_database else None) if config.operational_preview_enabled else None
     data = provider or (SupabaseDataProvider(supabase_client) if supabase_client else
                         NormalizedDataProvider(data_dir=config.data_dir, state_dir=config.state_dir))
     state_dir = (Path(historical_state_dir) if historical_state_dir else
@@ -113,9 +118,14 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
                   redoc_url=None if config.app_env == "production" else "/redoc",
                   openapi_url=None if config.app_env == "production" else "/openapi.json")
     app.add_middleware(CORSMiddleware, allow_origins=[config.frontend_url], allow_credentials=False,
-                       allow_methods=["GET", "POST"], allow_headers=["Authorization", "Content-Type",
+                       allow_methods=["GET", "POST", *(["HEAD"] if local_database else [])],
+                       expose_headers=["Content-Range", "Range-Unit"] if local_database else [],
+                       allow_headers=["Authorization", "Content-Type",
+                                       *(["apikey", "X-Client-Info", "X-Supabase-Api-Version", "Range", "Range-Unit", "Prefer", "Accept-Profile", "Content-Profile"] if local_database else []),
                                                                        "Idempotency-Key", "X-Assistant-Token",
                                                                        "X-Actor-Id", "X-Request-ID"])
+    if local_database:
+        local_database.mount(app)
     orchestrator = None if config.operational_preview_enabled else ForecastOrchestrator(data, assistant_provider=assistant_provider)
     model_data = data if provider is not None else PersistedObservationProvider(data, storage)
     historical = None if config.operational_preview_enabled else GeneralizedHistoricalForecastRunner(model_data, storage,
@@ -277,6 +287,7 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
             healthy = all(item["status"] == "healthy" for item in providers.values())
             return JSONResponse(status_code=200 if healthy else 503, content={"status": "ok" if healthy else "not_ready",
                 "version": config.app_version, "environment": config.app_env, "providers": providers,
+                "local_postgres": local_database is not None,
                 "operational_preview": True,
                 "rs_assistant_enabled": config.ai_assistant_api_enabled,
                 "openai_enabled": config.openai_enabled,

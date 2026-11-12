@@ -101,7 +101,10 @@ export class RailwayPreviewClient implements PreviewClient {
   private apiOrigin() {
     try {
       const url = new URL(this.origin);
-      if (url.protocol !== "https:" || url.username || url.password || url.pathname !== "/" || url.search || url.hash) throw new Error();
+      const localPostgres = process.env.NODE_ENV === "development"
+        && process.env.NEXT_PUBLIC_LOCAL_POSTGRES_ENABLED === "true"
+        && (this.origin === "http://127.0.0.1:8000" || this.origin === "http://127.0.0.1:8000/");
+      if ((url.protocol !== "https:" && !localPostgres) || url.username || url.password || url.pathname !== "/" || url.search || url.hash) throw new Error();
       return url.origin;
     } catch { throw new PreviewReadError("PREVIEW_CONFIGURATION_REQUIRED"); }
   }
@@ -120,15 +123,13 @@ export class RailwayPreviewClient implements PreviewClient {
     return data.products;
   }
   private async request(path: string, body?: unknown): Promise<PreviewJob> {
-    let url: URL;
-    try { url = new URL(this.origin); if (url.protocol !== "https:" || url.username || url.password || url.pathname !== "/" || url.search || url.hash) throw new Error(); }
-    catch { throw new PreviewReadError("PREVIEW_CONFIGURATION_REQUIRED"); }
+    const origin = this.apiOrigin();
     if (this.controller.signal.aborted) throw new PreviewReadError("AUTH_REQUIRED");
     const { data } = await this.auth.auth.getSession();
     if (!data.session?.access_token) throw new PreviewReadError("AUTH_REQUIRED");
     let response: Response;
     try {
-      response = await fetch(url.origin + path, { method: body ? "POST" : "GET", credentials: "omit", cache: "no-store", signal: this.controller.signal,
+      response = await fetch(origin + path, { method: body ? "POST" : "GET", credentials: "omit", cache: "no-store", signal: this.controller.signal,
         headers: { Authorization: `Bearer ${data.session.access_token}`, ...(body ? { "Content-Type": "application/json" } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
     } catch (error) {
       if (this.controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) throw new PreviewReadError("PREVIEW_REQUEST_ABORTED");
@@ -157,13 +158,11 @@ export class RailwayPreviewClient implements PreviewClient {
     catch (error) { if (error instanceof PreviewReadError && error.code === "PREVIEW_NOT_FOUND") return null; throw error; }
   }
   async qualityGates(chainId: string): Promise<QualityGates> {
-    let url: URL;
-    try { url = new URL(this.origin); if (url.protocol !== "https:" || url.username || url.password || url.pathname !== "/" || url.search || url.hash) throw new Error(); }
-    catch { throw new PreviewReadError("PREVIEW_CONFIGURATION_REQUIRED"); }
+    const origin = this.apiOrigin();
     if (this.controller.signal.aborted) throw new PreviewReadError("AUTH_REQUIRED");
     const { data } = await this.auth.auth.getSession();
     if (!data.session?.access_token) throw new PreviewReadError("AUTH_REQUIRED");
-    const response = await fetch(url.origin + `/api/forecast/quality-gates?chain_id=${encodeURIComponent(chainId)}`, {
+    const response = await fetch(origin + `/api/forecast/quality-gates?chain_id=${encodeURIComponent(chainId)}`, {
       method: "GET", credentials: "omit", cache: "no-store", signal: this.controller.signal,
       headers: { Authorization: `Bearer ${data.session.access_token}` },
     });
@@ -173,13 +172,11 @@ export class RailwayPreviewClient implements PreviewClient {
     return result;
   }
   async vintages(chainId: string): Promise<VintageSummary[]> {
-    let url: URL;
-    try { url = new URL(this.origin); if (url.protocol !== "https:" || url.username || url.password || url.pathname !== "/" || url.search || url.hash) throw new Error(); }
-    catch { throw new PreviewReadError("PREVIEW_CONFIGURATION_REQUIRED"); }
+    const origin = this.apiOrigin();
     if (this.controller.signal.aborted) throw new PreviewReadError("AUTH_REQUIRED");
     const { data } = await this.auth.auth.getSession();
     if (!data.session?.access_token) throw new PreviewReadError("AUTH_REQUIRED");
-    const response = await fetch(url.origin + `/api/forecast/vintages?chain_id=${encodeURIComponent(chainId)}`, {
+    const response = await fetch(origin + `/api/forecast/vintages?chain_id=${encodeURIComponent(chainId)}`, {
       method: "GET", credentials: "omit", cache: "no-store", signal: this.controller.signal,
       headers: { Authorization: `Bearer ${data.session.access_token}` },
     });
@@ -189,11 +186,10 @@ export class RailwayPreviewClient implements PreviewClient {
     return result.vintages;
   }
   async vintageDetail(vintageId: string): Promise<VintageDetail> {
-    const url = new URL(this.origin);
-    if (url.protocol !== "https:" || url.username || url.password || url.pathname !== "/" || url.search || url.hash) throw new PreviewReadError("PREVIEW_CONFIGURATION_REQUIRED");
+    const origin = this.apiOrigin();
     const { data } = await this.auth.auth.getSession();
     if (!data.session?.access_token) throw new PreviewReadError("AUTH_REQUIRED");
-    const response = await fetch(url.origin + `/api/forecast/vintages/${encodeURIComponent(vintageId)}`, {
+    const response = await fetch(origin + `/api/forecast/vintages/${encodeURIComponent(vintageId)}`, {
       method: "GET", credentials: "omit", cache: "no-store", signal: this.controller.signal,
       headers: { Authorization: `Bearer ${data.session.access_token}` },
     });
@@ -204,8 +200,8 @@ export class RailwayPreviewClient implements PreviewClient {
     return result;
   }
   async vintageCapabilities(): Promise<VintageCapabilities> {
-    const url = new URL(this.origin);
-    const response = await fetch(url.origin + "/api/ready", { method: "GET", credentials: "omit", cache: "no-store", signal: this.controller.signal });
+    const origin = this.apiOrigin();
+    const response = await fetch(origin + "/api/ready", { method: "GET", credentials: "omit", cache: "no-store", signal: this.controller.signal });
     const result = await response.json() as Partial<VintageCapabilities>;
     return { vintage_persistence: response.ok && result.vintage_persistence === true,
       official_publication: response.ok && result.official_publication === true,
@@ -289,11 +285,10 @@ export class RailwayPreviewClient implements PreviewClient {
     return result.events;
   }
   private async writeVintage(path: string, body: unknown): Promise<string> {
-    const url = new URL(this.origin);
-    if (url.protocol !== "https:" || url.username || url.password || url.pathname !== "/" || url.search || url.hash) throw new PreviewReadError("PREVIEW_CONFIGURATION_REQUIRED");
+    const origin = this.apiOrigin();
     const { data } = await this.auth.auth.getSession();
     if (!data.session?.access_token) throw new PreviewReadError("AUTH_REQUIRED");
-    const response = await fetch(url.origin + path, { method: "POST", credentials: "omit", cache: "no-store",
+    const response = await fetch(origin + path, { method: "POST", credentials: "omit", cache: "no-store",
       signal: this.controller.signal, headers: { Authorization: `Bearer ${data.session.access_token}`,
         "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify(body) });
     const result = await response.json() as { error_code?: string; vintage_id?: string };

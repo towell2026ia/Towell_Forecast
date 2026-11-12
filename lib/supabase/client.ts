@@ -6,7 +6,10 @@ import { normalizeSiteUrl } from "./site-url";
 export function validatePublicConfig(config: PublicSupabaseConfig): boolean {
   try {
     const url = new URL(config.url);
-    if (url.protocol !== "https:" || url.username || url.password || url.pathname !== "/") return false;
+    const localPostgres = process.env.NODE_ENV === "development"
+      && process.env.NEXT_PUBLIC_LOCAL_POSTGRES_ENABLED === "true"
+      && (config.url === "http://127.0.0.1:8000" || config.url === "http://127.0.0.1:8000/");
+    if ((url.protocol !== "https:" && !localPostgres) || url.username || url.password || url.pathname !== "/") return false;
     if (config.siteUrl?.trim()) normalizeSiteUrl(config.siteUrl.trim(), process.env.NODE_ENV === "development");
     if (config.key.startsWith("sb_publishable_")) return config.key.length > 20;
     const claims = JSON.parse(atob(config.key.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
