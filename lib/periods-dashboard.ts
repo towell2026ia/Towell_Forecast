@@ -13,7 +13,8 @@ export const dashboardSeries = {
 };
 export type DashboardSeries = keyof typeof dashboardSeries;
 type Quantity = { value: number | null; exact?: string; covered: number; eligible: number };
-export type DashboardPoint = { month: string; period: string; horizon: number | null; values: Record<DashboardSeries, number | null>; coverage: Record<DashboardSeries, Quantity> };
+export type DashboardFillRate = { value: number | null; ordered: number | null; delivered: number | null; orderedExact: string | null; deliveredExact: string | null; covered: number; eligible: number };
+export type DashboardPoint = { month: string; period: string; horizon: number | null; values: Record<DashboardSeries, number | null>; coverage: Record<DashboardSeries, Quantity>; fillRate?: DashboardFillRate };
 const inRange = (p: string, range: Filters["periodRange"]) => (!range[0] || p >= range[0]) && (!range[1] || p <= range[1]);
 function quantity(values: (number | null)[], eligible: number): Quantity {
   const found = values.filter((v): v is number => v !== null);
@@ -27,6 +28,24 @@ function exactQuantity(values: (string | null)[], eligible: number): Quantity {
   const digits = total.toString().padStart(scale + 1, "0");
   const exact = scale ? `${digits.slice(0, -scale)}.${digits.slice(-scale)}` : digits;
   return { value: Number(exact), exact, covered: parts.length, eligible };
+}
+function monthlyFillRate(rows: HistoricalRow[], eligible: number): DashboardFillRate {
+  const literal = (row: HistoricalRow, field: "ORDER" | "DELIVERY") => {
+    const value = row[field];
+    if (value === null) return null;
+    const exact = row.exact?.[field] ?? String(value);
+    if (!Number.isFinite(value) || value < 0 || !/^\d+(?:\.\d+)?$/.test(exact) || Number(exact) !== value) throw new Error("invalid_fill_rate_value");
+    return exact;
+  };
+  const pairs = rows.flatMap(row => {
+    const ordered = literal(row, "ORDER"), delivered = literal(row, "DELIVERY");
+    return ordered === null || delivered === null ? [] : [{ ordered, delivered }];
+  });
+  const ordered = exactQuantity(pairs.map(pair => pair.ordered), eligible);
+  const delivered = exactQuantity(pairs.map(pair => pair.delivered), eligible);
+  return { value: ordered.value !== null && ordered.value > 0 ? delivered.value! / ordered.value * 100 : null,
+    ordered: ordered.value, delivered: delivered.value, orderedExact: ordered.exact ?? null, deliveredExact: delivered.exact ?? null,
+    covered: pairs.length, eligible };
 }
 export const shortPeriod = (period: string) => `${monthNames[Number(period.slice(5, 7)) - 1]}-${period.slice(2, 4)}`;
 export function periodsDashboard(snapshot: ReportSnapshot, history: HistoricalRow[], choice: ReportChoice, range: Filters["periodRange"], inventory: OperationalInventory[] = []) {
@@ -68,7 +87,8 @@ export function periodsDashboard(snapshot: ReportSnapshot, history: HistoricalRo
     metrics.customer = snapshot.sourceContext
       ? inRange(period, range) ? exactQuantity(rows.filter(row => row.period.slice(0, 7) === period).map(row => row.exact?.FCST_CLIENTE_HISTORY ?? null), eligible) : { value: null, covered: 0, eligible }
       : i >= 9 && inRange(period, range) ? quantity(customer, eligible) : { value: null, covered: 0, eligible };
-    return { month: shortPeriod(period), period, horizon: i >= 9 ? i - 8 : null, coverage: metrics, values: Object.fromEntries(Object.entries(metrics).map(([k, q]) => [k, q.value])) as DashboardPoint["values"] };
+    const fillRate = monthlyFillRate(i < 9 && inRange(period, range) ? rows.filter(row => row.period.slice(0, 7) === period) : [], eligible);
+    return { month: shortPeriod(period), period, horizon: i >= 9 ? i - 8 : null, coverage: metrics, values: Object.fromEntries(Object.entries(metrics).map(([k, q]) => [k, q.value])) as DashboardPoint["values"], fillRate };
   }) : [];
   const historicalPeriods = new Set(points.slice(0, 9).filter(p => inRange(p.period, range)).map(p => p.period));
   const actual = rows.filter(r => historicalPeriods.has(r.period.slice(0, 7)));
@@ -76,11 +96,15 @@ export function periodsDashboard(snapshot: ReportSnapshot, history: HistoricalRo
   const paired = actual.filter(r => r.ORDER !== null && r.DELIVERY !== null);
   const orders = paired.reduce((s, r) => s + r.ORDER!, 0), deliveries = paired.reduce((s, r) => s + r.DELIVERY!, 0);
   const completeness = (key: DashboardSeries) => points.filter(p => p.coverage[key].covered === eligible && eligible > 0).length;
-  const models = [...new Set(matrix.rows.map(r => r.product.commercial?.model ? modelKey(r.product.commercial.model) : "Sin identificar"))].sort();
-  const coverage = models.map(model => {
-    const products = matrix.rows.filter(r => (r.product.commercial?.model ? modelKey(r.product.commercial.model) : "Sin identificar") === model);
+  const models = [...new Map(matrix.rows.map(r => {
+    const model = r.product.commercial?.model ? modelKey(r.product.commercial.model) : "Sin identificar", chainId = r.product.chain_id;
+    const key = JSON.stringify([chainId, model]);
+    return [key, { key, chainId, chain: r.chain, model }];
+  })).values()].sort((a, b) => a.model.localeCompare(b.model) || a.chain.localeCompare(b.chain) || a.chainId.localeCompare(b.chainId));
+  const coverage = models.map(group => {
+    const products = matrix.rows.filter(r => r.product.chain_id === group.chainId && (r.product.commercial?.model ? modelKey(r.product.commercial.model) : "Sin identificar") === group.model);
     const calculated = products.filter(r => r.calculation).length, decided = products.filter(r => r.adopted).length;
-    return { model, total: products.length, calculated, pending: products.length - calculated, decided, undecided: products.length - decided };
+    return { ...group, total: products.length, calculated, pending: products.length - calculated, decided, undecided: products.length - decided };
   });
   return { matrix, cutoff, points, coverage, actualMonths: points.slice(0, 9).filter(p => p.coverage.actual.covered > 0).length,
     priorComplete: [completeness("previous2"), completeness("previous1")],

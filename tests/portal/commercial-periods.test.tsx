@@ -109,7 +109,7 @@ describe("Rolling 9+3 and compatible frozen calculations", () => {
     const d = periodsDashboard(s, [history("2026-01", 0), history("2026-03", null)], emptyReportChoice, [null, null]);
     expect(d.points[2].coverage.actual).toEqual({ value: 0, exact: "0", covered: 1, eligible: 2 }); expect(d.points[3].values.actual).toBeNull();
     expect(d.points[9].coverage.ENSEMBLE).toEqual({ value: 9973.79, covered: 1, eligible: 2 });
-    expect(d.coverage).toEqual([{ model: "FENDI", total: 2, calculated: 1, pending: 1, decided: 0, undecided: 2 }]);
+    expect(d.coverage).toMatchObject([{ chainId: "c", model: "FENDI", total: 2, calculated: 1, pending: 1, decided: 0, undecided: 2 }]);
   });
   it("respects period masks, pairs Fill Rate and rejects duplicate monthly facts", () => {
     const h = [history("2026-01", 0), history("2026-02", null, { ORDER: 100, DELIVERY: 50 }), history("2026-03", 99, { DELIVERY: null })];

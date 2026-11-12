@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { ReportChoice, ReportSnapshot } from "@/lib/forecast-reporting";
@@ -13,8 +13,18 @@ export function ReportSelect({ label, value, onChange, options }: { label: strin
 export function CalculationFilters({ snapshot, choice, onChange, decisions = false }: { snapshot: ReportSnapshot; choice: ReportChoice; onChange: (value: ReportChoice) => void; decisions?: boolean }) {
   const versions = [...new Set(snapshot.calculations.map(c => c.calculation_code))].sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)));
   const issues = [...new Set([...snapshot.calculations.map(c => c.issue_period.slice(0, 7)), ...snapshot.provisionals.map(p => p.issue_period)])].sort().reverse();
+  useEffect(() => {
+    const invalidVersion = Boolean(choice.version && !snapshot.calculations.some(c => c.calculation_code === choice.version));
+    const invalidIssue = Boolean(choice.issue && !snapshot.calculations.some(c => c.issue_period.slice(0, 7) === choice.issue) && !snapshot.provisionals.some(p => p.issue_period === choice.issue));
+    const invalidCalculation = Boolean(choice.calculationId && !snapshot.calculations.some(c => c.id === choice.calculationId));
+    if (invalidVersion || invalidIssue || invalidCalculation) onChange({ ...choice,
+      version: invalidVersion ? null : choice.version,
+      issue: invalidIssue ? null : choice.issue,
+      calculationId: invalidCalculation || invalidVersion || invalidIssue ? null : choice.calculationId,
+    });
+  }, [snapshot, choice, onChange]);
   return <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-    <ReportSelect label="Versión de cálculo" value={choice.version ?? "latest"} onChange={v => onChange({ ...choice, version: v === "latest" ? null : v, issue: null, calculationId: null })} options={[{ value: "latest", label: "Último compatible por producto" }, ...versions.map(v => ({ value: v, label: v }))]}/>
+    <ReportSelect label="Cálculo técnico" value={choice.version ?? "latest"} onChange={v => onChange({ ...choice, version: v === "latest" ? null : v, issue: null, calculationId: null })} options={[{ value: "latest", label: "Último compatible por producto" }, ...versions.map(v => ({ value: v, label: `${v} · Identificador técnico` }))]}/>
     <ReportSelect label="Corte del cálculo" value={choice.issue ?? "latest"} onChange={v => onChange({ ...choice, issue: v === "latest" ? null : v, calculationId: null })} options={[{ value: "latest", label: "Último corte disponible" }, ...issues.map(v => ({ value: v, label: v }))]}/>
     {decisions && <ReportSelect label="Estado de decisión" value={choice.decision} onChange={v => onChange({ ...choice, decision: v as ReportChoice["decision"] })} options={[{ value: "ALL", label: "Todos" }, { value: "PENDING", label: "Sin decisión" }, { value: "ADOPTED", label: "Adoptado" }]}/>}
   </div>;
