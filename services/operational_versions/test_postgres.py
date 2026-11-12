@@ -306,8 +306,11 @@ class GateBPostgres(unittest.TestCase):
             'app/assistant/assistant-service.ts','app/forecast-assistant.tsx',
             'lib/forecast-preview.ts','lib/rs-assistant.ts',
         }
+        # Authorized localhost adapter: development + explicit opt-in + exact
+        # loopback URL. All other library files, motors and SQL stay protected.
+        approved_localhost={'lib/supabase/client.ts'}
         after_gateb=subprocess.check_output(['git','diff','--name-only',gateb,'--',*prefixes],cwd=REPO,text=True)
-        self.assertEqual(set(after_gateb.splitlines()) - approved_prd3a9 - approved_portal_rs - approved_rs_assistant,set())
+        self.assertEqual(set(after_gateb.splitlines()) - approved_prd3a9 - approved_portal_rs - approved_rs_assistant - approved_localhost,set())
         private=os.environ.get('GATEB_PRIVATE_CANDIDATE')
         if private:
             identities=json.loads((Path(private)/'Identidades.json').read_text(encoding='utf-8'))

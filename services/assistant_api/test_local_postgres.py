@@ -4,7 +4,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from .settings import Settings
+from services.assistant_api.settings import Settings
 
 
 class LocalPostgresBoundaryTests(unittest.TestCase):
@@ -30,7 +30,7 @@ class LocalPostgresBoundaryTests(unittest.TestCase):
             replace(self.local(), local_postgres_config=None).validate()
 
     def test_no_local_secret_read_before_production_rejection(self):
-        from .local_postgres import LocalPostgresGateway
+        from services.assistant_api.local_postgres import LocalPostgresGateway
         with patch("pathlib.Path.read_text", side_effect=AssertionError("read must not happen")):
             with self.assertRaises(ValueError):
                 LocalPostgresGateway(replace(self.local(), railway_runtime=True))
