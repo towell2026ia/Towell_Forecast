@@ -101,6 +101,7 @@ class RSAssistantTests(unittest.TestCase):
                     )
                     route(body, request, "Bearer fixture")
                     workflow.answer.assert_called_with(body, load.return_value, may_start_research=expected)
+                    self.assertTrue(load.call_args.kwargs["include_stored_forecast"])
 
     def test_route_rejects_anonymous_wrong_chain_and_inactive_b_before_work(self):
         app = FastAPI()

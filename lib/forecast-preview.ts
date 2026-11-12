@@ -22,6 +22,7 @@ export type ProvisionalColdStart = { status: "PROVISIONAL_COLD_START"; observed_
   horizons: { horizon: number; target_period: string; value: number }[];
   research?: { status: "DISABLED" | "PENDING" | "COMPLETED" | "UNAVAILABLE"; reason?: string; summary?: string; sources?: { title: string; url: string }[] } };
 export type PreviewScope = { chain_id: string; chain_name?: string; status: string; error_code?: string; issue_period?: string; latest_actual_period?: string; engine_version?: string; mode?: string; preview_id?: string;
+  commercial_projection?: { filter_key: string; products: number; statistical: number; ml: number; ensemble: number; ml_models: string[]; source: "STORED_CALCULATIONS" };
   source_context?: Pick<OperationalReadContext, "source_hash" | "generation">;
   dataset_hash?: string;
   provisional_cold_start?: ProvisionalColdStart;

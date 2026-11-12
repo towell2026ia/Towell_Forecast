@@ -73,7 +73,13 @@ class RSAssistantWorkflow:
     def answer(self, body, scoped, *, may_start_research=False):
         scope, rows = scoped["scope"], scoped["records"]
         key = content_hash({"engine": ENGINE_VERSION, "scope": scope, "records": rows})
-        forecast = self.storage.get("rs_assistant_forecasts", key)
+        if body.action == "answer" and "stored_forecast" in scoped:
+            # Ordinary answers read the same frozen E4 curves as Períodos. A
+            # missing stored result stays missing; it never triggers a run or
+            # substitutes an independently calculated assistant-cache result.
+            forecast = scoped["stored_forecast"]
+        else:
+            forecast = self.storage.get("rs_assistant_forecasts", key)
         if body.action == "forecast" and forecast is None:
             variants = {r["product_id"] for r in rows}
             if not variants or len(variants) > 50:
@@ -140,7 +146,8 @@ def mount_rs_assistant(app, config, identity, client, limiter, workflow):
         if not limiter.allow("rs-assistant:" + principal.user_id, 20):
             raise PreviewError("RATE_001", 429)
         scoped = load_rs_scope(client.bind(token), principal, chain_id=chain, purchase_type=body.purchase_type,
-                               format=body.format, model=body.model, period=body.period, presentation=body.presentation)
+                               format=body.format, model=body.model, period=body.period, presentation=body.presentation,
+                               include_stored_forecast=body.action == "answer")
         try:
             return workflow.answer(body, scoped, may_start_research=(
                 EXECUTE in principal.permissions and chain in principal.execute_chain_ids

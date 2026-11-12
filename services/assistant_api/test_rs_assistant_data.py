@@ -1,5 +1,6 @@
 """Scoped RS reads over synthetic responses, without an engine or remote service."""
 import unittest
+from unittest.mock import patch
 
 from services.assistant_api.auth import Principal, READ
 from services.assistant_api.rs_assistant_data import load_rs_scope
@@ -112,6 +113,19 @@ class RsAssistantDataTests(unittest.TestCase):
         with self.assertRaisesRegex(PreviewError, "SCOPE_FORBIDDEN"):
             self.load(chain_id=FOREIGN)
         self.assertEqual(self.client.calls, [])
+
+    def test_saved_forecast_read_uses_only_resolved_native_model_membership(self):
+        self.client.second_description = "TOALLA FACIAL FENDI OXFORD"
+        self.client.observations = [r for r in self.client.observations if r["product_id"] == BLUE]
+        with patch("services.assistant_api.rs_assistant_forecasts.stored_rs_forecast", return_value={"origin": "STORED_E4"}) as stored:
+            result = self.load(presentation="MEDIO BAÑO", include_stored_forecast=True)
+        self.assertEqual(result["stored_forecast"], {"origin": "STORED_E4"})
+        args, kwargs = stored.call_args
+        self.assertIs(args[0], self.client)
+        self.assertEqual(args[1], self.client.context)
+        self.assertEqual(kwargs["chain_id"], CHAIN)
+        self.assertEqual(set(kwargs["product_ids"]), {BLUE})
+        self.assertEqual(kwargs["period"], "2026-10")
 
     def test_invalid_scope_and_unverified_format(self):
         for filters in (dict(purchase_type="CE"), dict(period="2026-11"), dict(model="")):

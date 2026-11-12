@@ -28,6 +28,7 @@ import { selectedForecastHorizons, useCurrentForecastSelection } from "@/lib/for
 import { ForecastPeriodsView } from "./forecast-periods-view";
 import { CommercialHistoryView } from "./commercial-history-view";
 import { DatabaseView } from "./database-view";
+import { OperationalQualityView } from "./operational-quality-view";
 import { attachCommercial, changeCommercial, commercialOptions, hasCommercialFilters, matchesCommercial, type CommercialFilter } from "@/lib/commercial-filters";
 import { ModelMultiselect } from "@/components/forecast/model-multiselect";
 import { PeriodsComparisonChart } from "@/components/forecast/periods-comparison-chart";
@@ -272,11 +273,10 @@ function DashboardAllScopesChart({ scopes }: { scopes: import("@/lib/supabase/ty
 export function HistoryView() {
   return <CommercialHistoryView/>;
 }
-function QualityView() { return <Unavailable title="Calidad de datos" copy="Esta vista consulta únicamente observaciones publicadas. Los registros pendientes de reconciliación no forman parte del histórico visible. No se muestran alertas demo ni métricas de modelos sin corrida publicada."/>; }
+function QualityView() { return <OperationalQualityView/>; }
 export function UsersView() {
   const { repository, profile } = useForecastFilters();
   if (profile.global_role !== "ADMIN") return null;
   return <UserAdministrationView repository={repository} profile={profile}/>;
 }
-function Unavailable({ title, copy }: { title: string; copy: string }) { return <div><Intro title={title} copy={copy}/><Card className="border-slate-200 shadow-sm"><CardContent className="p-6 text-sm text-slate-500">Módulo no habilitado para operaciones en esta fase.</CardContent></Card></div>; }
 function DataTable({ headers, rows }: { headers: string[]; rows: string[][] }) { return <div className="overflow-hidden rounded-xl border border-slate-200 bg-white"><div className="overflow-x-auto"><Table><TableHeader><TableRow className="bg-slate-50">{headers.map(h => <TableHead className="whitespace-nowrap font-semibold text-slate-700" key={h}>{h}</TableHead>)}</TableRow></TableHeader><TableBody>{rows.map((row, i) => <TableRow key={i}>{row.map((cell, j) => <TableCell key={j} className={j < 3 ? "min-w-24 text-slate-700" : "whitespace-nowrap text-slate-600"}>{cell}</TableCell>)}</TableRow>)}</TableBody></Table></div></div>; }

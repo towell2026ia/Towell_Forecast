@@ -137,7 +137,8 @@ def _summary(facts, inventory, expected, period, first_period):
     return {"by_month": by_month, "inventory": stock}
 
 
-def load_rs_scope(client, principal, *, chain_id, purchase_type, format, model, period, presentation=None):
+def load_rs_scope(client, principal, *, chain_id, purchase_type, format, model, period, presentation=None,
+                  include_stored_forecast=False):
     """Use the current source contract and the caller's chain permissions."""
     chain_id = uuid_value(chain_id)
     if READ not in principal.permissions or chain_id not in principal.chain_ids:
@@ -176,7 +177,7 @@ def load_rs_scope(client, principal, *, chain_id, purchase_type, format, model, 
     representative = next(iter(selected.values()))
     product_types = {key(row["product_type"]).split(" ")[0] for row in selected.values()}
     public_product_type = next(iter(product_types)) if len(product_types) == 1 and product_types <= PUBLIC_PRODUCT_TYPES else None
-    return {
+    result = {
         "scope": {"chain_id": chain_id, "chain": chain, "purchase_type": "RS", "format": scope_format,
                   "model": key(representative["model"]), "presentation": representative["size"], "period": period,
                   "public_product_type": public_product_type,
@@ -191,3 +192,8 @@ def load_rs_scope(client, principal, *, chain_id, purchase_type, format, model, 
         "metrics": metrics,
         "records": records,
     }
+    if include_stored_forecast:
+        from .rs_assistant_forecasts import stored_rs_forecast
+        result["stored_forecast"] = stored_rs_forecast(
+            client, context, chain_id=chain_id, product_ids=selected, period=period)
+    return result
