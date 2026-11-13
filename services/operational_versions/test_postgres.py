@@ -309,6 +309,12 @@ class GateBPostgres(unittest.TestCase):
         # Authorized localhost adapter: development + explicit opt-in + exact
         # loopback URL. All other library files, motors and SQL stay protected.
         approved_localhost={'lib/supabase/client.ts'}
+        # Explicitly authorized hybrid Auth boundary: hosted identity with
+        # loopback-only data and recovery guards; no motor or SQL changes.
+        approved_hybrid_auth={
+            'app/portal-auth.tsx','app/update-password/update-password.tsx',
+            'lib/supabase/public-config.ts',
+        }
         # Authorized integral validation: expose existing quality reads and
         # distinguish stored commercial subsets in the two engine detail views.
         # No statistical implementation or production SQL is authorized here.
@@ -318,7 +324,7 @@ class GateBPostgres(unittest.TestCase):
             'components/forecast/statistical-engine-detail.tsx',
         }
         after_gateb=subprocess.check_output(['git','diff','--name-only',gateb,'--',*prefixes],cwd=REPO,text=True)
-        self.assertEqual(set(after_gateb.splitlines()) - approved_prd3a9 - approved_portal_rs - approved_rs_assistant - approved_localhost - approved_stored_scope_reads,set())
+        self.assertEqual(set(after_gateb.splitlines()) - approved_prd3a9 - approved_portal_rs - approved_rs_assistant - approved_localhost - approved_hybrid_auth - approved_stored_scope_reads,set())
         private=os.environ.get('GATEB_PRIVATE_CANDIDATE')
         if private:
             identities=json.loads((Path(private)/'Identidades.json').read_text(encoding='utf-8'))
