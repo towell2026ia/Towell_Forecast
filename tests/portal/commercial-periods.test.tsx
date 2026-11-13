@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { attachCommercial, changeCommercial, commercialOptions, filteredProducts, matchesCommercial, modelKey, notApplicableCommercial, unknownCommercial } from "../../lib/commercial-filters";
+import { attachCommercial, changeCommercial, commercialOptions, filteredProducts, matchesChainScope, matchesCommercial, modelKey, notApplicableCommercial, selectedScopeIds, unknownCommercial } from "../../lib/commercial-filters";
 import { periodsDashboard } from "../../lib/periods-dashboard";
 import { operationalContext } from "./operational-context-fixture";
 import { operationalPeriodsSheets } from "../../lib/operational-periods-xlsx";
@@ -17,7 +17,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 // Isolated records; no private snapshot or credential is imported.
 const product: Product = { id: "p", chain_id: "c", category_id: "cat", product_code: "001", variant_code: null, description: "TOALLA MB FENDI OXFORD", identifiers: [["0001", "0002"]] };
-const classification: CommercialClassification = { product_id: "p", chain_id: "c", model: "FENDI", color: "OXFORD", size: "MEDIO BAÑO", product_type: "TOALLA", status: "PENDING_CLASSIFICATION", source: "TRANSIENT", reasons: ["PRODUCT_MAPPING_APPROVAL_REQUIRED"] };
+const classification: CommercialClassification = { product_id: "p", chain_id: "c", model: "FENDI", color: "OXFORD", size: "MEDIO BAÑO", purchase_type: "RS", product_type: "TOALLA", status: "PENDING_CLASSIFICATION", source: "TRANSIENT", reasons: ["PRODUCT_MAPPING_APPROVAL_REQUIRED"] };
 const chain = { id: "c", code: "C", name: "Authorized", status: "ACTIVE", has_history: true, parentId: null, scopeType: "COMMERCIAL_UNIT" };
 function snapshot(): ReportSnapshot {
   return { products: [{ ...product, commercial: classification }], chains: [chain], categories: [], calculations: [{ id: "calc", chain_id: "c", product_id: "p", objective: "Venta", calculation_no: 1, calculation_code: "C1", issue_period: "2026-07", status: "READY_FOR_DECISION", created_at: "2026-10-13T00:00:00Z", created_by: "actor", suggested_reference: null, recalculation_reason: null, candidate_metrics: {}, input_snapshot: {}, research_snapshot: null, data_snapshot_hash: "hash", preview_id: "preview", engine_version: "v4", git_sha: "sha", evidence_mode: "RETROSPECTIVE_TRAINING" }], horizons: Array.from({ length: 12 }, (_, i) => ({ id: String(i), calculation_id: "calc", chain_id: "c", product_id: "p", horizon: i + 1, target_period: addReportMonth("2026-07", i + 1), statistical_value: 9800.26, ml_value: 10494.38, ensemble_value: 9973.79, p10: null, p50: 9973.79, p90: null, p95: null, band_basis: "INSUFFICIENT", band_observations: 0, statistical_model: "SBA", ml_model: "RF" })), decisions: [], live: [], provisionals: [], customers: [], capabilities: { vintage_persistence: false, champion_publication: false, official_publication: false } };
@@ -81,6 +81,64 @@ describe("Model comparison keys and dependent multiselection", () => {
       await expect(client.commercialCatalog(operationalContext)).rejects.toThrow("DATA_READ_FAILED");
       client.dispose();
     }
+  });
+});
+
+describe("Purchase type and optional-format scope isolation", () => {
+  const selected: Filters = { ...emptyFilters, chainId: "parent", scopeChainIds: ["format-a", "format-b", "format-a"], purchaseType: "RS" };
+  function item(id: string, chainId: string, purchase: "RS" | "CE" | undefined, model = "SHARED MODEL"): Product {
+    return { ...product, id, chain_id: chainId, identifiers: [["SAME-UPC", id]],
+      commercial: { ...classification, product_id: id, chain_id: chainId, model, purchase_type: purchase } };
+  }
+  it("uses exact selected UUIDs, including an explicitly empty scope, never a global fallback", () => {
+    expect(new Set(selectedScopeIds(selected))).toEqual(new Set(["format-a", "format-b"]));
+    expect(matchesChainScope("format-a", selected)).toBe(true);
+    expect(matchesChainScope("format-b", selected)).toBe(true);
+    expect(matchesChainScope("parent", selected)).toBe(false);
+    expect(matchesChainScope("other-chain", selected)).toBe(false);
+    const empty = { ...selected, scopeChainIds: [] };
+    expect(selectedScopeIds(empty)).toEqual([]);
+    expect(matchesChainScope("format-a", empty)).toBe(false);
+    expect(selectedScopeIds({ ...emptyFilters, chainId: "format-b" })).toEqual(["format-b"]);
+    expect(selectedScopeIds(emptyFilters)).toBeNull();
+  });
+  it("keeps RS, CE and unknown purchase evidence independent even for identical model labels", () => {
+    const rows = [item("rs", "format-a", "RS"), item("ce", "format-a", "CE"), item("unknown", "format-a", undefined)];
+    expect(rows.filter(p => matchesCommercial(p, { ...emptyFilters, purchaseType: "RS" })).map(p => p.id)).toEqual(["rs"]);
+    expect(rows.filter(p => matchesCommercial(p, { ...emptyFilters, purchaseType: "CE" })).map(p => p.id)).toEqual(["ce"]);
+    expect(commercialOptions(rows, { ...emptyFilters, purchaseType: "CE" }, "commercialModels")).toMatchObject([{ id: "SHARED MODEL", count: 1 }]);
+    expect(commercialOptions(rows, { ...emptyFilters, purchaseType: "RS" }, "commercialModels")).toMatchObject([{ id: "SHARED MODEL", count: 1 }]);
+  });
+  it("unites all selected formats once by product UUID while retaining same UPCs in distinct scopes", async () => {
+    const a = item("a", "format-a", "RS"), b = item("b", "format-b", "RS"), ce = item("ce", "format-a", "CE"), foreign = item("foreign", "other-chain", "RS");
+    const byChain = new Map([["format-a", [a, a, ce]], ["format-b", [b]], ["other-chain", [foreign]]]);
+    const repo = { getProducts: vi.fn(async (id: string | null) => byChain.get(id ?? "") ?? []),
+      getCommercialCatalog: vi.fn(async () => [a, b, ce, foreign].map(p => p.commercial!)) } as unknown as ForecastReadRepository;
+    const actual = await filteredProducts(repo, selected);
+    expect(actual.map(p => p.id).sort()).toEqual(["a", "b"]);
+    expect(commercialOptions(actual, selected, "commercialModels")).toMatchObject([{ id: "SHARED MODEL", count: 2 }]);
+    expect(new Set((repo.getProducts as ReturnType<typeof vi.fn>).mock.calls.map(([id]) => id))).toEqual(new Set(["format-a", "format-b"]));
+    expect(await filteredProducts(repo, { ...selected, scopeChainIds: [] })).toEqual([]);
+  });
+  it("does not call any RS fact, inventory, calculation or provisional endpoint for an empty CE selection", async () => {
+    const rs = item("rs", "format-a", "RS");
+    const provisionals = vi.fn(async () => []);
+    const repo = { getProducts: vi.fn(async () => [rs]), getCommercialCatalog: vi.fn(async () => [rs.commercial!]),
+      getVisibleChains: vi.fn(async () => [{ ...chain, id: "format-a" }]), getCategories: vi.fn(async () => []),
+      previews: { vintageCapabilities: vi.fn(async () => ({ forecast_calculation_history: true })), provisionalForecasts: provisionals } } as unknown as ForecastReadRepository;
+    const client = { from: vi.fn(() => { throw new Error("RS table must not be read for CE"); }), rpc: vi.fn(() => { throw new Error("RS facts must not be read for CE"); }) };
+    const reader = new SupabaseReportReader(client as unknown as SupabaseClient, repo, new AbortController().signal);
+    const ce: Filters = { ...emptyFilters, chainId: "format-a", purchaseType: "CE" };
+    expect(await reader.history(ce, operationalContext)).toEqual([]);
+    expect(await reader.inventory(ce, operationalContext)).toEqual([]);
+    const snap = await reader.snapshot(ce, operationalContext);
+    expect(snap.products).toEqual([]); expect(snap.calculations).toEqual([]); expect(snap.provisionals).toEqual([]);
+    expect(client.from).not.toHaveBeenCalled(); expect(client.rpc).not.toHaveBeenCalled(); expect(provisionals).not.toHaveBeenCalled();
+    const dashboard = periodsDashboard(snap, [], emptyReportChoice, [null, null]);
+    const sheets = operationalPeriodsSheets(snap, dashboard, [], []);
+    expect(sheets.find(s => s.name === "Cálculos almacenados")?.rows).toEqual([]);
+    expect(sheets.find(s => s.name === "Histórico comercial")?.rows).toEqual([]);
+    expect(sheets.find(s => s.name === "Inventario")?.rows).toEqual([]);
   });
 });
 

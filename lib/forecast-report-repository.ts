@@ -3,7 +3,7 @@ import type { Filters, ForecastReadRepository, OperationalInventory, Operational
 import { emptyFilters } from "./supabase/types";
 import type { CustomerForecast, DatabasePage, DatabaseSection, ReportCalculation, ReportDecision, ReportHorizon, ReportLive, ReportSnapshot } from "./forecast-reporting";
 import { addReportMonth, amount, matchesOfficialSource } from "./forecast-reporting";
-import { attachCommercial, filteredProducts, hasCommercialFilters } from "./commercial-filters";
+import { attachCommercial, filteredProducts, hasCommercialFilters, selectedScopeIds } from "./commercial-filters";
 import { actualMetrics, combineObservations, observationFields, observationScope, operationalArguments } from "./forecast-data";
 
 const calculationFields = "id,chain_id,product_id,objective,calculation_no,calculation_code,issue_period,cutoff_at,status,created_at,created_by,preview_id,data_snapshot_hash,content_hash,input_snapshot,candidate_metrics,research_snapshot,suggested_reference,scope_leader,evidence_mode,engine_version,git_sha,recalculation_reason";
@@ -20,13 +20,15 @@ export class SupabaseReportReader {
   private async read<T>(table: string, fields: string, filters: Filters, products?: Product[], pin?: { context: OperationalReadContext; includeForecasts: boolean }) {
     this.ensureOpen();
     const output: T[] = [];
+    const scopes = selectedScopeIds(filters);
+    if (scopes?.length === 0) return output;
     if (products && !products.length) return output;
     const chunks = products ? Array.from({ length: Math.ceil(products.length / 80) }, (_, i) => products.slice(i * 80, i * 80 + 80).map(p => p.id)) : [null];
     for (const ids of chunks) {
       for (let offset = 0; offset < 100000; offset += 500) {
         let query = (pin ? this.observations(pin.context, fields, pin.includeForecasts, filters, ids ?? undefined) : this.client.from(table).select(fields))
           .order(pin ? "observation_id" : "id").range(offset, offset + 499);
-        if (filters.chainId) query = query.eq("chain_id", filters.chainId);
+        if (scopes) query = query.in("chain_id", scopes);
         if (ids) query = query.in("product_id", ids);
         if (pin) {
           if (filters.periodRange[0]) query = query.gte("period", filters.periodRange[0] + "-01");
@@ -43,7 +45,10 @@ export class SupabaseReportReader {
     return output;
   }
   async snapshot(filters: Filters, context: OperationalReadContext): Promise<ReportSnapshot> {
-    const [catalog, allChains, categories] = await Promise.all([filteredProducts(this.repository, filters), this.repository.getVisibleChains(context), this.repository.getCategories(filters.chainId)]);
+    const scopes = selectedScopeIds(filters);
+    const categoryTask = scopes === null ? this.repository.getCategories(null) :
+      Promise.all(scopes.map(id => this.repository.getCategories(id))).then(pages => [...new Map(pages.flat().map(c => [c.id, c])).values()]);
+    const [catalog, allChains, categories] = await Promise.all([filteredProducts(this.repository, filters), this.repository.getVisibleChains(context), categoryTask]);
     const products = this.repository.getCommercialCatalog && !hasCommercialFilters(filters) ? attachCommercial(catalog, await this.repository.getCommercialCatalog()) : catalog;
     const chains = allChains;
     const chainIds = new Set(chains.map(c => c.id));
@@ -75,7 +80,8 @@ export class SupabaseReportReader {
       }
     }
     const customers: CustomerForecast[] = [];
-    const provisionals = this.repository.previews?.provisionalForecasts ? await this.repository.previews.provisionalForecasts(filters.chainId, filters.productId, context) : [];
+    const provisionals = this.repository.previews?.provisionalForecasts && products.length ?
+      (await Promise.all((scopes ?? [null]).map(id => this.repository.previews!.provisionalForecasts!(id, filters.productId, context)))).flat() : [];
     const allowed = new Map(products.map(p => [p.id, p.chain_id]));
     for (const row of [...calculations, ...horizons, ...decisions, ...live, ...customers]) {
       if (allowed.get(row.product_id) !== row.chain_id) throw new Error("report_scope_mismatch");

@@ -14,7 +14,7 @@ import { MLEngineDetail } from "@/components/forecast/ml-engine-detail";
 import { StatisticalEngineDetail } from "@/components/forecast/statistical-engine-detail";
 import { useForecastFilters, useOperationPin, useRead, type PreviewView } from "./forecast-towell-app";
 import { currentRetrospectivePreview } from "@/lib/preview-presentation";
-import { hasCommercialFilters } from "@/lib/commercial-filters";
+import { hasCommercialFilters, previewScopeKey } from "@/lib/commercial-filters";
 import { PreviewPerformancePanel } from "@/components/forecast/preview-performance-panel";
 import type { VintageCapabilities, VintageDetail, VintageSummary } from "@/lib/forecast-preview";
 
@@ -67,7 +67,7 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
   const [explicitIssuePeriod, setExplicitIssuePeriod] = useState("");
   const visible = seriesVisibility ?? localVisibility, setVisible = setSeriesVisibility ?? setLocalVisibility;
   const [history, setHistory] = useState<{ key: string; rows: HistoricalMonth[]; customer: CustomerMonth[]; categoryName: string | null; error: boolean; customerError: boolean } | null>(null);
-  const key = `${filters.chainId}/${filters.productId}`;
+  const key = previewScopeKey(filters);
   const current = (sharedPreview === undefined ? localPreview : sharedPreview)?.key === key ? (sharedPreview === undefined ? localPreview : sharedPreview) : null;
   const revision = useRef(0), running = useRef(false);
   const visited = useRef(onVisit);

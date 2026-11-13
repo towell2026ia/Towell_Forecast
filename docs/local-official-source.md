@@ -61,6 +61,14 @@ Las pruebas automatizadas usan respuestas Auth y JWT sintéticos y no certifican
 
 ## Límites de evidencia
 
+La consulta comercial admite Cadena + Tipo de compra sin exigir Formato. Una
+cadena seleccionada resuelve una lista explícita de sus scopes hoja autorizados;
+«Todos los formatos» conserva esa lista y no equivale a consultar otras cadenas.
+Los reportes y sus XLSX conservan las identidades de cada variante y formato.
+La fuente instalada actualmente es RS: CE es seleccionable, pero muestra su
+exclusión sin reutilizar datos ni acciones RS. Incorporar CE requiere revisar el
+contrato de datos y autorizar su carga por separado; este ajuste no la ejecuta.
+
 - Una restauración del ensayo local acredita esa fuente y el alcance del respaldo ensayado. No acredita una recuperación integral del Supabase productivo, Storage ni Auth gestionado.
 - Importar resultados previamente calculados conserva su emisión original por scope como procedencia. La fecha de importación SQL es una fecha diferente. No se certifica WAPE LIVE ni se publica un Champion.
 - La investigación real mantiene la clave existente en Railway. No se utiliza una clave alternativa local. El ensayo sin acceso a esa clave debe informar OpenAI/Deep Research deshabilitados, sin sustituirlos por respuestas ficticias.

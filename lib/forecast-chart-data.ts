@@ -1,6 +1,6 @@
 import type { Filters } from "./supabase/types";
 import type { PreviewAggregate, PreviewCandidate, PreviewHorizon, PreviewScope } from "./forecast-preview";
-import { hasCommercialFilters, matchesCommercial, modelKey } from "./commercial-filters";
+import { hasCommercialFilters, matchesCommercial, matchesChainScope, modelKey, selectedScopeIds } from "./commercial-filters";
 import { buildForecastMatrix, emptyReportChoice, matchesOfficialSource, matrixTotal, type ReportSnapshot } from "./forecast-reporting";
 
 export type HistoricalMonth = { period: string; sale: number | null; order: number | null; delivery: number | null };
@@ -34,7 +34,8 @@ export function addMonth(period: string, offset: number) {
 }
 export function commercialScopeKey(filters: Filters) {
   return JSON.stringify([filters.chainId, filters.categoryId, filters.productId, filters.search.trim(), filters.commercialType ?? null,
-    filters.commercialModels?.map(modelKey).sort() ?? null, filters.commercialColor ?? null, filters.commercialSize ?? null, filters.classificationStatus ?? null]);
+    filters.commercialModels?.map(modelKey).sort() ?? null, filters.commercialColor ?? null, filters.commercialSize ?? null, filters.classificationStatus ?? null,
+    filters.purchaseType ?? null, selectedScopeIds(filters)?.sort() ?? null]);
 }
 function withoutScopeMetrics(candidate: PreviewCandidate): PreviewCandidate {
   return { ...candidate, retrospective_wape: null, retrospective_bias: null, retrospective_mae: null, retrospective_rmse: null,
@@ -45,7 +46,7 @@ function withoutScopeMetrics(candidate: PreviewCandidate): PreviewCandidate {
 // Present already stored curves for the exact commercial selection. This does
 // not execute a forecast or derive a group WAPE from individual percentages.
 export function storedCommercialScope(snapshot: ReportSnapshot, filters: Filters, original?: PreviewScope | null): PreviewScope {
-  if (!filters.chainId || !snapshot.sourceContext || snapshot.products.some(product => product.chain_id !== filters.chainId
+  if (!filters.chainId || !snapshot.sourceContext || snapshot.products.some(product => !matchesChainScope(product.chain_id, filters)
       || filters.productId && product.id !== filters.productId || !matchesCommercial(product, filters))) throw new Error("stored_scope_mismatch");
   const matrix = buildForecastMatrix(snapshot, emptyReportChoice, [null, null]);
   const selected = matrix.rows.find(row => row.calculation)?.calculation;

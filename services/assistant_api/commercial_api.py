@@ -21,6 +21,7 @@ def official_commercial_catalog(client, principal):
             ("product_type", "product_type"), ("model", "model"), ("color", "color"), ("size", "presentation")
         )}
         output.append({"chain_id": row["chain_id"], "product_id": row["product_id"], **attributes,
+            "purchase_type": row.get("purchase_type"), "format": row.get("format"),
             "status": "PENDING_CLASSIFICATION", "source": "OFFICIAL_WORKBOOK",
             "not_applicable": [], "reasons": ["SOURCE_ATTRIBUTE_MISSING:" + field
                                                for field, value in attributes.items() if not value]})

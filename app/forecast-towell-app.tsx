@@ -29,11 +29,11 @@ import { ForecastPeriodsView } from "./forecast-periods-view";
 import { CommercialHistoryView } from "./commercial-history-view";
 import { DatabaseView } from "./database-view";
 import { OperationalQualityView } from "./operational-quality-view";
-import { attachCommercial, changeCommercial, commercialOptions, hasCommercialFilters, matchesCommercial, type CommercialFilter } from "@/lib/commercial-filters";
+import { attachCommercial, changeCommercial, commercialOptions, hasCommercialFilters, matchesCommercial, previewScopeKey, selectedScopeIds, type CommercialFilter } from "@/lib/commercial-filters";
 import { ModelMultiselect } from "@/components/forecast/model-multiselect";
 import { PeriodsComparisonChart } from "@/components/forecast/periods-comparison-chart";
 import { periodsDashboard } from "@/lib/periods-dashboard";
-import { emptyReportChoice, matchesOfficialSource } from "@/lib/forecast-reporting";
+import { emptyReportChoice, leafScopeIds, matchesOfficialSource } from "@/lib/forecast-reporting";
 
 const modules = [
   ["inicio", "Inicio", Home], ["historico", "Histórico", History],
@@ -77,23 +77,40 @@ function Picker({ label, value, onChange, options, all = "Todas", disabled = fal
   return <div className="min-w-0 space-y-2"><Label>{label}</Label><Select value={value ?? "all"} onValueChange={v => onChange(v === "all" ? null : v)} disabled={disabled}><SelectTrigger aria-label={label} className="w-full min-w-0 bg-white [&>span]:truncate"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="all">{all}</SelectItem>{options.map(o => <SelectItem value={o.id} key={o.id}>{o.name}</SelectItem>)}</SelectContent></Select></div>;
 }
 
-// A parent is a navigation step, never an implicit rollup or a substitute UUID.
+// Parent selection explicitly resolves its authorized source scopes. It never
+// replaces a scope UUID with a guessed identity or counts parent and child twice.
 export function commercialScopeNavigation(chains: Chain[], chainId: string | null, showEmpty = false) {
   const byId = new Map(chains.map(chain => [chain.id, chain]));
   const selected = chainId ? byId.get(chainId) : undefined;
-  const parentId = selected?.parentId && byId.has(selected.parentId) ? selected.parentId : selected?.id ?? null;
+  let invalid = false;
+  const ancestry = (chain: Chain) => {
+    const result = [chain.id], seen = new Set(result);
+    let current = chain;
+    while (current.parentId && byId.has(current.parentId)) {
+      if (seen.has(current.parentId)) { invalid = true; break; }
+      current = byId.get(current.parentId)!; seen.add(current.id); result.push(current.id);
+    }
+    return result;
+  };
+  const parentId = selected ? ancestry(selected).at(-1)! : null;
   const visible = chains.filter(chain => chain.has_history || showEmpty);
-  const parents = [...new Set(visible.map(chain => chain.parentId && byId.has(chain.parentId) ? chain.parentId : chain.id))];
-  const formats = parentId ? visible.filter(chain => chain.id === parentId || chain.parentId === parentId) : [];
-  const pending = Boolean(selected && !selected.has_history && chains.some(chain => chain.parentId === selected.id));
-  return { parentId, pending, chains: parents.map(id => byId.get(id)!), formats };
+  const parents = [...new Set(visible.map(chain => ancestry(chain).at(-1)!))];
+  const members = parentId ? visible.filter(chain => ancestry(chain).includes(parentId)) : [];
+  let leaves = new Set<string>();
+  try { leaves = leafScopeIds(chains, new Set(members.map(chain => chain.id))); } catch { invalid = true; }
+  const formats = members.filter(chain => leaves.has(chain.id));
+  return { parentId, pending: false, invalid, chains: parents.map(id => byId.get(id)!), formats, scopeIds: formats.map(chain => chain.id) };
+}
+async function scopeUnion<T extends { id: string }>(ids: string[] | null, read: (id: string | null) => Promise<T[]>) {
+  const pages = ids === null ? [await read(null)] : await Promise.all(ids.map(read));
+  return [...new Map(pages.flat().map(row => [row.id, row])).values()];
 }
 
 export default function ForecastTowellApp({ profile, repository, onLogout }: { profile: Profile; repository: ForecastReadRepository; onLogout: () => Promise<void> }) {
   const [active, setActive] = useState<ModuleId>("inicio");
   const [motorVisited, setMotorVisited] = useState(false);
   const [seriesVisibility, setSeriesVisibility] = useState<SeriesVisibility>({ ...defaultVisibility });
-  const [filters, setFilters] = useState<Filters>({ ...emptyFilters });
+  const [filters, setFilters] = useState<Filters>(() => ({ ...emptyFilters, ...(repository.getCommercialCatalog && repository.openOperationalRead ? { purchaseType: "RS" as const } : {}) }));
   // One source fingerprint per interaction. A source update invalidates its
   // pending reads, so paging and exports cannot combine different inputs.
   const pinOperational = useMemo(() => {
@@ -102,21 +119,28 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
     // eslint-disable-next-line react-hooks/exhaustive-deps -- Module and filters define the lifetime of the read.
   }, [repository, active, filters]);
   const chains = useRead(useCallback(async () => repository.getVisibleChains(await pinOperational()), [repository, pinOperational]));
-  const formatPending = Boolean(repository.getCommercialCatalog && repository.openOperationalRead && filters.chainId &&
-    (chains.loading || chains.error || !chains.data?.some(c => c.id === filters.chainId) || commercialScopeNavigation(chains.data ?? [], filters.chainId).pending));
+  const selectedIds = selectedScopeIds(filters);
+  const multipleFormats = Boolean(selectedIds && selectedIds.length > 1);
+  const formatPending = Boolean(repository.getCommercialCatalog && repository.openOperationalRead &&
+    (selectedIds?.length === 0 || filters.chainId &&
+      (chains.loading || chains.error || !chains.data?.some(c => c.id === filters.chainId) || commercialScopeNavigation(chains.data ?? [], filters.chainId).invalid ||
+        selectedIds?.some(id => !chains.data?.some(c => c.id === id)) ||
+        filters.scopeChainIds === undefined && chains.data?.some(c => c.parentId === filters.chainId))));
+  const isCE = filters.purchaseType === "CE";
   const [previewView, setPreview] = useState<PreviewView | null>(null);
   const previewRead = useRef<{ repository: ForecastReadRepository; key: string; source?: OperationalReadContext; task: Promise<PreviewJob | null> } | null>(null);
-  const previewKey = `${filters.chainId}/${filters.productId}`;
+  const previewKey = previewScopeKey(filters);
+  const previewChainId = selectedIds?.length === 1 ? selectedIds[0] : filters.chainId;
   useEffect(() => {
     let alive = true;
     const client = repository.previews;
-    if (client && !formatPending) void pinOperational().then(async source => {
+    if (client && !formatPending && !isCE && !multipleFormats) void pinOperational().then(async source => {
       const cached = previewRead.current;
       const sameSource = source ? Boolean(cached?.source && matchesOfficialSource(cached.source, source)) : !cached?.source;
       // Revalidate provenance on navigation, but reuse the same endpoint read
       // (including an in-flight request) while its scope and source are fixed.
       const read = cached?.repository === repository && cached.key === previewKey && sameSource ? cached : {
-        repository, key: previewKey, source, task: client.latest(filters.chainId, filters.productId, source),
+        repository, key: previewKey, source, task: client.latest(previewChainId, filters.productId, source),
       };
       previewRead.current = read;
       return { source, job: await read.task };
@@ -132,7 +156,7 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
       }
     });
     return () => { alive = false; };
-  }, [repository, filters.chainId, filters.productId, previewKey, pinOperational, formatPending]);
+  }, [repository, previewChainId, filters.productId, previewKey, pinOperational, formatPending, isCE, multipleFormats]);
   const state = useMemo(() => ({ filters, setFilters, repository, profile, pinOperational, seriesVisibility, setSeriesVisibility, preview: previewView?.key === previewKey ? previewView : null, setPreview }), [filters, repository, profile, pinOperational, seriesVisibility, previewView, previewKey]);
   const subtitle = chains.data?.find(c => c.id === filters.chainId)?.name ?? (profile.global_role === "ADMIN" ? "Todas las cadenas" : "Todas las cadenas autorizadas");
   const title = modules.find(([id]) => id === active)?.[1] ?? "Inicio";
@@ -142,7 +166,7 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
     chain: subtitle, chainId: filters.chainId, category: filters.categoryId, categoryId: filters.categoryId,
     product: filters.productId, productId: filters.productId, color: null, period: null,
     periodRange: filters.periodRange, commercialModels: filters.commercialModels, search: filters.search,
-    activeFilters: { chainId: filters.chainId, categoryId: filters.categoryId, productId: filters.productId, periodFrom: filters.periodRange[0], periodTo: filters.periodRange[1], search: filters.search },
+    activeFilters: { chainId: filters.chainId, categoryId: filters.categoryId, productId: filters.productId, purchaseType: filters.purchaseType ?? null, scopeChainIds: filters.scopeChainIds?.join(",") ?? null, periodFrom: filters.periodRange[0], periodTo: filters.periodRange[1], search: filters.search },
   };
   return <ForecastFiltersContext.Provider value={state}><SidebarProvider>
     <Sidebar collapsible="icon" className="border-r border-slate-200">
@@ -153,7 +177,7 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
     <SidebarInset className="min-w-0 bg-[#f7f9fc]">
       <header className="sticky top-0 z-30 flex min-h-16 flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-white/95 px-4 py-2 backdrop-blur md:px-7"><div className="flex min-w-0 items-center gap-3"><SidebarTrigger aria-label="Abrir navegación"><PanelLeft/></SidebarTrigger><div className="h-6 w-px bg-slate-200"/><div className="min-w-0"><p className="truncate text-sm font-semibold text-slate-950">{active === "inicio" ? "FORECAST Towell" : title}</p><p className="truncate text-xs text-slate-500">{subtitle}</p></div></div><div className="flex items-center gap-3"><div><p className="max-w-40 truncate text-sm font-medium">{profile.full_name || "Usuario"}</p><p className="text-xs text-slate-500">{profile.global_role}</p></div><Button variant="outline" size="sm" onClick={() => { setFilters({ ...emptyFilters }); void onLogout(); }}><LogOut className="size-4"/><span className="hidden sm:inline">Cerrar sesión</span><span className="sr-only sm:hidden">Cerrar sesión</span></Button></div></header>
       <main className="mx-auto w-full max-w-[1480px] p-4 md:p-7"><GlobalFilters compact={active === "periodos"}/>
-        {formatPending ? <p role="status" className="rounded-xl border border-slate-200 bg-white p-5 text-sm text-slate-600">Selecciona un formato comercial para consultar sus productos. Las unidades de la cadena se mantienen separadas.</p> : <>
+        {isCE ? <p role="status" className="rounded-xl border border-slate-200 bg-white p-5 text-sm text-slate-600">Sin datos de Compra Especial (CE) incorporados en la fuente oficial activa.</p> : formatPending ? <p role="status" className="rounded-xl border border-slate-200 bg-white p-5 text-sm text-slate-600">Consultando el alcance comercial autorizado de la cadena.</p> : <>
         {active === "inicio" && <Dashboard/>}
         {active === "historico" && <HistoryView/>}
         {(active === "motor" || motorVisited) && <div hidden={active !== "motor"}><ForecastEnginesView scope={subtitle} onVisit={() => setMotorVisited(true)}/></div>}
@@ -165,7 +189,7 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
         </>}
       </main>
     </SidebarInset>
-    <ForecastAssistantErrorBoundary><ForecastAssistant authorized={profile.status === "ACTIVE" && !formatPending} uiEnabled apiEnabled={false} voiceEnabled={false} mode="local" context={assistantContext} rsAssistant={formatPending ? undefined : repository.previews?.rsAssistant}/></ForecastAssistantErrorBoundary>
+    <ForecastAssistantErrorBoundary><ForecastAssistant authorized={profile.status === "ACTIVE" && !formatPending && !isCE && !multipleFormats} uiEnabled apiEnabled={false} voiceEnabled={false} mode="local" context={assistantContext} rsAssistant={formatPending || isCE || multipleFormats ? undefined : repository.previews?.rsAssistant}/></ForecastAssistantErrorBoundary>
   </SidebarProvider></ForecastFiltersContext.Provider>;
 }
 
@@ -176,28 +200,45 @@ export function GlobalFilters({ compact = false }: { compact?: boolean }) {
   const [opened, setOpened] = useState(false);
   const chains = useRead(useCallback(async () => repository.getVisibleChains(await pin()), [repository, pin]));
   const commercialNavigation = Boolean(repository.getCommercialCatalog && repository.openOperationalRead);
-  const navigation = commercialScopeNavigation(chains.data ?? [], filters.chainId, showEmpty);
-  const formatPending = commercialNavigation && Boolean(filters.chainId && (chains.loading || chains.error || !chains.data?.some(c => c.id === filters.chainId) || navigation.pending));
-  const categories = useRead(useCallback(() => repository.getCategories(filters.chainId), [repository, filters.chainId]));
+  const navigation = useMemo(() => commercialScopeNavigation(chains.data ?? [], filters.chainId, showEmpty), [chains.data, filters.chainId, showEmpty]);
+  const chainId = filters.chainId, scopeChainIds = filters.scopeChainIds, purchaseType = filters.purchaseType ?? "RS";
+  const scopeIds = useMemo(() => selectedScopeIds({ ...emptyFilters, chainId, scopeChainIds }), [chainId, scopeChainIds]);
+  const formatPending = commercialNavigation && Boolean(scopeIds?.length === 0 || filters.chainId &&
+    (chains.loading || chains.error || !chains.data?.some(c => c.id === filters.chainId) || navigation.invalid ||
+      scopeIds?.some(id => !chains.data?.some(c => c.id === id)) || filters.scopeChainIds === undefined && chains.data?.some(c => c.parentId === filters.chainId)));
+  useEffect(() => {
+    if (!commercialNavigation || !chains.data || !filters.chainId || filters.scopeChainIds !== undefined ||
+      !chains.data.some(c => c.parentId === filters.chainId) || navigation.invalid) return;
+    let alive = true;
+    // Interpret an existing parent selection as the explicitly selected union;
+    // no mandatory format step and no implicit unrestricted/null fallback.
+    queueMicrotask(() => { if (alive) setFilters(previous => previous.chainId === filters.chainId && previous.scopeChainIds === undefined
+      ? { ...previous, scopeChainIds: navigation.scopeIds } : previous); });
+    return () => { alive = false; };
+  }, [commercialNavigation, chains.data, filters.chainId, filters.scopeChainIds, navigation, setFilters]);
+  const categories = useRead(useCallback(() => purchaseType === "CE" || formatPending ? Promise.resolve([]) : scopeUnion(scopeIds, id => repository.getCategories(id)), [repository, scopeIds, purchaseType, formatPending]));
   // Product text search narrows products, never the model catalogue of the scope.
-  const products = useRead(useCallback(() => repository.getProducts(filters.chainId, filters.categoryId, ""), [repository, filters.chainId, filters.categoryId]));
-  const searchedProducts = useRead(useCallback(() => filters.search ? repository.getProducts(filters.chainId, filters.categoryId, filters.search) : Promise.resolve(null), [repository, filters.chainId, filters.categoryId, filters.search]));
-  const commercial = useRead(useCallback(async () => repository.getCommercialCatalog?.(await pin()) ?? null, [repository, pin]));
+  const products = useRead(useCallback(() => purchaseType === "CE" || formatPending ? Promise.resolve([]) : scopeUnion(scopeIds, id => repository.getProducts(id, filters.categoryId, "")), [repository, scopeIds, filters.categoryId, purchaseType, formatPending]));
+  const searchedProducts = useRead(useCallback(() => purchaseType !== "CE" && !formatPending && filters.search ? scopeUnion(scopeIds, id => repository.getProducts(id, filters.categoryId, filters.search)) : Promise.resolve(null), [repository, scopeIds, filters.categoryId, filters.search, purchaseType, formatPending]));
+  const commercial = useRead(useCallback(async () => purchaseType === "CE" ? [] : repository.getCommercialCatalog?.(await pin()) ?? null, [repository, pin, purchaseType]));
   const catalog = useMemo(() => {
     try { return commercial.data && products.data ? attachCommercial(products.data, commercial.data) : products.data ?? []; }
     catch { return []; }
   }, [products.data, commercial.data]);
+  const commercialScope = commercialNavigation ? { ...filters, purchaseType } : filters;
   const searchIds = filters.search ? new Set(searchedProducts.data?.map(p => p.id) ?? []) : null;
-  const matching = catalog.filter(p => matchesCommercial(p, filters) && (!searchIds || searchIds.has(p.id)));
+  const matching = catalog.filter(p => matchesCommercial(p, commercialScope) && (!searchIds || searchIds.has(p.id)));
   const selectedProducts = matching.filter(p => !filters.productId || p.id === filters.productId);
   const periods = useRead(useCallback(async () => {
-    if (formatPending) return [];
+    if (formatPending || purchaseType === "CE") return [];
     const context = await pin();
-    return repository.getReportPeriods ? repository.getReportPeriods(filters.chainId, context) : repository.getPeriods(filters.chainId, context);
-  }, [repository, filters.chainId, pin, formatPending]));
+    const pages = scopeIds === null ? [await (repository.getReportPeriods ? repository.getReportPeriods(undefined, context) : repository.getPeriods(undefined, context))]
+      : await Promise.all(scopeIds.map(id => repository.getReportPeriods ? repository.getReportPeriods(id, context) : repository.getPeriods(id, context)));
+    return [...new Set(pages.flat())].sort();
+  }, [repository, scopeIds, pin, formatPending, purchaseType]));
   const chainMap = new Map(chains.data?.map(c => [c.id, c.name]) ?? []);
   const options = (chains.data ?? []).filter(c => c.has_history || showEmpty).map(c => ({ id: c.id, name: `${c.parentId && chainMap.has(c.parentId) ? chainMap.get(c.parentId) + " → " : ""}${c.name}${c.has_history ? "" : " · Sin histórico"}` }));
-  const modelControl = <ModelMultiselect key={`${filters.chainId}/${filters.categoryId}/${filters.commercialType}/${filters.classificationStatus}`} value={filters.commercialModels ?? null} onChange={ids => setFilters(f => changeCommercial({ ...f, search: "" }, "commercialModels", ids))} options={commercialOptions(catalog, filters, "commercialModels")} disabled={formatPending || commercial.loading || commercial.error || products.loading || products.error || !commercial.data}/>;
+  const modelControl = <ModelMultiselect key={`${previewScopeKey(commercialScope)}/${filters.categoryId}/${filters.commercialType}/${filters.classificationStatus}`} value={filters.commercialModels ?? null} onChange={ids => setFilters(f => changeCommercial({ ...f, search: "" }, "commercialModels", ids))} options={commercialOptions(catalog, commercialScope, "commercialModels")} disabled={formatPending || commercial.loading || commercial.error || products.loading || products.error || !commercial.data}/>;
   const periodControls = <>
     <Picker label="Periodo desde" value={filters.periodRange[0]} onChange={id => setFilters(f => ({ ...f, periodRange: [id, f.periodRange[1] && id && f.periodRange[1] < id ? id : f.periodRange[1]] }))} options={(periods.data ?? []).map(p => ({ id: p, name: p }))} disabled={formatPending || periods.loading || periods.error} all="Desde el inicio"/>
     <Picker label="Periodo hasta" value={filters.periodRange[1]} onChange={id => setFilters(f => ({ ...f, periodRange: [f.periodRange[0] && id && f.periodRange[0] > id ? id : f.periodRange[0], id] }))} options={(periods.data ?? []).map(p => ({ id: p, name: p }))} disabled={formatPending || periods.loading || periods.error} all="Hasta el último"/>
@@ -212,35 +253,35 @@ export function GlobalFilters({ compact = false }: { compact?: boolean }) {
     filters.periodRange.some(Boolean) ? `Periodo ${filters.periodRange[0] ?? "inicio"} a ${filters.periodRange[1] ?? "último"}` : null,
   ].filter(Boolean);
   return <section aria-label="Filtros globales" className="mb-6 rounded-lg border border-slate-200 bg-white p-4">
-    {compact && <div className="flex flex-wrap items-center justify-between gap-3"><div className="min-w-0 text-sm"><strong>{chainMap.get(filters.chainId ?? "") ?? "Todas las cadenas autorizadas"}{commercialNavigation ? " · RS" : ""}</strong><p className="mt-1 break-words text-xs text-slate-500">{activeLabels.join(" · ") || "Todas las categorías y productos"}</p></div><Button variant="outline" size="sm" aria-expanded={opened} aria-controls="commercial-global-controls" onClick={() => setOpened(v => !v)}><SlidersHorizontal className="size-4"/>Filtros</Button></div>}
+    {compact && <div className="flex flex-wrap items-center justify-between gap-3"><div className="min-w-0 text-sm"><strong>{chainMap.get(filters.chainId ?? "") ?? "Todas las cadenas autorizadas"}{commercialNavigation ? ` · ${purchaseType}` : ""}</strong><p className="mt-1 break-words text-xs text-slate-500">{activeLabels.join(" · ") || "Todas las categorías y productos"}</p></div><Button variant="outline" size="sm" aria-expanded={opened} aria-controls="commercial-global-controls" onClick={() => setOpened(v => !v)}><SlidersHorizontal className="size-4"/>Filtros</Button></div>}
     <div id="commercial-global-controls" hidden={compact && !opened} className={compact ? "mt-4" : ""}>
     {commercialNavigation && <div className="mb-4 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-      <Picker label="Cadena" value={navigation.parentId} onChange={id => setFilters(f => resetForChain(f, id))} options={navigation.chains.map(c => ({ id: c.id, name: c.name }))} disabled={chains.loading || chains.error} all={profile.global_role === "ADMIN" ? "Todas las cadenas" : "Todas las autorizadas"}/>
-      <div className="space-y-2"><Label htmlFor="commercial-purchase-type">Tipo de compra</Label><Input id="commercial-purchase-type" value="RS · Resurtible" readOnly aria-readonly="true" className="bg-slate-50"/></div>
-      <Picker label="Formato" value={formatPending ? null : filters.chainId} onChange={id => setFilters(f => resetForChain(f, id ?? navigation.parentId))} options={navigation.formats.map(c => ({ id: c.id, name: `${c.name}${c.has_history ? "" : " · Sin histórico"}` }))} disabled={!navigation.parentId || chains.loading || chains.error} all="Selecciona un formato"/>
+      <Picker label="Cadena" value={navigation.parentId} onChange={id => setFilters(f => ({ ...resetForChain(f, id), purchaseType: f.purchaseType ?? "RS", scopeChainIds: id ? commercialScopeNavigation(chains.data ?? [], id, showEmpty).scopeIds : undefined }))} options={navigation.chains.map(c => ({ id: c.id, name: c.name }))} disabled={chains.loading || chains.error} all={profile.global_role === "ADMIN" ? "Todas las cadenas" : "Todas las autorizadas"}/>
+      <div className="space-y-2"><Label htmlFor="commercial-purchase-type">Tipo de compra</Label><Select value={purchaseType} onValueChange={value => setFilters(f => ({ ...resetForChain(f, f.chainId), scopeChainIds: f.scopeChainIds, purchaseType: value as "RS" | "CE" }))}><SelectTrigger id="commercial-purchase-type" aria-label="Tipo de compra" className="w-full bg-white"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="RS">RS · Resurtible</SelectItem><SelectItem value="CE">CE · Compra Especial</SelectItem></SelectContent></Select></div>
+      <Picker label="Formato" value={filters.scopeChainIds !== undefined ? null : filters.chainId} onChange={id => setFilters(f => ({ ...resetForChain(f, id ?? navigation.parentId), purchaseType: f.purchaseType ?? "RS", scopeChainIds: id ? undefined : navigation.scopeIds }))} options={navigation.formats.map(c => ({ id: c.id, name: `${c.name}${c.has_history ? "" : " · Sin histórico"}` }))} disabled={!navigation.parentId || chains.loading || chains.error} all="Todos los formatos"/>
       {modelControl}{periodControls}
     </div>}
     <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
       {!commercialNavigation && <Picker label="Cadena / unidad comercial" value={filters.chainId} onChange={id => setFilters(f => resetForChain(f, id))} options={options} disabled={chains.loading || chains.error} all={profile.global_role === "ADMIN" ? "Todas las cadenas" : "Todas las autorizadas"}/>}
-      <Picker label="Categoría" value={filters.categoryId} onChange={id => setFilters(f => ({ ...f, categoryId: id, search: "", productId: null, commercialType: null, commercialModels: null, commercialColor: null, commercialSize: null }))} options={(categories.data ?? []).map(c => ({ id: c.id, name: !filters.chainId && chainMap.has(c.chain_id) ? `${c.name} · ${chainMap.get(c.chain_id)}` : c.name }))} disabled={formatPending || categories.loading || categories.error}/>
-      {([["commercialType", "Tipo"], ["commercialModels", "Modelo"], ["commercialColor", "Color"], ["commercialSize", "Tamaño / Presentación"]] as [CommercialFilter, string][]).map(([field, label]) => field === "commercialModels" ? !commercialNavigation && <div key={field}>{modelControl}</div> : <Picker key={field} label={label} value={filters[field] ?? null} onChange={id => setFilters(f => changeCommercial({ ...f, search: "" }, field, id))} options={commercialOptions(catalog, filters, field)} disabled={formatPending || commercial.loading || commercial.error || products.loading || products.error || !commercial.data} all="Todos"/>)}
+      <Picker label="Categoría" value={filters.categoryId} onChange={id => setFilters(f => ({ ...f, categoryId: id, search: "", productId: null, commercialType: null, commercialModels: null, commercialColor: null, commercialSize: null }))} options={(categories.data ?? []).map(c => ({ id: c.id, name: (!filters.chainId || (scopeIds?.length ?? 0) > 1) && chainMap.has(c.chain_id) ? `${c.name} · ${chainMap.get(c.chain_id)}` : c.name }))} disabled={formatPending || categories.loading || categories.error}/>
+      {([["commercialType", "Tipo"], ["commercialModels", "Modelo"], ["commercialColor", "Color"], ["commercialSize", "Tamaño / Presentación"]] as [CommercialFilter, string][]).map(([field, label]) => field === "commercialModels" ? !commercialNavigation && <div key={field}>{modelControl}</div> : <Picker key={field} label={label} value={filters[field] ?? null} onChange={id => setFilters(f => changeCommercial({ ...f, search: "" }, field, id))} options={commercialOptions(catalog, commercialScope, field)} disabled={formatPending || commercial.loading || commercial.error || products.loading || products.error || !commercial.data} all="Todos"/>)}
       <Picker label="Producto" value={filters.productId} onChange={id => setFilters(f => {
         if (!id) return { ...f, productId: null };
         const selected = matching.find(p => p.id === id);
         // Product identity includes its chain. A product picked from "Todas"
         // must never be sent to Railway without that exact scope.
-        if (selected && f.chainId !== selected.chain_id) return { ...f, chainId: selected.chain_id, categoryId: selected.category_id, productId: id };
-        return { ...f, productId: id };
-      })} options={matching.map(p => ({ id: p.id, name: `${p.description} · ${p.product_code}${p.variant_code ? " · " + p.variant_code : ""}${commercial.data && !filters.chainId ? ` · ${chainMap.get(p.chain_id) ?? p.chain_id}` : ""}` }))} disabled={formatPending || products.loading || products.error || Boolean(filters.search && (searchedProducts.loading || searchedProducts.error))} all={`Todos los productos${commercial.data ? ` (${matching.length})` : ""}`}/>
+        if (selected) return { ...f, chainId: selected.chain_id, scopeChainIds: undefined, categoryId: selected.category_id, productId: id };
+        return f;
+      })} options={matching.map(p => ({ id: p.id, name: `${p.description} · ${p.product_code}${p.variant_code ? " · " + p.variant_code : ""}${commercial.data && (!filters.chainId || (scopeIds?.length ?? 0) > 1) ? ` · ${chainMap.get(p.chain_id) ?? p.chain_id}` : ""}` }))} disabled={formatPending || products.loading || products.error || Boolean(filters.search && (searchedProducts.loading || searchedProducts.error))} all={`Todos los productos${commercial.data ? ` (${matching.length})` : ""}`}/>
       <div className="space-y-2"><Label htmlFor="product-search">Buscar producto, ITEM, UPC o variante</Label><Input id="product-search" type="search" maxLength={100} value={filters.search} disabled={formatPending} onChange={e => setFilters(f => ({ ...f, search: e.target.value, productId: null }))} placeholder="Buscar en catálogo autorizado"/></div>
     </div>
     <div className="mt-4 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
       <Picker label="Clasificación comercial" value={filters.classificationStatus ?? null} onChange={id => setFilters(f => ({ ...f, classificationStatus: id, search: "", productId: null, commercialType: null, commercialModels: null, commercialColor: null, commercialSize: null }))} options={[{ id: "APPROVED", name: "Aprobada" }, { id: "PENDING_CLASSIFICATION", name: "Pendiente de clasificación" }]} disabled={formatPending || commercial.loading || commercial.error || !commercial.data}/>
       {!commercialNavigation && periodControls}
-      <div className="flex flex-wrap items-end gap-4 pb-1"><label className="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" checked={showEmpty} onChange={e => setShowEmpty(e.target.checked)}/>Scopes sin histórico</label><Button variant="ghost" size="sm" onClick={() => setFilters({ ...emptyFilters })}><RotateCcw className="size-4"/>Limpiar</Button></div>
+      <div className="flex flex-wrap items-end gap-4 pb-1"><label className="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" checked={showEmpty} onChange={e => setShowEmpty(e.target.checked)}/>Scopes sin histórico</label><Button variant="ghost" size="sm" onClick={() => setFilters({ ...emptyFilters, ...(commercialNavigation ? { purchaseType: "RS" as const } : {}) })}><RotateCcw className="size-4"/>Limpiar</Button></div>
     </div>
     </div>
-    {formatPending ? <p className="mt-3 text-xs text-slate-600">Formato pendiente de selección; no se consolidan automáticamente unidades padre e hijo.</p> : commercial.data && <p className="mt-3 text-xs text-slate-600">{selectedProducts.length} productos coinciden{selectedProducts.some(p => p.commercial?.status !== "APPROVED") ? " · Clasificaciones comerciales provisionales" : ""}{filters.periodRange.some(Boolean) ? ` · Periodo ${filters.periodRange[0] ?? "inicio"} a ${filters.periodRange[1] ?? "último"}` : ""}</p>}
+    {formatPending ? <p className="mt-3 text-xs text-slate-600">Alcance comercial no disponible; se requiere una cadena autorizada con scopes identificados.</p> : commercial.data && <p className="mt-3 text-xs text-slate-600">{selectedProducts.length} productos coinciden{selectedProducts.some(p => p.commercial?.status !== "APPROVED") ? " · Clasificaciones comerciales provisionales" : ""}{filters.periodRange.some(Boolean) ? ` · Periodo ${filters.periodRange[0] ?? "inicio"} a ${filters.periodRange[1] ?? "último"}` : ""}</p>}
     {commercial.error && <p role="alert" className="mt-3 text-sm text-rose-700">No fue posible cargar la clasificación comercial.</p>}
     {[[chains.error, "las cadenas"], [categories.error, "las categorías"], [products.error || searchedProducts.error, "los productos"], [periods.error, "los periodos"]].map(([failed, control]) => failed && <p key={String(control)} role="alert" className="mt-3 text-sm text-rose-700">No fue posible cargar {control}.{control === "los periodos" && repository.getReadDiagnostic?.("getPeriods")?.code ? ` Código ${repository.getReadDiagnostic?.("getPeriods")?.code}.` : ""}</p>)}
   </section>;

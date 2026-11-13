@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from services.assistant_api.auth import AuthFailure, Principal, ROLE_PERMISSIONS
-from services.assistant_api.commercial_api import commercial_catalog, mount_commercial_routes
+from services.assistant_api.commercial_api import commercial_catalog, official_commercial_catalog, mount_commercial_routes
 from services.assistant_api.supabase_access import PreviewError
 
 RULES = json.loads(Path("config/commercial_catalog_rules.json").read_text(encoding="utf-8"))
@@ -52,6 +52,14 @@ class CommercialReadTests(unittest.TestCase):
     def setUp(self):
         self.source = Source()
         self.principal = SimpleNamespace(chain_ids={"c"})
+
+    def test_official_purchase_type_and_format_are_original_metadata_not_inferred(self):
+        from unittest.mock import Mock
+        self.source.catalog_rows = Mock(return_value=[{"chain_id": "c", "product_id": "p", "purchase_type": "CE", "format": "FORMATO ORIGINAL", "model": "RS in a model name"}])
+        row = official_commercial_catalog(self.source, self.principal)["products"][0]
+        self.assertEqual((row["purchase_type"], row["format"]), ("CE", "FORMATO ORIGINAL"))
+        self.source.catalog_rows.return_value[0].pop("purchase_type")
+        self.assertIsNone(official_commercial_catalog(self.source, self.principal)["products"][0]["purchase_type"])
 
     def test_complete_catalog_is_transient_pending_and_scoped(self):
         before = copy.deepcopy(self.source.data)

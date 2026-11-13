@@ -4,6 +4,23 @@ export const unknownCommercial = "__UNKNOWN__";
 export const notApplicableCommercial = "__NOT_APPLICABLE__";
 export const commercialFields = { commercialType: "product_type", commercialModels: "model", commercialColor: "color", commercialSize: "size" } as const;
 export type CommercialFilter = keyof typeof commercialFields;
+// A logical chain can select its explicitly authorized commercial units. An
+// empty list means no scope, never the unrestricted/null selection.
+export function selectedScopeIds(filters: Filters): string[] | null {
+  return filters.scopeChainIds !== undefined ? [...new Set(filters.scopeChainIds)] : filters.chainId ? [filters.chainId] : null;
+}
+export function matchesChainScope(chainId: string, filters: Filters) {
+  const ids = selectedScopeIds(filters);
+  return ids === null || ids.includes(chainId);
+}
+export function scopedQueryChainId(filters: Filters): string | undefined {
+  const ids = selectedScopeIds(filters);
+  return ids?.length === 1 ? ids[0] : undefined;
+}
+export function previewScopeKey(filters: Filters) {
+  return !filters.purchaseType && filters.scopeChainIds === undefined ? `${filters.chainId}/${filters.productId}` :
+    JSON.stringify([filters.purchaseType ?? null, filters.chainId, selectedScopeIds(filters)?.sort() ?? null, filters.productId]);
+}
 // Comparison/display only. NFC preserves accents and compatibility characters;
 // no accent removal, token deletion or fuzzy matching is authorized.
 export function modelKey(value: string) {
@@ -15,9 +32,10 @@ function attributeValue(p: Product, field: CommercialFilter) {
   return value ? field === "commercialModels" ? modelKey(value) || unknownCommercial : value : (p.commercial?.not_applicable?.some(v => v === attribute) ? notApplicableCommercial : unknownCommercial);
 }
 export function hasCommercialFilters(f: Filters) {
-  return Boolean(f.classificationStatus || Object.keys(commercialFields).some(k => f[k as CommercialFilter]));
+  return Boolean(f.purchaseType || f.scopeChainIds !== undefined || f.classificationStatus || Object.keys(commercialFields).some(k => f[k as CommercialFilter]));
 }
 export function matchesCommercial(p: Product, filters: Filters, except?: CommercialFilter) {
+  if (!matchesChainScope(p.chain_id, filters) || filters.purchaseType && p.commercial?.purchase_type !== filters.purchaseType) return false;
   if (filters.classificationStatus && (p.commercial?.status ?? "PENDING_CLASSIFICATION") !== filters.classificationStatus) return false;
   return (Object.keys(commercialFields) as CommercialFilter[]).every(filter => {
     const value = filters[filter];
@@ -37,7 +55,16 @@ export function attachCommercial(products: Product[], classifications: Commercia
   });
 }
 export async function filteredProducts(repository: ForecastReadRepository, filters: Filters) {
-  let products = await repository.getProducts(filters.chainId, filters.categoryId, filters.search);
+  const scopes = selectedScopeIds(filters);
+  const pages = scopes === null ? [await repository.getProducts(null, filters.categoryId, filters.search)]
+    : await Promise.all(scopes.map(id => repository.getProducts(id, filters.categoryId, filters.search)));
+  const unique = new Map<string, Product>();
+  for (const product of pages.flat()) {
+    if (!matchesChainScope(product.chain_id, filters)) throw new Error("commercial_scope_mismatch");
+    if (unique.has(product.id) && unique.get(product.id)!.chain_id !== product.chain_id) throw new Error("commercial_duplicate_identity");
+    unique.set(product.id, product);
+  }
+  let products = [...unique.values()];
   if (repository.getCommercialCatalog && hasCommercialFilters(filters)) products = attachCommercial(products, await repository.getCommercialCatalog());
   else if (hasCommercialFilters(filters)) throw new Error("commercial_catalog_unavailable");
   return products.filter(p => (!filters.productId || p.id === filters.productId) && matchesCommercial(p, filters));

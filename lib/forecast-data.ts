@@ -5,7 +5,7 @@ import { RailwayPreviewClient } from "./forecast-preview";
 import { SupabaseUserAdminClient } from "./supabase/user-admin";
 import type { HistoricalMonth, CustomerMonth } from "./forecast-chart-data";
 import { SupabaseReportReader } from "./forecast-report-repository";
-import { attachCommercial, filteredProducts, hasCommercialFilters } from "./commercial-filters";
+import { attachCommercial, filteredProducts, hasCommercialFilters, matchesChainScope, scopedQueryChainId } from "./commercial-filters";
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 type ProductMapping = { id: string; identifier_mappings?: [string | null, string | null][] };
@@ -23,7 +23,7 @@ export function operationalArguments(context: OperationalReadContext) {
 
 export function observationScope(filters: Filters, productIds?: string[]) {
   return {
-    p_chain_id: filters.chainId ?? undefined,
+    p_chain_id: scopedQueryChainId(filters),
     p_product_ids: productIds ?? (filters.productId ? [filters.productId] : undefined),
     p_from: filters.periodRange[0] ? `${filters.periodRange[0]}-01` : undefined,
     p_to: filters.periodRange[1] ? `${filters.periodRange[1]}-01` : undefined,
@@ -272,7 +272,7 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
     for (let page = 0; page < 800; page++) {
       const result = await this.getHistoricalObservations(filters, { size: 250, cursor }, context);
       for (const row of result.rows) {
-        if (row.chain_id !== filters.chainId || filters.productId && row.product_id !== filters.productId || filters.categoryId && row.product.category_id !== filters.categoryId) throw new Error("chart_identity_mismatch");
+        if (!matchesChainScope(row.chain_id, filters) || filters.productId && row.product_id !== filters.productId || filters.categoryId && row.product.category_id !== filters.categoryId) throw new Error("chart_identity_mismatch");
         const period = row.period.slice(0, 7);
         const month = months.get(period) ?? { period, sale: null, order: null, delivery: null };
         for (const [metric, key] of [["SALES", "sale"], ["ORDER", "order"], ["DELIVERY", "delivery"]] as const) {
@@ -293,7 +293,7 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
     const rows = await this.reports.history(filters, context, true);
     const months = new Map<string, number>();
     for (const row of rows) {
-      if (row.chain_id !== filters.chainId) throw new Error("customer_identity_mismatch");
+      if (!matchesChainScope(row.chain_id, filters)) throw new Error("customer_identity_mismatch");
       const literal = row.exact?.FCST_CLIENTE_HISTORY;
       if (literal === undefined) continue;
       const period = row.period.slice(0, 7);
