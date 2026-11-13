@@ -232,7 +232,7 @@ export function GlobalFilters({ compact = false }: { compact?: boolean }) {
   const periods = useRead(useCallback(async () => {
     if (formatPending || purchaseType === "CE") return [];
     const context = await pin();
-    const pages = scopeIds === null ? [await (repository.getReportPeriods ? repository.getReportPeriods(undefined, context) : repository.getPeriods(undefined, context))]
+    const pages = scopeIds === null ? [await (repository.getReportPeriods ? repository.getReportPeriods(null, context) : repository.getPeriods(null, context))]
       : await Promise.all(scopeIds.map(id => repository.getReportPeriods ? repository.getReportPeriods(id, context) : repository.getPeriods(id, context)));
     return [...new Set(pages.flat())].sort();
   }, [repository, scopeIds, pin, formatPending, purchaseType]));
