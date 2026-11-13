@@ -92,7 +92,7 @@ const safeCodes = new Set(["AUTH_REQUIRED", "SCOPE_FORBIDDEN", "REQUEST_001", "P
 export class RailwayPreviewClient implements PreviewClient {
   private controller = new AbortController();
   readonly rsAssistant?: RsAssistantClient;
-  constructor(private auth: SupabaseClient, private origin = process.env.NEXT_PUBLIC_FORECAST_API_URL ?? "") {
+  constructor(private auth: SupabaseClient, private origin = process.env.NEXT_PUBLIC_FORECAST_API_URL ?? "", private sourceClient: SupabaseClient = auth) {
     try { this.apiOrigin(); } catch { return; }
     this.rsAssistant = async (request, signal) => {
       if (!assistantScopeIsValid(request)) throw new PreviewReadError("REQUEST_001");
@@ -110,7 +110,7 @@ export class RailwayPreviewClient implements PreviewClient {
     } catch { throw new PreviewReadError("PREVIEW_CONFIGURATION_REQUIRED"); }
   }
   private async officialSource(context?: OperationalReadContext) {
-    const { data, error } = await this.auth.rpc("operational_read_context").abortSignal(this.controller.signal);
+    const { data, error } = await this.sourceClient.rpc("operational_read_context").abortSignal(this.controller.signal);
     const source = Array.isArray(data) && data.length === 1 ? data[0] as OperationalReadContext : null;
     if (error || !source || !/^[0-9a-f]{64}$/.test(source.source_hash) || !Number.isSafeInteger(source.generation)) throw new PreviewReadError("DATA_READ_FAILED");
     if (context && !matchesOfficialSource(source, context)) throw new PreviewReadError("DATA_READ_FAILED");

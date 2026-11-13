@@ -31,8 +31,9 @@ def matches_source(value, context):
 
 class SupabaseReadClient:
     def __init__(self, url: str, key: str, token: str | None = None, *, timeout: int = 10,
-                 transport: httpx.BaseTransport | None = None):
+                 transport: httpx.BaseTransport | None = None, auth_url: str | None = None):
         self.url, self._key, self._token = url.rstrip("/"), key, token
+        self.auth_url = (auth_url or url).rstrip("/")
         self.timeout, self.transport = timeout, transport
         self._operational_context: dict[str, str | int] | None = None
 
@@ -40,7 +41,7 @@ class SupabaseReadClient:
         return "SupabaseReadClient(GET-only, credentials redacted)"
 
     def bind(self, token: str) -> "SupabaseReadClient":
-        return SupabaseReadClient(self.url, self._key, token, timeout=self.timeout, transport=self.transport)
+        return SupabaseReadClient(self.url, self._key, token, timeout=self.timeout, transport=self.transport, auth_url=self.auth_url)
 
     def get(self, path: str, params: dict[str, Any] | None = None):
         if not self._token:
@@ -130,7 +131,7 @@ class SupabaseReadClient:
                 raise ValueError()
             segment = self._token.split(".")[1]
             claims = json.loads(base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4)))
-            if not isinstance(claims, dict) or claims.get("iss") != self.url + "/auth/v1" or claims.get("aud") != "authenticated" \
+            if not isinstance(claims, dict) or claims.get("iss") != self.auth_url + "/auth/v1" or claims.get("aud") != "authenticated" \
                     or type(claims.get("exp")) not in (int, float) or not math.isfinite(claims["exp"]) or claims["exp"] <= time.time() \
                     or not claims.get("session_id"):
                 raise ValueError()

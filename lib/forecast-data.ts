@@ -77,8 +77,8 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
   readonly previews: RailwayPreviewClient;
   readonly userAdmin: SupabaseUserAdminClient;
   private reports: SupabaseReportReader;
-  constructor(private client: SupabaseClient, private userId: string, private onReadFailure?: (diagnostic: PortalReadDiagnostic) => void) {
-    this.previews = new RailwayPreviewClient(client); this.userAdmin = new SupabaseUserAdminClient(client);
+  constructor(private client: SupabaseClient, private userId: string, private onReadFailure?: (diagnostic: PortalReadDiagnostic) => void, private authClient: SupabaseClient = client) {
+    this.previews = new RailwayPreviewClient(authClient, undefined, client); this.userAdmin = new SupabaseUserAdminClient(client);
     this.reports = new SupabaseReportReader(client, this, this.controller.signal);
   }
   async openOperationalRead(): Promise<OperationalReadContext> {
@@ -132,7 +132,7 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
     return result.data as T;
   }
   async getCurrentProfile() {
-    const { data, error } = await this.client.auth.getUser();
+    const { data, error } = await this.authClient.auth.getUser();
     if (error || data.user?.id !== this.userId) throw new Error("session_invalid");
     const profile = await this.rows<Profile | null>(this.client.from("profiles").select("id,full_name,global_role,status").eq("id", this.userId).abortSignal(this.controller.signal).maybeSingle());
     return assertActiveProfile(profile, this.userId);

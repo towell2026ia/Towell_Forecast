@@ -1,12 +1,15 @@
 import { createClient } from "@supabase/supabase-js";
 import { assertActiveProfile, SupabaseForecastReadRepository } from "@/lib/forecast-data";
-import { validatePublicConfig } from "@/lib/supabase/client";
+import { isHybridConfig, validatePublicConfig } from "@/lib/supabase/client";
 import { emptyFilters, type Profile } from "@/lib/supabase/types";
 import { logReadDiagnostic, parseReadDiagnostic, PortalReadError, type PortalReadDiagnostic } from "@/lib/portal-read-diagnostic";
 import { publicPortalConfig } from "@/lib/supabase/public-config";
 
 async function authorize(request: Request) {
   const config = publicPortalConfig();
+  // This hosted-read attestation is intentionally unavailable for a local
+  // commercial workspace. The local API authenticates every data request.
+  if (isHybridConfig(config)) return Response.json({ error: "local_validation_unavailable" }, { status: 503, headers: { "Cache-Control": "no-store" } });
   const authorization = request.headers.get("authorization");
   const denied = (status: number) => Response.json({ error: "portal_access_denied" }, { status, headers: { "Cache-Control": "no-store" } });
   if (!authorization?.startsWith("Bearer ") || authorization.length > 8192) return denied(401);

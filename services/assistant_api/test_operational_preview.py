@@ -168,6 +168,32 @@ class ProviderTests(unittest.TestCase):
         with self.assertRaisesRegex(PreviewError, "AUTH_REQUIRED"):
             client.identity()
 
+    def test_local_data_client_verifies_hosted_issuer_without_hosted_data_reads(self):
+        calls = []
+        def local(request):
+            calls.append(request)
+            if request.url.path.endswith("/user"):
+                return httpx.Response(200, json={"id": USER})
+            table = request.url.path.rsplit("/", 1)[-1]
+            return httpx.Response(200, json={
+                "profiles": [{"id": USER, "status": "ACTIVE", "global_role": "VIEWER"}],
+                "chains": [{"id": A, "name": "Allowed", "status": "ACTIVE"}],
+                "user_chain_access": [{"chain_id": A, "can_view": True, "can_run_forecast": False}],
+            }[table])
+        root = SupabaseReadClient("http://127.0.0.1:8000", KEY, auth_url=URL,
+                                  transport=httpx.MockTransport(local))
+        result = root.bind(jwt()).identity()
+        self.assertEqual((result["user_id"], result["role"], result["chain_ids"]),
+                         (USER, "VIEWER", frozenset({A})))
+        self.assertFalse(result["execute_chain_ids"])
+        self.assertTrue(all(str(r.url).startswith("http://127.0.0.1:8000/") for r in calls))
+        # Changing actor_id or supplying a localhost-issued token cannot bypass
+        # the expected hosted issuer, before any adapter request is attempted.
+        before = len(calls)
+        with self.assertRaisesRegex(PreviewError, "AUTH_REQUIRED"):
+            root.bind(jwt(iss="http://127.0.0.1:8000/auth/v1")).identity()
+        self.assertEqual(len(calls), before)
+
     def test_pagination_and_upstream_failure_are_bounded_safe(self):
         calls = []
         def pages(request):

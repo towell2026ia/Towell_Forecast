@@ -7,7 +7,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { clearBrowserSession, getBrowserClient, logPortalEvent, validatePublicConfig } from "@/lib/supabase/client";
+import { clearBrowserSession, getBrowserClient, getDataClient, invalidateLocalDataSession, isHybridConfig, logPortalEvent, validatePublicConfig } from "@/lib/supabase/client";
 import { SupabaseForecastReadRepository } from "@/lib/forecast-data";
 import type { ForecastReadRepository, Profile, PublicSupabaseConfig } from "@/lib/supabase/types";
 import ForecastTowellApp from "./forecast-towell-app";
@@ -35,7 +35,7 @@ export function LoginPanel({ busy, error, configured, onSubmit, onRequestReset }
         {notice && reset && <p role="status" className="rounded-lg bg-blue-50 p-3 text-sm text-blue-900">Si existe una cuenta autorizada y la solicitud puede procesarse, recibirás un enlace para restablecer tu contraseña. Revisa también la carpeta de spam.</p>}
         {!configured && <p role="alert" className="rounded-lg bg-amber-50 p-3 text-sm text-amber-900">El acceso aún no está configurado. Contacta al administrador.</p>}
         <Button type="submit" className="w-full bg-blue-700" disabled={busy || !configured || (reset && notice)}>{busy ? (reset ? "Procesando solicitud…" : "Verificando acceso…") : reset ? "Enviar enlace de recuperación" : "Iniciar sesión"}</Button>
-        <Button type="button" variant="link" className="w-full text-blue-700" disabled={busy || !configured} onClick={() => { setReset(!reset); setNotice(false); }}>{reset ? "Volver a iniciar sesión" : "¿Olvidaste tu contraseña?"}</Button>
+        {onRequestReset && <Button type="button" variant="link" className="w-full text-blue-700" disabled={busy || !configured} onClick={() => { setReset(!reset); setNotice(false); }}>{reset ? "Volver a iniciar sesión" : "¿Olvidaste tu contraseña?"}</Button>}
       </form>
       <p className="mt-6 flex items-start gap-2 text-sm leading-6 text-slate-500"><LockKeyhole className="mt-1 size-4 shrink-0"/>Acceso exclusivo para usuarios autorizados.</p>
     </section>
@@ -57,8 +57,9 @@ export default function PortalAuth({ config, login = false, providedClient }: { 
   const pending = useRef<{ expectedId: string | null; epoch: number } | null>(null);
   const navigation = useRef(replace);
   useEffect(() => { navigation.current = replace; }, [replace]);
-  const configured = Boolean(providedClient) || validatePublicConfig(config);
-  const url = config.url, key = config.key;
+  const hybrid = isHybridConfig(config);
+  const configured = validatePublicConfig(config);
+  const url = config.url, key = config.key, dataUrl = config.dataUrl, dataKey = config.dataKey;
   const clear = useCallback(() => {
     generation.current += 1;
     repository.current?.dispose(); repository.current = null;
@@ -66,9 +67,14 @@ export default function PortalAuth({ config, login = false, providedClient }: { 
   }, []);
 
   useEffect(() => {
-    if (!configured) return;
-    const sdk = providedClient ?? getBrowserClient({ url, key });
     let alive = true;
+    if (!configured) {
+      queueMicrotask(() => { if (alive) { clear(); setClient(null); setLoading(false); } });
+      return () => { alive = false; };
+    }
+    const connection = { url, key, ...(hybrid ? { dataUrl, dataKey } : {}) };
+    const sdk = providedClient ?? getBrowserClient(connection);
+    const dataSdk = getDataClient(connection, sdk);
     function initialize(expectedId: string | null = null) {
       if (!alive || recovering.current) return;
       if (mountedAccess.current && (!expectedId || identity.current === expectedId)) {
@@ -97,6 +103,7 @@ export default function PortalAuth({ config, login = false, providedClient }: { 
         identity.current = data.user.id;
         const reported = new Set<string>();
         const reportReadFailure = (diagnostic: PortalReadDiagnostic) => {
+          if (hybrid) return; // Local API verifies the real bearer; never probe hosted facts.
           const signature = JSON.stringify(diagnostic);
           if (reported.has(signature) || !alive || epoch !== generation.current || typeof sdk.auth.getSession !== "function") return;
           reported.add(signature);
@@ -109,7 +116,7 @@ export default function PortalAuth({ config, login = false, providedClient }: { 
             });
           }).catch(() => { /* Diagnostics must not affect portal reads. */ });
         };
-        const repo = new SupabaseForecastReadRepository(sdk, data.user.id, reportReadFailure);
+        const repo = new SupabaseForecastReadRepository(dataSdk, data.user.id, reportReadFailure, sdk);
         repository.current = repo;
         const profile = await repo.getCurrentProfile();
         if (!alive || epoch !== generation.current || recovering.current) return;
@@ -117,7 +124,7 @@ export default function PortalAuth({ config, login = false, providedClient }: { 
         mountedAccess.current = next; setAccess(next); setError(""); setLoading(false);
         // Optional HTTP read attestation. It verifies the same JWT at Supabase,
         // never forwards identity to Python, and does not persist auth material.
-        if (typeof sdk.auth.getSession === "function") {
+        if (!hybrid && typeof sdk.auth.getSession === "function") {
           void sdk.auth.getSession().then(({ data: sessionData }) => {
             if (alive && epoch === generation.current && sessionData.session) {
               return fetch("/api/portal-validation", { headers: { Authorization: `Bearer ${sessionData.session.access_token}` }, cache: "no-store" });
@@ -161,7 +168,7 @@ export default function PortalAuth({ config, login = false, providedClient }: { 
       alive = false; data.subscription.unsubscribe(); generation.current += 1;
       repository.current?.dispose(); repository.current = null; identity.current = null; pending.current = null; mountedAccess.current = null;
     };
-  }, [clear, url, key, configured, login, providedClient]);
+  }, [clear, url, key, dataUrl, dataKey, hybrid, configured, login, providedClient]);
 
   async function signIn(email: string, password: string) {
     if (!client || busy) return;
@@ -174,7 +181,7 @@ export default function PortalAuth({ config, login = false, providedClient }: { 
     finally { setBusy(false); }
   }
   async function requestReset(email: string) {
-    if (!client || busy) return;
+    if (!client || busy || hybrid) return;
     setBusy(true);
     try { await client.auth.resetPasswordForEmail(email, { redirectTo: passwordRecoveryRedirect(recoveryOrigin(config.siteUrl, window.location.origin, process.env.NODE_ENV === "development")) }); }
     catch { /* All outcomes use the same public message; no account enumeration. */ }
@@ -182,11 +189,13 @@ export default function PortalAuth({ config, login = false, providedClient }: { 
   }
   async function signOut() {
     clear(); setError("");
+    try { if (client) await invalidateLocalDataSession(config, client); }
+    catch { /* Hosted logout and browser clearing must continue on a local outage. */ }
     try { await client?.auth.signOut({ scope: "local" }); logPortalEvent("logout"); }
     catch { /* UI data stays cleared even if the network is unavailable. */ }
     finally { clearBrowserSession(config); replace("/login"); }
   }
   if (loading && configured) return <main className="grid min-h-svh place-items-center bg-[#f7f9fc]" role="status">Verificando sesión…</main>;
-  if (!access || login) return <LoginPanel configured={configured} busy={busy} error={error} onSubmit={signIn} onRequestReset={requestReset}/>;
+  if (!configured || !access || login) return <LoginPanel configured={configured} busy={busy} error={error} onSubmit={signIn} onRequestReset={hybrid ? undefined : requestReset}/>;
   return <ForecastTowellApp key={access.profile.id} profile={access.profile} repository={access.repository} onLogout={signOut}/>;
 }

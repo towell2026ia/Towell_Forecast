@@ -1,27 +1,25 @@
 """Development-only Supabase protocol adapter backed by the real local SQL/RLS.
 
-No production credentials, hosted Auth, proxying, general SQL endpoint or fake
-commercial responses. Windows DPAPI protects the operator's local credentials.
+Hosted Supabase verifies identity; commercial data and authorization stay local.
+Windows DPAPI protects only the PostgreSQL credential, never user passwords.
 """
 from __future__ import annotations
 
-import base64
 import csv
 import ctypes
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from decimal import Decimal
-import hashlib
-import hmac
 import json
 from pathlib import Path
 import re
-import secrets
 import sys
-import time
 from urllib.parse import parse_qs
 import uuid
 
 import httpx
+
+from .auth import AuthFailure
+from .local_hosted_auth import HostedAuthVerifier
 
 NAME = re.compile(r"[a-z][a-z0-9_]*\Z")
 TABLES = frozenset({"profiles", "chains", "categories", "products", "user_chain_access",
@@ -85,9 +83,8 @@ class LocalPostgresGateway:
                 or not str(c.get("system_identifier", "")).isdigit()):
             raise ValueError("local_postgres_target_rejected")
         self.password = unprotect(Path(c["password_dpapi_file"]))
-        self.users = {u["email"].casefold(): u for u in c["users"]}
-        self.sessions, self.refresh = {}, {}
-        self.signing = secrets.token_bytes(32)  # Ephemeral local Auth fixture, not a provider API key.
+        self.auth = HostedAuthVerifier(settings.local_supabase_auth_url,
+            settings.local_supabase_auth_publishable_key, timeout=settings.external_timeout_seconds)
         self.transport = LocalSQLTransport(self)
         with self.connect():
             pass
@@ -115,56 +112,28 @@ class LocalPostgresGateway:
             c.close()
             raise
 
-    def _user(self, token):
-        session = self.sessions.get(token)
-        return session if session and session["exp"] > time.time() else None
-
-    def _issue(self, user):
-        def b64(value):
-            return base64.urlsafe_b64encode(value).rstrip(b"=").decode()
-        now = int(time.time())
-        claims = {"sub": user["id"], "aud": "authenticated", "role": "authenticated",
-                  "iss": self.settings.supabase_url.rstrip("/") + "/auth/v1",
-                  "iat": now, "exp": now + 3600, "session_id": str(uuid.uuid4())}
-        encoded = b64(b'{"alg":"HS256","typ":"JWT"}') + "." + b64(json.dumps(claims).encode())
-        token = encoded + "." + b64(hmac.new(self.signing, encoded.encode(), hashlib.sha256).digest())
-        refresh = secrets.token_urlsafe(40)
-        self.sessions[token] = {**claims, "user": user}
-        self.refresh[refresh] = token
-        identity = {"id": user["id"], "email": user["email"], "aud": "authenticated",
-                    "role": "authenticated", "app_metadata": {"provider": "local-postgres"},
-                    "user_metadata": {}, "created_at": datetime.now(timezone.utc).isoformat()}
-        return {"access_token": token, "refresh_token": refresh, "token_type": "bearer",
-                "expires_in": 3600, "expires_at": claims["exp"], "user": identity}
-
     def handle(self, request):
         path = request.url.path
+        # Passwords/refresh tokens go directly to hosted Auth, never this adapter.
+        if path.startswith("/auth/v1/") and path not in {"/auth/v1/user", "/auth/v1/logout"}:
+            return _response(403, {"code": "HOSTED_AUTH_REQUIRED"})
         params = parse_qs(request.url.query.decode(), keep_blank_values=True)
         params = {k: v[-1] for k, v in params.items()}
         token = request.headers.get("authorization", "").removeprefix("Bearer ")
-        session = self._user(token)
+        try:
+            session = self.auth.verify(token)
+        except AuthFailure as exc:
+            return _response(exc.status_code, {"code": exc.code, "message": exc.reason})
         try:
             body = json.loads(request.content or b"{}")
         except (ValueError, UnicodeError):
             return _response(400, {"code": "LOCAL_INVALID_JSON"})
         if not isinstance(body, dict):
             return _response(400, {"code": "LOCAL_INVALID_JSON"})
-        if path == "/auth/v1/token" and request.method == "POST":
-            if params.get("grant_type") == "refresh_token":
-                old = self._user(self.refresh.get(body.get("refresh_token"), ""))
-                return _response(200, self._issue(old["user"])) if old else _response(401, {"msg": "Invalid local session"})
-            user = self.users.get(str(body.get("email", "")).casefold())
-            if not user or not hmac.compare_digest(str(body.get("password", "")),
-                    unprotect(Path(user.get("password_dpapi_file", self.config["password_dpapi_file"])))):
-                return _response(400, {"error": "invalid_grant", "error_description": "Invalid local credentials"})
-            return _response(200, self._issue(user))
-        if not session:
-            return _response(401, {"code": "AUTH_REQUIRED", "message": "Local authentication required"})
         if path == "/auth/v1/user" and request.method == "GET":
-            return _response(200, {"id": session["sub"], "email": session["user"]["email"],
-                "aud": "authenticated", "role": "authenticated", "app_metadata": {}, "user_metadata": {}})
+            return _response(200, session["user"])
         if path == "/auth/v1/logout" and request.method == "POST":
-            self.sessions.pop(token, None)
+            self.auth.revoke_verified(session)
             return _response(204)
         if not path.startswith("/rest/v1/"):
             return _response(404, {"code": "LOCAL_ENDPOINT_UNAVAILABLE"})
@@ -187,6 +156,11 @@ class LocalPostgresGateway:
             c.execute("set transaction read only")
             c.execute("set local role authenticated")
             c.execute("select set_config('request.jwt.claim.sub',%s,true)", (session["sub"],))
+            profile = c.execute("select id,status,global_role from public.profiles where id=%s", (session["sub"],)).fetchall()
+            if (len(profile) != 1 or str(profile[0]["id"]) != session["sub"]
+                    or profile[0]["status"] != "ACTIVE"
+                    or profile[0]["global_role"] not in {"ADMIN", "EDITOR", "VIEWER"}):
+                return _response(403, {"code": "LOCAL_PROFILE_REQUIRED", "message": "Perfil local activo requerido"})
             if resource.startswith("rpc/"):
                 name = resource[4:]
                 if not name.startswith("operational_read_") or not NAME.fullmatch(name):

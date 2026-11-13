@@ -100,6 +100,8 @@ class Settings:
     app_version: str = "0.11.0-prd09"
     railway_runtime: bool = False
     local_postgres_config: Path | None = None
+    local_supabase_auth_url: str = ""
+    local_supabase_auth_publishable_key: str = field(default="", repr=False)
 
     @property
     def database_path(self) -> Path:
@@ -117,11 +119,17 @@ class Settings:
         if self.local_postgres_config is not None:
             local_url = urlparse(self.supabase_url)
             if (self.app_env not in {"development", "test"} or self.railway_runtime
+                    or self.data_provider != "supabase" or not self.supabase_enabled or not self.operational_preview_enabled
                     or self.api_host != "127.0.0.1" or not self.local_postgres_config.is_absolute()
                     or local_url.scheme != "http" or local_url.hostname != "127.0.0.1"
                     or local_url.port != self.api_port or local_url.path not in {"", "/"}
                     or local_url.username or local_url.password or local_url.query or local_url.fragment):
                 raise ValueError("local_postgres_development_only")
+            from .local_hosted_auth import AUTH_URL
+            if self.local_supabase_auth_url.rstrip("/") != AUTH_URL or not self.local_supabase_auth_publishable_key.startswith("sb_publishable_"):
+                raise ValueError("local_hosted_auth_configuration_required")
+        elif self.local_supabase_auth_url or self.local_supabase_auth_publishable_key:
+            raise ValueError("local_hosted_auth_requires_local_postgres")
         if self.app_env not in ENVIRONMENTS:
             raise ValueError("invalid_app_env")
         if not 1 <= self.api_port <= 65535:
@@ -291,5 +299,7 @@ class Settings:
             app_version=env.get("APP_VERSION", "0.11.0-prd09"),
             railway_runtime=bool(env.get("RAILWAY_ENVIRONMENT_ID") or env.get("RAILWAY_SERVICE_ID")),
             local_postgres_config=path("LOCAL_POSTGRES_CONFIG", ROOT) if env.get("LOCAL_POSTGRES_CONFIG") else None,
+            local_supabase_auth_url=env.get("LOCAL_SUPABASE_AUTH_URL", ""),
+            local_supabase_auth_publishable_key=env.get("LOCAL_SUPABASE_AUTH_PUBLISHABLE_KEY", ""),
         )
         return settings.validate()

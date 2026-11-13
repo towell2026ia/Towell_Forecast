@@ -6,7 +6,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { clearBrowserSession, getBrowserClient, validatePublicConfig } from "@/lib/supabase/client";
+import { clearBrowserSession, getBrowserClient, isHybridConfig, validatePublicConfig } from "@/lib/supabase/client";
 import { clearRecoverySession, recoveryUserId, rememberRecoverySession } from "@/lib/supabase/recovery";
 import type { PublicSupabaseConfig } from "@/lib/supabase/types";
 
@@ -18,7 +18,7 @@ export default function UpdatePassword({ config, providedClient }: { config: Pub
   const client = useRef<SupabaseClient | null>(null);
   const verifiedUser = useRef<string | null>(null);
   const generation = useRef(0);
-  const configured = Boolean(providedClient) || validatePublicConfig(config);
+  const configured = !isHybridConfig(config) && validatePublicConfig(config);
   const url = config.url, key = config.key;
 
   useEffect(() => {

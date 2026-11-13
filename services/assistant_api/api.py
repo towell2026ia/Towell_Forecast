@@ -97,7 +97,8 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
         local_database = LocalPostgresGateway(config)
     supabase_client = SupabaseReadClient(config.supabase_url, config.supabase_publishable_key,
         timeout=config.external_timeout_seconds,
-        transport=local_database.transport if local_database else None) if config.operational_preview_enabled else None
+        transport=local_database.transport if local_database else None,
+        auth_url=config.local_supabase_auth_url if local_database else None) if config.operational_preview_enabled else None
     data = provider or (SupabaseDataProvider(supabase_client) if supabase_client else
                         NormalizedDataProvider(data_dir=config.data_dir, state_dir=config.state_dir))
     state_dir = (Path(historical_state_dir) if historical_state_dir else
