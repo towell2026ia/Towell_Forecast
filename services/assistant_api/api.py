@@ -122,7 +122,7 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
                        allow_methods=["GET", "POST", *(["HEAD"] if local_database else [])],
                        expose_headers=["Content-Range", "Range-Unit"] if local_database else [],
                        allow_headers=["Authorization", "Content-Type",
-                                       *(["apikey", "X-Client-Info", "X-Supabase-Api-Version", "Range", "Range-Unit", "Prefer", "Accept-Profile", "Content-Profile"] if local_database else []),
+                                       *(["apikey", "X-Client-Info", "X-Supabase-Api-Version", "X-Retry-Count", "Range", "Range-Unit", "Prefer", "Accept-Profile", "Content-Profile"] if local_database else []),
                                                                        "Idempotency-Key", "X-Assistant-Token",
                                                                        "X-Actor-Id", "X-Request-ID"])
     if local_database:
