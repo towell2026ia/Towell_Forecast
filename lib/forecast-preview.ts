@@ -12,8 +12,8 @@ export type PreviewCandidate = RetrospectiveMetrics & { family?: "statistical" |
   validation_by_horizon?: { horizon: number; wape: number | null }[];
   available?: boolean; status?: string; reason?: string | null; retrospective_validation_wape?: number | null; retrospective_validation_bias?: number | null;
   retrospective_validation_by_horizon?: { horizon: number; wape: number | null }[]; by_horizon?: { horizon: number; wape: number | null; bias?: number | null; observations?: number }[];
-  by_product?: PreviewCandidate[]; evaluation_mode?: string; classification?: string; origins?: number; training_samples?: number; validation_observations?: number; trainable?: boolean; validated?: boolean; selected?: boolean; operational_ready?: boolean };
-export type ProductCandidate = { family: "statistical" | "ml" | "ensemble"; model: string; strategy: string; product_id: string; wape: number | null; bias: number | null; mae: number | null; rmse: number | null; observations: number; windows: number; evaluation_signature: string | null; evidence_mode: string; horizons: { horizon: number; target_period: string; value: number }[]; by_horizon: { horizon: number; wape: number | null; observations: number }[] };
+  by_product?: PreviewCandidate[]; evaluation_mode?: string; classification?: string; origins?: number; windows?: number; evaluation_signature?: string | null; training_samples?: number; validation_observations?: number; trainable?: boolean; validated?: boolean; selected?: boolean; operational_ready?: boolean };
+export type ProductCandidate = { family: "statistical" | "ml" | "ensemble"; model: string; strategy: string; product_id: string; wape: number | null; bias: number | null; mae: number | null; rmse: number | null; stability?: number | null; observations: number; windows: number; evaluation_signature: string | null; evidence_mode: string; horizons: { horizon: number; target_period: string; value: number }[]; by_horizon: { horizon: number; wape: number | null; observations: number }[] };
 export type SuggestedReference = Partial<ProductCandidate> & { status: "PUBLISHED_CHAMPION" | "SUGGESTED_PROVISIONAL" | "SUGGESTED_RETROSPECTIVE" | "SUGGESTED_ONLY_ELIGIBLE" | "NOT_COMPARABLE" | "INSUFFICIENT_EVIDENCE"; confidence?: "Alta" | "Media" | "Baja"; official: false; comparison_status: string; comparison_reason?: string | null; reason_codes: string[] };
 export type PreviewAggregate = { level: "category" | "chain"; key: string; horizon: number; target_period: string; forecast_towell: number; statistical_value?: number; ml_value?: number | null };
 export type ProvisionalColdStart = { status: "PROVISIONAL_COLD_START"; observed_months: number; model: string; confidence: "LOW" | "LIMITED";
@@ -23,11 +23,17 @@ export type ProvisionalColdStart = { status: "PROVISIONAL_COLD_START"; observed_
   research?: { status: "DISABLED" | "PENDING" | "COMPLETED" | "UNAVAILABLE"; reason?: string; summary?: string; sources?: { title: string; url: string }[] } };
 export type PreviewScope = { chain_id: string; chain_name?: string; status: string; error_code?: string; issue_period?: string; latest_actual_period?: string; engine_version?: string; mode?: string; preview_id?: string;
   commercial_projection?: { filter_key: string; products: number; statistical: number; ml: number; ensemble: number; ml_models: string[]; source: "STORED_CALCULATIONS" };
+  stored_results?: { objective: string; issue_period: string; consolidated_metrics_status: "SINGLE_PRODUCT" | "NOT_ACCREDITED"; consolidated_reason: string;
+    products: { product_id: string; chain_id: string; description: string; calculation_id: string | null; calculation_code: string | null;
+      created_at: string | null; emitted_at: string | null; cutoff_at: string | null; engine_version: string | null; evidence_mode: string | null; status: string;
+      statistical_model: string | null; ml_model: string | null; candidates: ProductCandidate[]; suggested_reference: SuggestedReference | null;
+      decision_history: { id: string; calculation_id: string; calculation_code: string; issue_period: string; selected_forecast: string; selected_model: string | null; reason: string | null; created_at: string; created_by: string }[];
+      decision: { id: string; calculation_id: string; calculation_code: string; issue_period: string; selected_forecast: string; selected_model: string | null; reason: string | null; created_at: string; created_by: string } | null }[] };
   source_context?: Pick<OperationalReadContext, "source_hash" | "generation">;
   dataset_hash?: string;
   provisional_cold_start?: ProvisionalColdStart;
   eligibility?: Record<string, number>; evaluation_mode?: string; statistical?: { status: string; models: Record<string, number>; candidates: PreviewCandidate[]; scope_candidates?: PreviewCandidate[]; selected_metrics?: PreviewCandidate; available_candidates?: string[]; retrospective_wape: number | null; retrospective_bias: number | null };
-  ml?: { status: string; training_samples: number; training_products?: number; features?: string[]; leader: string | null; candidates: PreviewCandidate[]; trained_candidates?: PreviewCandidate[]; available_candidates?: string[]; retrospective_wape: number | null; retrospective_bias: number | null };
+  ml?: { status: string; training_samples: number | null; training_products?: number; features?: string[]; leader: string | null; candidates: PreviewCandidate[]; trained_candidates?: PreviewCandidate[]; available_candidates?: string[]; retrospective_wape: number | null; retrospective_bias: number | null };
   selection?: { published_champion: { version: string } | null; preview_leader: PreviewCandidate | null; preview_challenger: PreviewCandidate | null; scope_leader?: PreviewCandidate | null; product_ml_winners?: Record<string, string | null>; suggested_reference?: SuggestedReference | null; suggested_references?: Record<string, SuggestedReference>; product_candidates?: ProductCandidate[]; comparison_status?: string; comparison_reason?: string | null; selection_policy_version?: string; no_degradation: boolean | null; automatic_promotion: false }; products?: PreviewProduct[]; aggregates?: PreviewAggregate[]; certification_status?: string };
 export type PreviewJob = { job_id: string; status: string; mode: string; engine_version: string; created_at?: number; cuts_status?: string; scopes: PreviewScope[] };
 export type QualityGates = { chain_id: string; preview_id: string; dataset_hash: string; policy_version: string;
@@ -58,6 +64,7 @@ export type CalculationDetail = CalculationSummary & { candidate_metrics: Record
   horizons: CalculationHorizon[]; selection_events: SelectionEvent[]; live_evaluations: Record<string, unknown>[];
   actual_sales?: { observation_id: string; period: string; value: number; version_no: number; available_at: string; source_batch_id: string }[] };
 export interface PreviewClient {
+  readonly readOnly?: boolean;
   rsAssistant?: RsAssistantClient;
   commercialCatalog?(context?: OperationalReadContext): Promise<import("./supabase/types").CommercialClassification[]>;
   create(chainId: string | null, productId: string | null, issuePeriod?: string | null): Promise<PreviewJob>;
@@ -92,10 +99,18 @@ const safeCodes = new Set(["AUTH_REQUIRED", "SCOPE_FORBIDDEN", "REQUEST_001", "P
 export class RailwayPreviewClient implements PreviewClient {
   private controller = new AbortController();
   readonly rsAssistant?: RsAssistantClient;
+  get readOnly() {
+    return process.env.NODE_ENV === "development" && process.env.NEXT_PUBLIC_LOCAL_POSTGRES_ENABLED === "true";
+  }
+  private requireWritable() {
+    this.apiOrigin();
+    if (this.readOnly) throw new PreviewReadError("LOCAL_READ_ONLY");
+  }
   constructor(private auth: SupabaseClient, private origin = process.env.NEXT_PUBLIC_FORECAST_API_URL ?? "", private sourceClient: SupabaseClient = auth) {
     try { this.apiOrigin(); } catch { return; }
     this.rsAssistant = async (request, signal) => {
       if (!assistantScopeIsValid(request)) throw new PreviewReadError("REQUEST_001");
+      if (request.action === "forecast") this.requireWritable();
       return parseRsAssistantResponse(await this.e4<unknown>("/api/forecast/rs-assistant", request, undefined, signal), request);
     };
   }
@@ -124,6 +139,7 @@ export class RailwayPreviewClient implements PreviewClient {
     return data.products;
   }
   private async request(path: string, body?: unknown): Promise<PreviewJob> {
+    if (body !== undefined) this.requireWritable();
     const origin = this.apiOrigin();
     if (this.controller.signal.aborted) throw new PreviewReadError("AUTH_REQUIRED");
     const { data } = await this.auth.auth.getSession();
@@ -248,11 +264,13 @@ export class RailwayPreviewClient implements PreviewClient {
   }
   calculationDetail(calculationId: string) { return this.e4<CalculationDetail>(`/api/forecast/calculations/${encodeURIComponent(calculationId)}`); }
   async createCalculation(chainId: string, productId: string, previewId: string, reason?: string, idempotencyKey?: string) {
+    this.requireWritable();
     const result = await this.e4<{ calculation_id: string }>("/api/forecast/calculations", { chain_id: chainId, product_id: productId,
       preview_id: previewId, recalculation_reason: reason ?? null }, idempotencyKey ?? crypto.randomUUID());
     return result.calculation_id;
   }
   async selectCalculation(calculationId: string, candidate: "STATISTICAL" | "ML" | "ENSEMBLE", reason?: string, comment?: string) {
+    this.requireWritable();
     const result = await this.e4<{ selection_event_id: string }>(`/api/forecast/calculations/${encodeURIComponent(calculationId)}/select`,
       { selected_candidate: candidate, decision_reason: reason ?? null, comment: comment ?? null });
     return result.selection_event_id;
@@ -264,10 +282,12 @@ export class RailwayPreviewClient implements PreviewClient {
   }
   async saveCapture(data: { chain_id: string; product_id: string; period: string; order_value: number; sale_value: number;
       delivery_value: number; notes?: string; correction_reason?: string }) {
+    this.requireWritable();
     const result = await this.e4<{ session_id: string }>("/api/forecast/observations/capture", data);
     return result.session_id;
   }
   async confirmCapture(sessionId: string) {
+    this.requireWritable();
     const result = await this.e4<{ source_batch_id: string }>(`/api/forecast/observations/capture/${encodeURIComponent(sessionId)}/confirm`, {}, `confirm:${sessionId}`);
     return result.source_batch_id;
   }
@@ -275,7 +295,8 @@ export class RailwayPreviewClient implements PreviewClient {
     return this.e4<{ sessions: Record<string, unknown>[]; observations: { id: string; metric_code: string; value: number;
       version_no: number; available_at: string | null }[] }>(`/api/forecast/observations/capture?chain_id=${encodeURIComponent(chainId)}&product_id=${encodeURIComponent(productId)}&period=${encodeURIComponent(period)}`);
   }
-  closeLive(chainId: string, productId: string, period: string) {
+  async closeLive(chainId: string, productId: string, period: string) {
+    this.requireWritable();
     return this.e4<Record<string, unknown>>("/api/forecast/live-evaluation", { chain_id: chainId, product_id: productId, target_period: period });
   }
   liveMetrics(chainId: string, productId: string) {
@@ -286,6 +307,7 @@ export class RailwayPreviewClient implements PreviewClient {
     return result.events;
   }
   private async writeVintage(path: string, body: unknown): Promise<string> {
+    this.requireWritable();
     const origin = this.apiOrigin();
     const { data } = await this.auth.auth.getSession();
     if (!data.session?.access_token) throw new PreviewReadError("AUTH_REQUIRED");

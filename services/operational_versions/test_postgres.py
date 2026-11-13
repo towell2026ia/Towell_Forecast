@@ -322,6 +322,13 @@ class GateBPostgres(unittest.TestCase):
             'app/operational-quality-view.tsx',
             'components/forecast/ml-engine-detail.tsx',
             'components/forecast/statistical-engine-detail.tsx',
+            # Critical stored-engine comparison/decision presentation authorized
+            # separately; statistical implementations and SQL remain protected.
+            'components/forecast/e4-operations.tsx',
+            'components/forecast/engine-comparison.tsx',
+            'components/forecast/forecast-horizon-table.tsx',
+            'components/forecast/forecast-trader-chart.tsx',
+            'components/forecast/statistical-forecast-chart.tsx',
         }
         after_gateb=subprocess.check_output(['git','diff','--name-only',gateb,'--',*prefixes],cwd=REPO,text=True)
         self.assertEqual(set(after_gateb.splitlines()) - approved_prd3a9 - approved_portal_rs - approved_rs_assistant - approved_localhost - approved_hybrid_auth - approved_stored_scope_reads,set())

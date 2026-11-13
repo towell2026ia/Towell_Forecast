@@ -41,8 +41,11 @@ describe("Local forecast API boundary", () => {
     expect((await client.vintageCapabilities()).forecast_calculation_history).toBe(true);
     expect(await client.commercialCatalog(operationalContext)).toEqual([]);
     expect(await client.calculations(chain, "synthetic-product")).toEqual([]);
-    expect(await client.createCandidate(chain, "synthetic-preview")).toBe("v1");
+    expect(client.readOnly).toBe(true);
+    await expect(client.createCandidate(chain, "synthetic-preview")).rejects.toThrow("LOCAL_READ_ONLY");
+    expect(fetcher.mock.calls.some(([url]) => url.endsWith("/vintages/candidates"))).toBe(false);
     expect((await client.rsAssistant!(request)).message).toBe("Datos del alcance");
+    expect((await client.rsAssistant!({ ...request, action: "research_status" })).message).toBe("Datos del alcance");
     for (const [url, options] of fetcher.mock.calls as unknown as [string, RequestInit][]) {
       expect(new URL(url).origin).toBe(local);
       expect(options.credentials).toBe("omit");
@@ -84,6 +87,20 @@ describe("Local forecast API boundary", () => {
     const client = new RailwayPreviewClient(auth(null), local);
     for (const read of [() => client.status("job"), () => client.calculations(chain, "p"), () => client.rsAssistant!(request)])
       await expect(read()).rejects.toThrow("AUTH_REQUIRED");
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("rejects every local write before a session or network request while retaining read methods", async () => {
+    environment("development", "true");
+    const fetcher = vi.fn(); vi.stubGlobal("fetch", fetcher);
+    const client = new RailwayPreviewClient(auth(), local);
+    const writes: (() => unknown)[] = [() => client.create(chain, "p"), () => client.createCalculation(chain, "p", "preview"),
+      () => client.selectCalculation("calc", "STATISTICAL"), () => client.createCandidate(chain, "preview"),
+      () => client.freezeVintage("vintage"), () => client.publishVintage("vintage", "synthetic reason"),
+      () => client.saveCapture({ chain_id: chain, product_id: "p", period: "2026-10", order_value: 1, sale_value: 1, delivery_value: 1 }),
+      () => client.confirmCapture("session"), () => client.closeLive(chain, "p", "2026-10"),
+      () => client.rsAssistant!({ ...request, action: "forecast", message: "" })];
+    for (const write of writes) await expect(Promise.resolve().then(write)).rejects.toThrow("LOCAL_READ_ONLY");
     expect(fetcher).not.toHaveBeenCalled();
   });
 });

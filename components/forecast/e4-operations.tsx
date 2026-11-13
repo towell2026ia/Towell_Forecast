@@ -70,10 +70,12 @@ function CalculationCurveChart({ detail, compare }: { detail: CalculationDetail;
   </div>;
 }
 
-export function E4Operations({ mode, client, chainId, productId, canWrite, canDecide, children }: {
+export function E4Operations({ mode, client, chainId, productId, canWrite: writeAllowed, canDecide: decideAllowed, children }: {
   mode: "decision" | "history"; client: PreviewClient; chainId: string | null; productId: string | null;
   canWrite: boolean; canDecide: boolean; children?: React.ReactNode;
 }) {
+  const canWrite = writeAllowed && client.readOnly !== true;
+  const canDecide = decideAllowed && client.readOnly !== true;
   const [rows, setRows] = useState<CalculationSummary[]>([]);
   const [current, setCurrent] = useState<(SelectionEvent & { calculation_code: string; issue_period: string }) | null>(null);
   const [detail, setDetail] = useState<CalculationDetail | null>(null);
@@ -123,7 +125,7 @@ export function E4Operations({ mode, client, chainId, productId, canWrite, canDe
     catch { setError("No fue posible abrir el cálculo."); }
   }
   async function calculate() {
-    if (!chainId || !productId || !client.createCalculation || !client.create || !client.status || !client.result) return;
+    if (!canWrite || !chainId || !productId || !client.createCalculation || !client.create || !client.status || !client.result) return;
     if (running.current) return;
     if (rows.length && !recalcReason.trim()) { setError("Selecciona un motivo de recálculo."); return; }
     running.current = true; setBusy(true); setError("");
@@ -173,6 +175,7 @@ export function E4Operations({ mode, client, chainId, productId, canWrite, canDe
   const metrics = detail?.candidate_metrics ?? {};
   const actuals = detail ? actualSalesByPeriod(detail, compare) : new Map<string, { value: number; version: number }>();
   return <section className="space-y-4" aria-label={mode === "decision" ? "Decisión Forecast Towell" : "Historial de cálculos"}>
+    {client.readOnly && <p role="status" className="text-sm text-slate-600">Sólo lectura local: los cálculos y las decisiones guardadas pueden consultarse; calcular, recalcular y adoptar están bloqueados.</p>}
     {error && <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</p>}
     {mode === "history" && <div className="flex gap-2"><Button variant={tab === "calculations" ? "default" : "outline"} onClick={() => setTab("calculations")}>Cálculos C1/C2/C3</Button><Button variant={tab === "official" ? "default" : "outline"} onClick={() => setTab("official")}>Versiones oficiales</Button></div>}
     {mode === "history" && tab === "official" ? children : <>

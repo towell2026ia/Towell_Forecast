@@ -4,7 +4,7 @@ import type { Category, Chain, HistoricalRow, OperationalReadContext, Product } 
 export type ReportSeries = "STATISTICAL" | "ML" | "ENSEMBLE" | "COLD_START" | "TOWELL";
 export const reportSeries: Record<ReportSeries, string> = { STATISTICAL: "Estadístico", ML: "ML", ENSEMBLE: "Ensemble", COLD_START: "Cold Start provisional", TOWELL: "Forecast Towell adoptado" };
 export type ReportCalculation = Omit<CalculationDetail, "horizons" | "selection_events" | "live_evaluations"> & {
-  objective: string; created_by: string; evidence_mode: string;
+  objective: string; created_by: string; evidence_mode: string; cutoff_at?: string;
 };
 export type ReportHorizon = CalculationHorizon & { id: string; calculation_id: string; chain_id: string; product_id: string };
 export type ReportDecision = SelectionEvent & { chain_id: string; product_id: string; selected_by: string; system_suggestion: string | null };

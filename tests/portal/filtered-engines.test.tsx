@@ -80,8 +80,9 @@ describe("Commercial engine selection uses stored filtered curves", () => {
     expect(h).toHaveLength(12); expect(h[0]).toMatchObject({ statistical_value: 30, ml_value: 5, forecast_towell: 32 });
     expect(selected.eligibility).toMatchObject({ evaluated: 2, stat_eligible: 2, ml_eligible: 1 });
     expect(selected.products?.find(p => p.product_id === "red")?.horizons?.every(row => row.ml_value === null)).toBe(true);
-    expect(selected.statistical?.retrospective_wape).toBeNull(); expect(selected.ml?.candidates[0].retrospective_wape).toBeNull();
-    expect(selected.ml?.candidates[0].by_product).toEqual([{ product_id: "blue", retrospective_wape: 7 }]);
+    expect(selected.statistical?.retrospective_wape).toBeNull();
+    // A broader preview's blue WAPE is not an archived calculation metric.
+    expect(selected.ml?.candidates).toEqual([]);
     expect(scopeHorizons(selected, { ...filters, commercialModels: ["OTHER"] })).toEqual([]);
     expect(JSON.stringify({ snapshot, original })).toBe(before);
   });
