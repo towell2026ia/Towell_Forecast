@@ -1,6 +1,6 @@
 import type { CalculationDetail, CalculationHorizon, SelectionEvent, VintageCapabilities } from "./forecast-preview";
-import type { Category, Chain, HistoricalRow, OperationalReadContext, Product } from "./supabase/types";
-import { salesSourceAvailable, salesSourceState } from "./official-sales-source";
+import type { Category, Chain, HistoricalRow, OperationalInventory, OperationalReadContext, Product } from "./supabase/types";
+import { salesSourceAvailable, salesSourceIdentityFields, salesSourceState } from "./official-sales-source";
 
 export type ReportSeries = "STATISTICAL" | "ML" | "ENSEMBLE" | "COLD_START" | "TOWELL";
 export const reportSeries: Record<ReportSeries, string> = { STATISTICAL: "Estadístico", ML: "ML", ENSEMBLE: "Ensemble", COLD_START: "Cold Start provisional", TOWELL: "Forecast Towell adoptado" };
@@ -15,12 +15,24 @@ export type CustomerForecast = { id: string; chain_id: string; product_id: strin
 export type ReportSnapshot = { products: Product[]; chains: Chain[]; categories: Category[]; calculations: ReportCalculation[]; horizons: ReportHorizon[]; decisions: ReportDecision[]; live: ReportLive[]; provisionals: ProvisionalForecast[]; customers: CustomerForecast[]; capabilities: VintageCapabilities; sourceContext?: OperationalReadContext };
 export type ReportChoice = { version: string | null; issue: string | null; decision: "ALL" | "PENDING" | "ADOPTED"; calculationId?: string | null };
 export const emptyReportChoice: ReportChoice = { version: null, issue: null, decision: "ALL" };
-export function matchesOfficialSource(value: unknown, context: Pick<OperationalReadContext, "source_hash" | "generation">) {
+export function matchesOfficialSource(value: unknown, context: Pick<OperationalReadContext, "source_hash" | "generation"> & Partial<OperationalReadContext>) {
   if (!value || typeof value !== "object") return false;
   const source = value as Partial<OperationalReadContext>;
-  return salesSourceState(source) !== "INVALID" && salesSourceState(context) !== "INVALID" &&
+  const target = context as Partial<OperationalReadContext>;
+  if (salesSourceState(source) === "INVALID" || salesSourceState(target) === "INVALID") return false;
+  if (source.sales_contract === "towell-sales-v1" || target.sales_contract === "towell-sales-v1")
+    return source.sales_contract === "towell-sales-v1" && target.sales_contract === "towell-sales-v1"
+      && source.sales_available === target.sales_available
+      && salesSourceIdentityFields.every(field => source[field] === target[field]);
+  return Number.isSafeInteger(source.generation) && Number.isSafeInteger(target.generation) &&
     source.source_hash === context.source_hash && source.generation === context.generation &&
     (source.sales_available === undefined || !("sales_available" in context) || source.sales_available === (context as OperationalReadContext).sales_available);
+}
+function compatibleSalesCut(issue: string, context?: OperationalReadContext, cutoffAt?: string) {
+  if (context?.sales_contract !== "towell-sales-v1") return true;
+  const period = issue.slice(0, 7);
+  return /^20\d{2}-(0[1-9]|1[0-2])$/.test(period) && period >= context.first_period && period <= context.sales_training_cutoff!
+    && (!cutoffAt || cutoffAt.slice(0, 7) === period);
 }
 export type ForecastMatrixRow = { product: Product; chain: string; category: string; calculation: ReportCalculation | null; provisional: ProvisionalForecast | null; adopted: ReportDecision | null; values: Record<string, Record<ReportSeries, number | null>> };
 export type DatabaseSection = "history" | "observations" | "catalog" | "calculations" | "models" | "decisions" | "research" | "performance";
@@ -64,6 +76,7 @@ export function chooseCalculations(snapshot: ReportSnapshot, choice: ReportChoic
   if (!salesSourceAvailable(snapshot.sourceContext)) return grouped;
   for (const calculation of snapshot.calculations) {
     if (snapshot.sourceContext && !matchesOfficialSource(calculation.input_snapshot?.source_context, snapshot.sourceContext)) continue;
+    if (!compatibleSalesCut(calculation.issue_period, snapshot.sourceContext, calculation.cutoff_at)) continue;
     if (calculation.objective !== "Venta" || !["READY_FOR_DECISION", "DECIDED", "SUPERSEDED"].includes(calculation.status) ||
       choice.calculationId && calculation.id !== choice.calculationId || choice.version && calculation.calculation_code !== choice.version || choice.issue && calculation.issue_period.slice(0, 7) !== choice.issue) continue;
     const key = `${calculation.chain_id}/${calculation.product_id}`;
@@ -85,7 +98,7 @@ export function validDecision(snapshot: ReportSnapshot, calculation: ReportCalcu
   return event;
 }
 export function buildForecastMatrix(snapshot: ReportSnapshot, choice: ReportChoice, periodRange: [string | null, string | null]) {
-  const provisionals = !salesSourceAvailable(snapshot.sourceContext) ? [] : snapshot.sourceContext ? snapshot.provisionals.filter(row => matchesOfficialSource(row.source_context, snapshot.sourceContext!)) : snapshot.provisionals;
+  const provisionals = !salesSourceAvailable(snapshot.sourceContext) ? [] : snapshot.sourceContext ? snapshot.provisionals.filter(row => matchesOfficialSource(row.source_context, snapshot.sourceContext!) && compatibleSalesCut(row.issue_period, snapshot.sourceContext)) : snapshot.provisionals;
   let selected = chooseCalculations(snapshot, choice);
   const anchor = [...selected.values()].sort((a, b) => a.issue_period.localeCompare(b.issue_period) || a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id)).at(-1);
   const issue = anchor?.issue_period.slice(0, 7) ?? choice.issue ?? provisionals.map(p => p.issue_period).sort().at(-1) ?? null;
@@ -130,6 +143,18 @@ export function matrixTotal(rows: ForecastMatrixRow[], period: string, series: R
   const digits = (total < BigInt(0) ? -total : total).toString().padStart(scale + 1, "0");
   const decimal = `${total < BigInt(0) ? "-" : ""}${scale ? `${digits.slice(0, -scale)}.${digits.slice(-scale)}` : digits}`;
   return { value: values.length ? Number(decimal) : null, covered: values.length, eligible: rows.length };
+}
+export function comparableForecastRows(rows: ForecastMatrixRow[], periods: string[]) {
+  // Fix the same exact variant set for every selected month and all families.
+  // Missing ML is not zero and is never filled with another product's curve.
+  return periods.length ? rows.filter(row => row.calculation && periods.every(period =>
+    (["STATISTICAL", "ML", "ENSEMBLE"] as const).every(family => amount(row.values[period]?.[family]) !== null))) : [];
+}
+export function confirmedMissingTowellHistory(row: ForecastMatrixRow, source: OperationalReadContext | undefined,
+  history: HistoricalRow[], inventory: OperationalInventory[], historyComplete = false) {
+  return historyComplete && source?.sales_contract === "towell-sales-v1" && salesSourceAvailable(source)
+    && inventory.some(item => item.chain_id === row.product.chain_id && item.product_id === row.product.id)
+    && !history.some(item => item.chain_id === row.product.chain_id && item.product_id === row.product.id && item.SALES !== null);
 }
 export type CommercialRow = HistoricalRow & { calculation: ReportCalculation | null; customer: number | null; towellHistory: number | null; statistical: number | null; ml: number | null; ensemble: number | null; adopted: number | null; absoluteError: number | null; liveError: number | null; liveActual: number | null; wapeLive: number | null; fillRate: number | null; evidence: string };
 export function commercialRows(history: HistoricalRow[], snapshot: ReportSnapshot, choice: ReportChoice, metric: Exclude<ReportSeries, "COLD_START"> = "TOWELL", now = new Date()): CommercialRow[] {

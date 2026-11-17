@@ -16,7 +16,7 @@ from services.forecast_engine.engine import (
 from .persistence import content_hash
 from .cold_start import launch_forecast
 from .forecast_execution import execute_forecast
-from .supabase_access import PreviewError
+from .supabase_access import PreviewError, matches_source, require_sales_context
 from services.forecast_engine.registry import ChampionRegistry
 
 # Cache identity includes the serialized product contract, not just model math.
@@ -34,12 +34,14 @@ def snapshot_hash(rows: list[dict[str, Any]]) -> str:
 
 class OperationalMultiChainForecastRunner:
     def __init__(self, persistence, *, concurrency: int = 2, environment: str = "production",
-                 policy: ForecastPolicy | None = None, compute=forecast_dataset, researcher=None):
+                 policy: ForecastPolicy | None = None, compute=forecast_dataset, researcher=None,
+                 require_authorized_sales: bool = False):
         if not 1 <= concurrency <= 2:
             raise ValueError("operational_concurrency_maximum_two")
         self.persistence, self.environment = persistence, environment
         self.policy, self.compute = policy or ForecastPolicy(), compute
         self.researcher = researcher
+        self.require_authorized_sales = require_authorized_sales
         self.champions = ChampionRegistry(persistence)
         self._executor = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="preview")
         self._lock = threading.Lock()
@@ -57,6 +59,15 @@ class OperationalMultiChainForecastRunner:
     def submit(self, provider, principal, *, chain_ids: list[str], product_id: str | None = None,
                mode: str = "RETROSPECTIVE_TRAINING", issue_period: str | None = None, all_scopes: bool = False):
         source_context = provider.source_context() if hasattr(provider, "source_context") else None
+        require_sales_context(source_context, required=self.require_authorized_sales)
+        if (not chain_ids or len(set(chain_ids)) != len(chain_ids)
+                or not set(chain_ids).issubset(principal.execute_chain_ids)):
+            raise PreviewError("SCOPE_FORBIDDEN", 403)
+        if mode not in {"RETROSPECTIVE_TRAINING", "POINT_IN_TIME"} or product_id and len(chain_ids) != 1:
+            raise PreviewError("REQUEST_001")
+        if (source_context and source_context.get("sales_contract") == "towell-sales-v1" and issue_period
+                and issue_period > source_context["sales_training_cutoff"]):
+            raise PreviewError("SALES_PERIOD_NOT_CLOSED", 409)
         signature = content_hash({"creator": principal.user_id, "scopes": sorted(chain_ids),
             "product": product_id, "mode": mode, "issue": issue_period, "all_scopes": all_scopes,
             "source_context": source_context})
@@ -81,11 +92,30 @@ class OperationalMultiChainForecastRunner:
         job.setdefault("stage_history", []).append({"stage": stage, "at": time.time()})
         self.persistence.put("forecast_jobs", job["job_id"], job)
 
+    def _current_sales(self, provider, job):
+        context = job.get("source_context")
+        if not (self.require_authorized_sales or isinstance(context, dict) and context.get("sales_contract") == "towell-sales-v1"):
+            return
+        require_sales_context(context, required=True)
+        refresh = getattr(provider, "refresh_source_context", None)
+        current = refresh() if callable(refresh) else provider.source_context() if hasattr(provider, "source_context") else None
+        require_sales_context(current, required=True)
+        if not matches_source(context, current):
+            raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 503)
+
+    @staticmethod
+    def _cached_scope(preview, job, chain, issue, digest):
+        if (preview.get("chain_id") != chain or preview.get("objective") != "Venta"
+                or preview.get("issue_period") != issue or preview.get("dataset_hash") != digest
+                or job.get("source_context") is not None and not matches_source(preview.get("source_context"), job["source_context"])):
+            raise PreviewError("LINEAGE_MISMATCH", 409)
+
     def _execute(self, provider, job, requested_issue, signature):
         try:
             for chain in job["chain_ids"]:
                 try:
                     self._stage(job, "READING_DATA")
+                    self._current_sales(provider, job)
                     rows = provider.records(chain_id=chain, mode=job["mode"])
                     if not rows:
                         raise PreviewError("INSUFFICIENT_HISTORY")
@@ -95,13 +125,14 @@ class OperationalMultiChainForecastRunner:
                     month_end(issue)
                     if issue > latest:
                         raise PreviewError("DATA_LEAKAGE_DETECTED")
-                    if job["mode"] == "POINT_IN_TIME":
+                    if job["mode"] == "POINT_IN_TIME" or requested_issue and isinstance(job.get("source_context"), dict) and job["source_context"].get("sales_contract") == "towell-sales-v1":
                         # Choose the latest eligible revision at the issue cutoff within the same pin.
                         rows = provider.records(chain_id=chain, mode=job["mode"], issue_period=issue)
                     else:
                         rows = [row for row in rows if row["period"] <= issue]
                     if not rows:
                         raise PreviewError("INSUFFICIENT_HISTORY")
+                    self._current_sales(provider, job)
                     chain_rows = rows
                     if job["product_id"] and not any(row["product_id"] == job["product_id"] for row in rows):
                         provisional = self._cold_start_scope(provider, job, chain, issue, chain_rows)
@@ -117,6 +148,7 @@ class OperationalMultiChainForecastRunner:
                     with self._lock:
                         existing = self.persistence.get("forecast_previews", key)
                     if existing:
+                        self._cached_scope(existing, job, chain, issue, digest)
                         job["scopes"].append({"chain_id": chain, "preview_id": key, "status": "READY_PREVIEW", "issue_period": issue, "reused": True})
                         continue
                     self._stage(job, "ELIGIBILITY")
@@ -149,7 +181,11 @@ class OperationalMultiChainForecastRunner:
                         for product in provider.product_catalog(chain):
                             if product["id"] in {item["product_id"] for item in states}:
                                 continue
-                            state = "PRE-LAUNCH" if product.get("first_seen_period", "")[:7] > issue else "INSUFFICIENT"
+                            first_seen = product.get("first_seen_period")
+                            # Catalogue ingestion dates do not establish a
+                            # commercial opening date in the Towell source.
+                            local_sales = self.require_authorized_sales or isinstance(job.get("source_context"), dict) and job["source_context"].get("sales_contract") == "towell-sales-v1"
+                            state = "PRE-LAUNCH" if not local_sales and isinstance(first_seen, str) and first_seen[:7] > issue else "INSUFFICIENT"
                             counts[state] += 1
                             states.append({"product_id": product["id"], "product_code": product["product_code"],
                                 "variant_code": product.get("variant_code") or "",
@@ -169,10 +205,11 @@ class OperationalMultiChainForecastRunner:
                     with child_lock:
                         existing = self.persistence.get("forecast_previews", key)
                         if existing:
+                            self._cached_scope(existing, job, chain, issue, digest)
                             job["scopes"].append({"chain_id": chain, "preview_id": key, "status": "READY_PREVIEW", "issue_period": issue, "reused": True})
                             continue
                         self._stage(job, "STATISTICAL")
-                        incumbent = self._compatible_champion(chain, digest)
+                        incumbent = self._compatible_champion(chain, digest, job.get("source_context"))
                         execution, exclusions = execute_forecast([row for row in rows if row["product_id"] in eligible], issue,
                             compute=self.compute,
                             chain_id=chain, objective="Venta", policy=self.policy, research=None,
@@ -189,6 +226,7 @@ class OperationalMultiChainForecastRunner:
                                 "execution_exclusions": exclusions})
                             continue
                         result = execution["chains"][0]
+                        self._current_sales(provider, job)
                         preview = self._result(chain, issue, latest, digest, job, states, counts, result)
                         preview["execution_exclusions"] = exclusions
                         preview["selection"]["published_champion"] = {"version": incumbent["version"]} if incumbent else None
@@ -226,10 +264,14 @@ class OperationalMultiChainForecastRunner:
         proposal = launch_forecast(chain_rows, issue, {**target, "category_id": target.get("engine_category", target.get("category_id"))})
         if proposal is None:
             return None
+        self._current_sales(provider, job)
         category_name = next((row.get("category_name") for row in chain_rows
                               if row.get("category_id") == target.get("category_id") and row.get("category_name")), "")
         proposal["research"] = {"status": "DISABLED"}
-        if self.researcher:
+        local_sales = self.require_authorized_sales or isinstance(job.get("source_context"), dict) and job["source_context"].get("sales_contract") == "towell-sales-v1"
+        if local_sales:
+            proposal["research"]["reason"] = "LOCAL_PILOT_RESEARCH_DISABLED"
+        if self.researcher and not local_sales:
             try:
                 proposal["research"] = self.researcher.start(description=target.get("description") or "",
                     category=category_name, chain_name=chain_rows[0].get("chain_name", ""))
@@ -262,6 +304,8 @@ class OperationalMultiChainForecastRunner:
             "p90": (row.get("probability") or {}).get("p90"), "p95": (row.get("probability") or {}).get("p95"),
             "evidence_mode": job["mode"]} for row in horizons if row["product_id"] == state["product_id"]]} for state in states]
         for product in products:
+            for row in product["horizons"]:
+                row.update(self._applied_composition(row, selection.get("applied_strategy")))
             first = next((row for row in product["horizons"] if row["horizon"] == 1), {})
             product.update(statistical_model=first.get("statistical_model"), classification=first.get("classification"))
         ml_eligible = sum(any(row["ml_value"] is not None for row in item["horizons"]) for item in products)
@@ -306,13 +350,38 @@ class OperationalMultiChainForecastRunner:
             "evaluation_mode": audit.get("evaluation_mode"),
             "products": products, "aggregates": result["aggregates"] if result else []}
 
-    def _compatible_champion(self, chain, digest):
+    @staticmethod
+    def _applied_composition(row, applied):
+        """Describe the actual central curve, never a different ML candidate."""
+        empty = {name: None for name in ("statistical_weight", "ml_weight", "ensemble_ml_model", "ensemble_ml_component")}
+        weight = applied.get("statistical_weight") if isinstance(applied, dict) else None
+        if type(weight) not in {int, float} or not math.isfinite(weight) or not 0 <= weight <= 1:
+            return empty
+        statistical, ml, value = row.get("statistical"), row.get("ml"), row.get("forecast_towell")
+        if type(statistical) not in {int, float} or type(value) not in {int, float}:
+            return empty
+        if ml is None:
+            if row.get("model_strategy") != "statistical_fallback" and weight != 1 or abs(value - statistical) > .02:
+                return empty
+            weight = 1.0
+        elif type(ml) not in {int, float} or not math.isfinite(ml) or abs(value - (statistical * weight + ml * (1 - weight))) > .02:
+            return empty
+        if weight != 1 and not row.get("ml_model"):
+            return empty
+        return {"statistical_weight": weight, "ml_weight": 1 - weight,
+                "ensemble_ml_model": row.get("ml_model") if weight != 1 else None,
+                "ensemble_ml_component": ml if weight != 1 else None}
+
+    def _compatible_champion(self, chain, digest, source_context=None):
         # Read the existing registry, never promote or borrow a pilot Champion.
         champion = self.champions.current(chain, "Venta", "chain")
         if not champion or any(champion.get(key) != value for key, value in {
             "chain_id": chain, "objective": "Venta", "scope": "chain",
             "environment": self.environment, "dataset_hash": digest,
         }.items()):
+            return None
+        if (self.require_authorized_sales or isinstance(source_context, dict) and source_context.get("sales_contract") == "towell-sales-v1") \
+                and not matches_source(champion.get("source_context"), source_context):
             return None
         return champion if champion.get("version") else None
 
@@ -335,21 +404,24 @@ class OperationalMultiChainForecastRunner:
                     raise PreviewError("STATISTICAL_FAILED", 503)
 
     def get_job(self, job_id, principal, *, source_context=None):
+        require_sales_context(source_context, required=self.require_authorized_sales)
         job = self.persistence.get("forecast_jobs", job_id)
         if not job or job.get("kind") != "OPERATIONAL_PREVIEW":
             raise PreviewError("PREVIEW_NOT_FOUND", 404)
         if not set(job["chain_ids"]).issubset(principal.chain_ids):
             raise PreviewError("SCOPE_FORBIDDEN", 403)
-        if source_context is not None and job.get("source_context") != source_context:
+        if source_context is not None and not matches_source(job.get("source_context"), source_context):
             raise PreviewError("PREVIEW_NOT_FOUND", 404)
         return job
 
     def poll_research(self, job_id, principal, *, source_context=None):
         job = self.get_job(job_id, principal, source_context=source_context)
+        if self.require_authorized_sales or isinstance(job.get("source_context"), dict) and job["source_context"].get("sales_contract") == "towell-sales-v1":
+            raise PreviewError("DEEP_RESEARCH_DISABLED", 503)
         if job["status"] != "READY_PROVISIONAL":
             raise PreviewError("PREVIEW_NOT_READY", 409)
         with self._lock:
-            job = self.get_job(job_id, principal)
+            job = self.get_job(job_id, principal, source_context=source_context)
             for scope in job["scopes"]:
                 proposal = scope.get("provisional_cold_start") or {}
                 current = proposal.get("research") or {}
@@ -361,17 +433,18 @@ class OperationalMultiChainForecastRunner:
                     except Exception:
                         proposal["research"] = {"status": "UNAVAILABLE"}
             self.persistence.put("forecast_jobs", job_id, job)
-        return self.result(job_id, principal, job.get("product_id"))
+        return self.result(job_id, principal, job.get("product_id"), source_context=source_context)
 
     def provisional_forecasts(self, principal, chain_id=None, product_id=None, offset=0, limit=100, *, source_context=None):
         """Read existing numeric proposals only; never start or poll research."""
         from datetime import datetime, timezone
 
+        require_sales_context(source_context, required=self.require_authorized_sales)
         if chain_id and chain_id not in principal.chain_ids:
             raise PreviewError("SCOPE_FORBIDDEN", 403)
         latest = {}
         for job in self.persistence.list("forecast_jobs"):
-            if source_context is not None and job.get("source_context") != source_context:
+            if source_context is not None and not matches_source(job.get("source_context"), source_context):
                 continue
             if job.get("kind") != "OPERATIONAL_PREVIEW" or job.get("status") != "READY_PROVISIONAL":
                 continue
@@ -413,6 +486,9 @@ class OperationalMultiChainForecastRunner:
         scopes = [{**self.persistence.get("forecast_previews", scope["preview_id"]), "preview_id": scope["preview_id"]}
                   if scope.get("preview_id") else dict(scope) for scope in references]
         for scope in scopes:
+            if job.get("source_context") is not None and (scope.get("preview_id") or scope.get("source_context") is not None) \
+                    and not matches_source(scope.get("source_context"), job["source_context"]):
+                raise PreviewError("LINEAGE_MISMATCH", 409)
             scope["source_context"] = job.get("source_context")
             scope["products"] = [{**product, "horizons": product.get("horizons", []) if product_id else []}
                 for product in scope.get("products", []) if not product_id or product["product_id"] == product_id]
@@ -435,10 +511,11 @@ class OperationalMultiChainForecastRunner:
             (scope["chain_id"], scope.get("dataset_hash")) for scope in scopes)}), "scopes": scopes}
 
     def latest(self, principal, chain_id=None, product_id=None, mode="RETROSPECTIVE_TRAINING", *, source_context=None):
+        require_sales_context(source_context, required=self.require_authorized_sales)
         if chain_id and chain_id not in principal.chain_ids:
             raise PreviewError("SCOPE_FORBIDDEN", 403)
         jobs = [job for job in self.persistence.list("forecast_jobs") if job.get("kind") == "OPERATIONAL_PREVIEW"
-                and (source_context is None or job.get("source_context") == source_context)
+                and (source_context is None or matches_source(job.get("source_context"), source_context))
                 and job["mode"] == mode
                 and (job.get("creator_id") == principal.user_id or job["status"] in {"READY_PREVIEW", "READY_PROVISIONAL"})
                 and job.get("product_id") in {None, product_id}

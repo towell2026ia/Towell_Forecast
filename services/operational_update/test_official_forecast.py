@@ -1,8 +1,13 @@
 """Integrity and engine-entry regression checks for private source forecasts."""
 from decimal import Decimal
+import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
+
+from openpyxl import Workbook
 
 from services.forecast_engine.engine import ForecastPolicy, forecast_dataset
 from services.assistant_api.data_provider import SupabaseDataProvider
@@ -11,6 +16,7 @@ from .official_forecast import (
 )
 from .preparation import file_hash
 from .unification import write_csv, write_json
+from .towell_sales_source import MASTER_NAME
 
 
 def source_row(period="2026-10", value="10"):
@@ -24,13 +30,13 @@ def source_row(period="2026-10", value="10"):
 
 
 class OfficialForecastTests(unittest.TestCase):
-    def _source(self, directory, row, **extra):
+    def _source(self, directory, row, *, artifact_names=(), **extra):
         packet = {"source_hash": "1" * 64, "observations": [row]}
         write_json(directory / "Import.json", packet)
         write_csv(directory / "Facts.csv", [row], list(row))
         manifest = {"schema": "official-source-1", "source_hash": "1" * 64,
                     "cutoff": row["period"], **extra,
-                    "outputs_sha256": {name: file_hash(directory / name) for name in ("Facts.csv", "Import.json")}}
+                    "outputs_sha256": {name: file_hash(directory / name) for name in ("Facts.csv", "Import.json", *artifact_names)}}
         write_json(directory / "Manifest.json", manifest)
         return file_hash(directory / "Manifest.json")
 
@@ -50,10 +56,31 @@ class OfficialForecastTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             directory = Path(temporary) / "source"
             directory.mkdir()
-            provenance = {"sales_contract": "towell-sales-v1", "sales_file_sha256": "2" * 64,
+            master = Path(temporary) / "datos_privados" / MASTER_NAME
+            master.parent.mkdir()
+            book = Workbook()
+            sheet = book.active
+            sheet.title = "Towell"
+            for address, value in {"K5": "Venta 2024", "L5": "Venta 2025", "M5": "Venta 2026",
+                                   "A6": "account", "B6": "Chain", "D6": "Format", "E6": "00001",
+                                   "J6": "Enero", "K6": 0}.items():
+                sheet[address] = value
+            book.save(master)
+            book.close()
+            digest = file_hash(master)
+            provenance = {"sales_contract": "towell-sales-v1", "sales_file_sha256": digest,
                           "sheet": "Towell", "inventory_source": "ESTADISTICA", "authorized_source_hash": "1" * 64}
-            seal = self._source(directory, source_row("2024-01", "0"), generation=2,
-                                forecast_source_context=provenance)
+            policy_name = "Authorized_Sales_Policy.json"
+            fact = {**source_row("2024-01", "0"), "source_reference": "Towell!K6", "source_file": MASTER_NAME,
+                    "source_sheet": "Towell", "source_raw_value_literal": "0", "source_sha256": digest}
+            def sealed(folder, row):
+                folder.mkdir(exist_ok=True)
+                write_json(folder / policy_name, {"contract": "towell-sales-v1", "master_path": str(master),
+                           "master_sha256": digest, "sheet": "Towell", "unit": "PIEZAS", "generation": 2,
+                           "source_hash": "1" * 64, "last_closed_period": "2026-10"})
+                return self._source(folder, row, generation=2, cutoff="2026-10",
+                                    forecast_source_context=provenance, artifact_names=(policy_name,))
+            seal = sealed(directory, fact)
             def forbidden_engine(*args, **kwargs):
                 raise AssertionError("ineligible zero-only scope must not execute the engine")
             result = run(directory, seal, Path(temporary) / "results", first_period="2024-01",
@@ -63,6 +90,33 @@ class OfficialForecastTests(unittest.TestCase):
             self.assertEqual(result["chains"][0]["status"], "NO_ELIGIBLE_PRODUCTS")
             self.assertFalse(result["temporal_certification"])
             self.assertEqual(result["variant_rows"], 0)
+            configured = Path(temporary) / "config.json"
+            different = json.loads((directory / policy_name).read_text(encoding="utf-8"))
+            different["master_sha256"] = "b" * 64
+            write_json(configured, {"authorized_sales_policy": different})
+            with patch.dict(os.environ, {"LOCAL_POSTGRES_CONFIG": str(configured)}):
+                with self.assertRaisesRegex(ValueError, "official_forecast_sales_context_invalid"):
+                    run(directory, seal, Path(temporary) / "wrong-master", first_period="2024-01",
+                        context_generation=2, compute=forbidden_engine)
+                old = Path(temporary) / "historical"
+                old.mkdir()
+                legacy = self._source(old, source_row())
+                with self.assertRaisesRegex(ValueError, "official_forecast_local_sales_contract_required"):
+                    run(old, legacy, Path(temporary) / "wrong-packet", compute=forbidden_engine)
+            for change in ({"value": "9"}, {"metric_code": "ORDER"}, {"source_reference": "Towell!O6"},
+                           {"upc": "00002"}, {"period": "2024-02"}):
+                with self.subTest(change=change), self.assertRaisesRegex(ValueError, "official_forecast_sales_cell"):
+                    folder = Path(temporary) / next(iter(change))
+                    run(folder, sealed(folder, {**fact, **change}), Path(temporary) / "mismatch",
+                        first_period="2024-01", context_generation=2, compute=forbidden_engine)
+            content = master.read_bytes()
+            master.rename(master.with_name("Copia " + MASTER_NAME))
+            for missing in (True, False):
+                if not missing:
+                    master.write_bytes(content + b"changed")
+                with self.subTest(missing=missing), self.assertRaisesRegex(ValueError, "fuente de ventas no disponible"):
+                    run(directory, seal, Path(temporary) / "unavailable", first_period="2024-01",
+                        context_generation=2, compute=forbidden_engine)
 
     def test_towell_contract_cannot_reuse_a_cache_or_be_stamped_with_a_wrong_generation(self):
         with TemporaryDirectory() as temporary:

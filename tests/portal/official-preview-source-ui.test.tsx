@@ -50,7 +50,7 @@ it("clears the previous official preview if refreshing against a changed source 
 
 it("discards the assistant's previous-source answers when the authorized source changes or sales become unavailable", async () => {
   let source: OperationalReadContext = { ...operationalContext, sales_source: "TOWELL", inventory_source: "ESTADISTICA", sales_available: true,
-    sales_contract: "towell-sales-v1", sales_file_sha256: "d".repeat(64), sales_sheet: "Towell", authorized_source_hash: operationalContext.source_hash };
+    sales_contract: "towell-sales-v1", sales_file_sha256: "d".repeat(64), sales_sheet: "Towell", sales_training_cutoff: "2026-10", authorized_source_hash: operationalContext.source_hash };
   const repository = { openOperationalRead: async () => source, getVisibleChains: async () => [], getCategories: async () => [], getProducts: async () => [], getPeriods: async () => [],
     getHistoricalSummary: async () => ({ scopeCount: 0, productCount: 0, observationCount: 0, latestPeriod: null, byScope: [] }), previews: { latest: vi.fn(async () => null) } } as unknown as ForecastReadRepository;
   render(<ForecastTowellApp repository={repository} profile={{ id: "synthetic", full_name: "Synthetic", global_role: "VIEWER", status: "ACTIVE" }} onLogout={vi.fn()}/>);

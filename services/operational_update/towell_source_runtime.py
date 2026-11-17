@@ -295,9 +295,7 @@ def prepare_source(*, workspace, master_sha256, bindings_path, bindings_sha256, 
     output = Path(output)
     if output.exists() or output.resolve().is_relative_to(REPO):
         raise ValueError("new_private_output_required")
-    document = read_towell_sales_source(Path(workspace))
-    if document["source"]["sha256"] != master_sha256:
-        raise ValueError("approved_towell_master_changed")
+    document = read_towell_sales_source(Path(workspace), expected_sha256=master_sha256)
     if file_hash(snapshot_path) != snapshot_sha256:
         raise ValueError("catalog_snapshot_changed")
     snapshot = json_read(snapshot_path)

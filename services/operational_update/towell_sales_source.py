@@ -156,7 +156,8 @@ def serializable(value):
     return value
 
 
-def read_towell_sales_source(workspace: Path | None = None, *, confirmed_closed_period: str = CUTOFF):
+def read_towell_sales_source(workspace: Path | None = None, *, confirmed_closed_period: str = CUTOFF,
+                            expected_sha256: str | None = None):
     """Read the exact authorized file, with explicit per-cell eligibility.
 
     `workspace` is only an injectable workspace root (also useful in synthetic
@@ -176,6 +177,8 @@ def read_towell_sales_source(workspace: Path | None = None, *, confirmed_closed_
     except OSError as error:
         raise TowellSourceError("TOWELL_MASTER_UNREADABLE: " + str(path)) from error
     digest = hashlib.sha256(source).hexdigest()
+    if expected_sha256 is not None and digest != expected_sha256:
+        raise TowellSourceError("approved_towell_master_changed")
     raw = _historical_xml(source)
     book = load_workbook(io.BytesIO(source), read_only=True, data_only=True, keep_links=False)
     identities, records, exceptions = {}, [], []

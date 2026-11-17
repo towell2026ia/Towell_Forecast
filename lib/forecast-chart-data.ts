@@ -74,6 +74,8 @@ export function storedCommercialScope(snapshot: ReportSnapshot, filters: Filters
         p10: h.p10 === null ? null : Number(h.p10), p50: Number(h.p50),
         p90: h.p90 === null ? null : Number(h.p90), p95: h.p95 === null ? null : Number(h.p95),
         statistical_model: h.statistical_model ?? undefined, ml_model: h.ml_model, classification: previous?.classification ?? undefined,
+        statistical_weight: h.statistical_weight, ml_weight: h.ml_weight,
+        ensemble_ml_model: h.ensemble_ml_model, ensemble_ml_component: h.ensemble_ml_component,
         band_basis: h.band_basis as PreviewHorizon["band_basis"], band_observations: h.band_observations,
         band_status: h.band_status as PreviewHorizon["band_status"] };
     });

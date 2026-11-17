@@ -66,8 +66,9 @@ def summarize_forecast(result, variants_expected):
 
 
 class RSAssistantWorkflow:
-    def __init__(self, storage, research=None, *, compute=forecast_dataset):
+    def __init__(self, storage, research=None, *, compute=forecast_dataset, research_disabled=False):
         self.storage, self.research, self.compute = storage, research, compute
+        self.research_disabled = research_disabled
         self.compute_slot = Lock()
 
     def answer(self, body, scoped, *, may_start_research=False):
@@ -110,7 +111,10 @@ class RSAssistantWorkflow:
         ) if key in scope}
         context_requested = body.action == "answer" and PUBLIC_CONTEXT.search(fold(body.message))
         try:
-            if self.research is None:
+            if self.research_disabled:
+                if body.action in {"research", "research_status"} or context_requested:
+                    report = {"status": "DISABLED", "reason": "LOCAL_PILOT_RESEARCH_DISABLED"}
+            elif self.research is None:
                 if body.action in {"research", "research_status"}:
                     report = {"status": "DISABLED"}
             elif body.action == "research_status":
@@ -143,6 +147,9 @@ def mount_rs_assistant(app, config, identity, client, limiter, workflow):
         chain = uuid_value(body.chain_id)
         if chain not in (principal.execute_chain_ids if executes else principal.chain_ids):
             raise PreviewError("SCOPE_FORBIDDEN", 403)
+        local_sales = getattr(config, "local_postgres_config", None) is not None
+        if local_sales and body.action in {"research", "research_status"}:
+            raise PreviewError("DEEP_RESEARCH_DISABLED", 503)
         if not limiter.allow("rs-assistant:" + principal.user_id, 20):
             raise PreviewError("RATE_001", 429)
         scoped = load_rs_scope(client.bind(token), principal, chain_id=chain, purchase_type=body.purchase_type,
@@ -150,7 +157,7 @@ def mount_rs_assistant(app, config, identity, client, limiter, workflow):
                                include_stored_forecast=body.action == "answer")
         try:
             return workflow.answer(body, scoped, may_start_research=(
-                EXECUTE in principal.permissions and chain in principal.execute_chain_ids
+                not local_sales and EXECUTE in principal.permissions and chain in principal.execute_chain_ids
             ))
         except (ValueError, ArithmeticError, IndexError, KeyError):
             raise PreviewError("RS_ASSISTANT_UNAVAILABLE", 503) from None

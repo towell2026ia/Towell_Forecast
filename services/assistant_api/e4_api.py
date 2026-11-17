@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .auth import ADMIN, EXECUTE, AuthFailure, authorize
 from .calculation_history import snapshot_from_preview, live_metrics, validate_selection
 from .operational_preview import snapshot_hash
-from .supabase_access import PreviewError, matches_source, uuid_value
+from .supabase_access import PreviewError, matches_source, require_sales_context, uuid_value
 
 
 class CalculationRequest(BaseModel):
@@ -76,6 +76,8 @@ def mount_e4_routes(app, config, identity, data, runner, writer):
         return chain_id
 
     def write(name, payload):
+        if getattr(config, "local_postgres_config", None) is not None:
+            raise PreviewError("LOCAL_WRITE_DISABLED", 403)
         if writer is None:
             raise PreviewError("REQUIRED_SECRET_MISSING", 503)
         return writer.rpc(name, payload)
@@ -123,7 +125,11 @@ def mount_e4_routes(app, config, identity, data, runner, writer):
         preview = runner.persistence.get("forecast_previews", body.preview_id)
         if not preview or preview.get("chain_id") != chain or preview.get("objective") != "Venta":
             raise PreviewError("PREVIEW_NOT_READY", 409)
-        if not matches_source(preview.get("source_context"), source.client.operational_context()):
+        context = source.client.operational_context()
+        require_sales_context(context, required=getattr(config, "local_postgres_config", None) is not None)
+        if (not matches_source(preview.get("source_context"), context)
+                or context.get("sales_contract") == "towell-sales-v1"
+                   and str(preview.get("issue_period", "")) > context["sales_training_cutoff"]):
             raise PreviewError("PREVIEW_NOT_READY", 409)
         rows = source.records(chain_id=chain, issue_period=preview["issue_period"],
             mode=preview.get("mode") or preview.get("evidence_mode") or "RETROSPECTIVE_TRAINING")

@@ -330,9 +330,8 @@ class GateBPostgres(unittest.TestCase):
             'components/forecast/forecast-trader-chart.tsx',
             'components/forecast/statistical-forecast-chart.tsx',
         }
-        # FT-FIX-FUENTES-01 explicitly authorizes the local Towell-sales
-        # provenance guard. No statistical implementation or SQL is exempted.
-        approved_towell_sales={'lib/official-sales-source.ts'}
+        # Local source guard and the read-only presentation of stored Ensemble components.
+        approved_towell_sales={'lib/official-sales-source.ts', 'lib/forecast-composition.ts'}
         after_gateb=subprocess.check_output(['git','diff','--name-only',gateb,'--',*prefixes],cwd=REPO,text=True)
         self.assertEqual(set(after_gateb.splitlines()) - approved_prd3a9 - approved_portal_rs - approved_rs_assistant - approved_localhost - approved_hybrid_auth - approved_stored_scope_reads - approved_towell_sales,set())
         private=os.environ.get('GATEB_PRIVATE_CANDIDATE')

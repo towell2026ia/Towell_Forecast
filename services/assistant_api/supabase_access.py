@@ -25,8 +25,45 @@ def uuid_value(value: str) -> str:
         raise PreviewError("SCOPE_FORBIDDEN", 403) from None
 
 
+SALES_SOURCE_FIELDS = ("source_hash", "generation", "first_period", "last_period", "sales_contract",
+    "sales_source", "sales_sheet", "sales_file_sha256", "sales_training_cutoff", "authorized_source_hash", "inventory_source")
+
+
+def require_sales_context(context, *, required=False):
+    """The configured Towell path cannot degrade to an unpinned legacy input."""
+    if not required and not (isinstance(context, dict) and context.get("sales_contract") == "towell-sales-v1"):
+        return context
+    if (not isinstance(context, dict) or context.get("sales_contract") != "towell-sales-v1"
+            or context.get("sales_source") != "TOWELL" or context.get("sales_sheet") != "Towell"
+            or context.get("inventory_source") != "ESTADISTICA"
+            or type(context.get("generation")) is not int or context["generation"] < 1
+            or any(not isinstance(context.get(key), str) or not re.fullmatch(r"[0-9a-f]{64}", context[key])
+                   for key in ("source_hash", "sales_file_sha256", "authorized_source_hash"))
+            or context["source_hash"] != context["authorized_source_hash"]
+            or any(not isinstance(context.get(key), str) or not re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", context[key])
+                   for key in ("first_period", "last_period", "sales_training_cutoff"))
+            or not context["first_period"] <= context["sales_training_cutoff"] <= context["last_period"]
+            or type(context.get("sales_available")) is not bool):
+        raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 503)
+    if not context["sales_available"]:
+        raise PreviewError("SALES_SOURCE_UNAVAILABLE", 503)
+    return context
+
+
 def matches_source(value, context):
-    return isinstance(value, dict) and all(value.get(field) == context[field] for field in ("source_hash", "generation"))
+    if not isinstance(value, dict) or not isinstance(context, dict):
+        return False
+    if value.get("sales_contract") == "towell-sales-v1" or context.get("sales_contract") == "towell-sales-v1":
+        try:
+            require_sales_context(value, required=True)
+            require_sales_context(context, required=True)
+        except PreviewError:
+            return False
+        # A transport may omit a null explanatory field. This does not change
+        # source identity; every accredited source/cutoff field must still match.
+        return all(value.get(field) == context[field] for field in SALES_SOURCE_FIELDS)
+    return (type(value.get("generation")) is int and type(context.get("generation")) is int
+            and all(value.get(field) == context.get(field) for field in ("source_hash", "generation")))
 
 
 class SupabaseReadClient:
@@ -110,6 +147,10 @@ class SupabaseReadClient:
                     context["sales_training_cutoff"] = cutoff
             self._operational_context = context
         return dict(self._operational_context)
+
+    def refresh_operational_context(self):
+        self._operational_context = None
+        return self.operational_context()
 
     def observation_rows(self, params: dict[str, Any], *, mode: str = "OPERATIONAL",
                          available_through: str | None = None,

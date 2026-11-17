@@ -116,3 +116,11 @@ contrato de datos y autorizar su carga por separado; este ajuste no la ejecuta.
 - Los comandos productivos siguen el procedimiento autorizado de `lab/official_source/cutover/README.md`. No ejecutar la carga ni desplegar sólo un backend incompatible mientras el frontend productivo permanezca en el contrato anterior.
 
 Para publicar código en una rama de preparación sin iniciar builds Netlify, utilizar el marcador de commit `[skip netlify]`. No utilizar `[skip ci]`, que impediría ejecutar GitHub Actions.
+
+### Cálculo y lectura de ventas Towell en localhost
+
+El cierre y la huella del maestro se fijan en la política privada. El proceso por lote verifica el manifiesto, vuelve a leer el archivo acreditado y contrasta cada venta con su celda K:M, periodo e identidad antes de ejecutar el motor. El catálogo, el inventario y los registros retirados se conservan con su procedencia respectiva.
+
+Las vistas previas por producto y cadena fijan la procedencia antes de leer los datos y la vuelven a comprobar antes de guardar el resultado. La ejecución de ML usa las ventas autorizadas del alcance de entrenamiento. Los ejecutores mensuales históricos que contienen `retained_published_champion` se bloquean al entrar en el piloto local. Las lecturas guardadas y la exportación verifican el contrato del cálculo y el corte. En Períodos, la comparación sobre las mismas variantes usa la intersección de productos con cobertura de los tres motores durante los meses seleccionados.
+
+Deep Research está deshabilitado en el piloto, incluida la lectura de investigaciones anteriores por el asistente. Una futura habilitación requerirá validar el contexto interno con el mismo contrato del maestro, generación, objetivo Venta, corte, productos y permisos de la consulta, también al leer resultados en caché. Los ensayos de independencia y rechazo de procedencias incompatibles usan datos sintéticos en `services/assistant_api/test_authorized_sales_paths.py`.

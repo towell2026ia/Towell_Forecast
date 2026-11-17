@@ -7,6 +7,7 @@ import csv
 import hashlib
 import json
 import logging
+import os
 import tempfile
 import time
 from abc import ABC, abstractmethod
@@ -24,6 +25,17 @@ if not LOGGER.handlers:
     LOGGER.addHandler(handler)
 LOGGER.setLevel(logging.INFO)
 LOGGER.propagate = False
+
+
+def _require_legacy_input(provider, required=False):
+    """Legacy runners cannot borrow frozen pilot data in the local sales path."""
+    if required or os.environ.get("LOCAL_POSTGRES_CONFIG", "").strip():
+        raise ValueError("authorized_sales_requires_operational_preview")
+    context_reader = getattr(provider, "source_context", None)
+    if callable(context_reader):
+        context = context_reader()
+        if isinstance(context, dict) and context.get("sales_contract") == "towell-sales-v1":
+            raise ValueError("authorized_sales_requires_operational_preview")
 
 
 def _utc() -> str:
@@ -154,8 +166,9 @@ class MonthlyForecastRunner:
     def __init__(self, provider: DataProvider, research: ResearchProvider | None = None,
                  pipeline: EnginePipeline | None = None, state_dir: Path | None = None,
                  research_failure_policy: str = "fail_closed",
-                 persistence: PersistenceProvider | None = None):
+                 persistence: PersistenceProvider | None = None, require_authorized_sales: bool = False):
         self.provider = provider
+        self.require_authorized_sales = require_authorized_sales
         self.research = research or LocalResearchProvider()
         self.pipeline = pipeline or ExistingEnginePipeline()
         self.state_dir = Path(state_dir) if state_dir else Path(__file__).resolve().parent / "state"
@@ -169,6 +182,7 @@ class MonthlyForecastRunner:
                                 "event": event, "status": status, **extra}, ensure_ascii=False))
 
     def run_month(self, period: str, actor: str = "local-process") -> dict[str, Any]:
+        _require_legacy_input(self.provider, self.require_authorized_sales)
         date.fromisoformat(f"{period}-01")
         cutoff = f"{period}-{__import__('calendar').monthrange(*map(int, period.split('-')))[1]:02d}"
         index = 1
@@ -340,8 +354,9 @@ class GeneralizedMonthlyForecastRunner:
 
     def __init__(self, provider: DataProvider, research: ResearchProvider | None = None,
                  state_dir: Path | None = None, persistence: PersistenceProvider | None = None,
-                 policy: Any | None = None):
+                 policy: Any | None = None, require_authorized_sales: bool = False):
         self.provider = provider
+        self.require_authorized_sales = require_authorized_sales
         self.research = research or LocalResearchProvider()
         self.state_dir = Path(state_dir) if state_dir else Path(__file__).resolve().parent / "state"
         self.persistence = persistence
@@ -350,6 +365,7 @@ class GeneralizedMonthlyForecastRunner:
     def run_month(self, period: str, chain_id: str | None = None,
                   product_id: str | None = None, actor: str | None = None,
                   objective: str = "Venta") -> dict[str, Any]:
+        _require_legacy_input(self.provider, self.require_authorized_sales)
         from services.forecast_engine import ChampionRegistry, forecast_dataset
         from services.forecast_engine.engine import month_end
         from services.forecast_engine.identifiers import research_id, run_id as make_run_id, vintage_id

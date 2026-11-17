@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useMemo, useState } from "react";
-import { addReportMonth, emptyReportChoice, matchesOfficialSource, matrixTotal, reportSeries, temporalLabel, type ForecastMatrixRow, type ReportSnapshot } from "@/lib/forecast-reporting";
+import { addReportMonth, comparableForecastRows, confirmedMissingTowellHistory, emptyReportChoice, matchesOfficialSource, matrixTotal, reportSeries, temporalLabel, type ForecastMatrixRow, type ReportSnapshot } from "@/lib/forecast-reporting";
 import type { Filters, HistoricalRow, OperationalInventory } from "@/lib/supabase/types";
 import { detailMetrics, periodsDashboard, shortPeriod } from "@/lib/periods-dashboard";
 import { modelKey } from "@/lib/commercial-filters";
@@ -14,6 +14,15 @@ import { salesSourceAvailable, salesUnavailableMessage } from "@/lib/official-sa
 
 const candidates = ["STATISTICAL", "ML", "ENSEMBLE"] as const;
 const modelName = (r: ForecastMatrixRow) => r.product.commercial?.model ? modelKey(r.product.commercial.model) : "Sin identificar";
+type OperationalExportStage = "SOURCE_READ" | "SHEETS" | "SERIALIZE" | "BLOB" | "OBJECT_URL" | "NATIVE_CLICK";
+export function operationalDownloadErrorMessage(stage: OperationalExportStage, cause: unknown) {
+  const kind = cause instanceof TypeError ? "TYPE_ERROR" : cause instanceof RangeError ? "RANGE_ERROR" : cause instanceof DOMException ? "DOM_ERROR" : "ERROR";
+  const known = cause instanceof Error ? ({ official_source_unavailable: "OFFICIAL_SOURCE_UNAVAILABLE", OFFICIAL_SOURCE_MISMATCH: "OFFICIAL_SOURCE_MISMATCH",
+    official_source_changed: "OFFICIAL_SOURCE_CHANGED", report_horizon_lineage: "REPORT_HORIZON_LINEAGE" } as Record<string, string>)[cause.message] : undefined;
+  if (stage === "SHEETS" && known === "OFFICIAL_SOURCE_CHANGED")
+    return "El contexto del tablero cambió; actualiza la página antes de descargar. Código EXPORT_SHEETS_OFFICIAL_SOURCE_CHANGED.";
+  return `No fue posible descargar el XLSX. Código EXPORT_${stage}_${known ?? kind}.`;
+}
 
 export function ForecastPeriodsView() {
   return <StoredPeriods/>;
@@ -28,11 +37,11 @@ function StoredPeriods() {
     // positions in the presentation; it never changes the calculation's cut.
     const historyFilters: Filters = { ...filters, periodRange: [null, null] };
     const [snapshot, history, inventory] = await Promise.all(context ? [repository.getReportSnapshot(filters, context), repository.getReportHistory?.(historyFilters, context) ?? Promise.resolve([]), repository.getReportInventory?.(filters, context) ?? Promise.resolve([])] : [repository.getReportSnapshot(filters), repository.getReportHistory?.(historyFilters) ?? Promise.resolve([]), Promise.resolve([])]);
-    return { snapshot, history, inventory };
+    return { snapshot, history, inventory, historyComplete: Boolean(repository.getReportHistory) };
   }, [repository, filters, pin]));
   return <section className="min-w-0 space-y-5"><div><h1 className="text-2xl font-semibold text-slate-950">Periodos</h1><p className="mt-1 text-sm text-slate-500">Desempeño comercial y forecast almacenado</p></div><ReportState loading={report.loading} error={report.error} errorCode={report.errorCode}/>{report.data && <Matrix key={JSON.stringify(filters)} {...report.data} periods={filters.periodRange}/>}</section>;
 }
-function Matrix({ snapshot, history, inventory, periods }: { snapshot: ReportSnapshot; history: HistoricalRow[]; inventory: OperationalInventory[]; periods: Filters["periodRange"] }) {
+function Matrix({ snapshot, history, inventory, periods, historyComplete = false }: { snapshot: ReportSnapshot; history: HistoricalRow[]; inventory: OperationalInventory[]; periods: Filters["periodRange"]; historyComplete?: boolean }) {
   const [choice, setChoice] = useState({ ...emptyReportChoice });
   const matrix = useMemo(() => {
     try { return { data: periodsDashboard(snapshot, history, choice, periods, inventory), error: false }; }
@@ -53,7 +62,7 @@ function Matrix({ snapshot, history, inventory, periods }: { snapshot: ReportSna
     <ReportState loading={false} error={matrix.error}/>
     {dashboard && data && <>
       {!salesSourceAvailable(snapshot.sourceContext) && <p role="status" className="text-sm text-slate-600">{salesUnavailableMessage}</p>}
-      {snapshot.sourceContext && <OperationalDownload snapshot={snapshot} dashboard={dashboard} history={history} inventory={inventory}/>}
+      {snapshot.sourceContext && <OperationalDownload snapshot={snapshot} dashboard={dashboard} history={history} inventory={inventory} historyComplete={historyComplete}/>}
       <div aria-label="Alcance de Periodos" className="space-y-2"><p className="text-sm font-semibold text-slate-900">{[...new Set(data.rows.map(r => r.chain))].join(" · ") || "Sin productos coincidentes"}</p><p className="text-xs text-slate-600">{models.length <= 5 ? models.join(" + ") : `${models.length} modelos`} · {data.rows.length} productos · Corte {dashboard.cutoff ?? "Sin dato"}{!data.issue ? " (histórico; sin cálculo)" : ""}</p><p className="text-xs text-slate-500">{data.excludedParentScopes} scopes padre superpuestos excluidos. Las curvas se consolidan por corte, objetivo, versión de motor y modo de evidencia compatibles.</p></div>
       <dl aria-label="Indicadores comerciales" className="grid grid-cols-2 gap-y-5 border-y border-slate-200 py-5 lg:grid-cols-6">{[["Venta real · 9 meses", reportNumber(dashboard.kpis.sales)], ["Pedido · 9 meses", reportNumber(dashboard.kpis.orders)], ["Enviado · 9 meses", reportNumber(dashboard.kpis.delivery)], ["Fill Rate", reportPercent(dashboard.kpis.fillRate)], ["Productos con cálculo / Total", `${dashboard.available}/${data.rows.length}`], ["Con decisión / Total", `${dashboard.adopted}/${data.rows.length}`]].map(([label, value]) => <div key={label} className="min-w-0 border-l border-slate-200 px-3 first:border-l-0"><dt className="text-xs text-slate-500">{label}</dt><dd className="mt-2 break-words text-xl font-semibold tabular-nums text-slate-950">{value}</dd></div>)}</dl>
       {ready.length > 0 && ready.length < data.rows.length && <p role="status" className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"><strong>TOTAL PARCIAL</strong> · Forecast de {ready.length}/{data.rows.length} productos del alcance. No representa el total completo de los modelos seleccionados.</p>}
@@ -63,12 +72,12 @@ function Matrix({ snapshot, history, inventory, periods }: { snapshot: ReportSna
       {dashboard.cutoff && <p className="text-xs text-slate-500">Año −1: {addReportMonth(dashboard.cutoff, -20)} a {addReportMonth(dashboard.cutoff, -9)} · Año −2: {addReportMonth(dashboard.cutoff, -32)} a {addReportMonth(dashboard.cutoff, -21)}</p>}
       <details open={dashboard.coverage.length <= 5} className="text-sm"><summary className="cursor-pointer font-medium">Cobertura por cadena y modelo ({dashboard.coverage.length})</summary><div className="mt-3"><ReportTable label="Cobertura por modelo" headers={["Cadena / Formato", "Modelo", "Con cálculo", "Sin cálculo compatible", "Con decisión", "Sin decisión", "Total"]} rows={dashboard.coverage.map(c => ({ id: c.key, cells: [c.chain, c.model, c.calculated, c.pending, c.decided, c.undecided, c.total] }))}/></div></details>
       <CompactMatrix key={JSON.stringify(choice)} rows={ready} scope={data.rows} periods={data.periods} issue={data.issue}/>
-      <PendingProducts key={`pending/${JSON.stringify(choice)}`} rows={pending} snapshot={snapshot}/>
+      <PendingProducts key={`pending/${JSON.stringify(choice)}`} rows={pending} snapshot={snapshot} history={history} inventory={inventory} historyComplete={historyComplete}/>
       <details className="space-y-4 border-t border-slate-200 py-5"><summary className="cursor-pointer text-lg font-semibold">Detalle técnico expandible · C1–Cn</summary><p className="text-xs text-slate-500">Resultados almacenados, ganadores, WAPE, Bias, bandas, corte, emisión, versiones, Dataset Hash y trazabilidad por producto.</p>{snapshot.calculations.map(c => <details key={c.id} className="rounded-md border border-slate-200 bg-white p-3"><summary className="cursor-pointer break-words text-sm">{c.calculation_code} · {snapshot.products.find(p => p.id === c.product_id)?.description ?? c.product_id} · {c.issue_period.slice(0, 7)} · {c.status}</summary><pre className="mt-3 max-h-[36rem] overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify({ calculation: c, horizons: snapshot.horizons.filter(h => h.calculation_id === c.id), decisions: snapshot.decisions.filter(e => e.calculation_id === c.id), classification: snapshot.products.find(p => p.id === c.product_id)?.commercial }, null, 2)}</pre></details>)}{!snapshot.calculations.length && <p className="text-sm text-slate-500">Sin cálculos almacenados para este alcance.</p>}</details>
     </>}
   </>;
 }
-function OperationalDownload({ snapshot, dashboard, history, inventory }: { snapshot: ReportSnapshot; dashboard: ReturnType<typeof periodsDashboard>; history: HistoricalRow[]; inventory: OperationalInventory[] }) {
+function OperationalDownload({ snapshot, dashboard, history, inventory, historyComplete }: { snapshot: ReportSnapshot; dashboard: ReturnType<typeof periodsDashboard>; history: HistoricalRow[]; inventory: OperationalInventory[]; historyComplete: boolean }) {
   const { repository } = useForecastFilters();
   const [error, setError] = useState("");
   const context = snapshot.sourceContext!;
@@ -76,20 +85,28 @@ function OperationalDownload({ snapshot, dashboard, history, inventory }: { snap
   const selectedInventory = inventory.filter(row => scope.has(row.product_id));
   async function download() {
     setError("");
+    let stage: OperationalExportStage = "SOURCE_READ";
     try {
       const current = await repository.openOperationalRead?.();
       if (!current || !matchesOfficialSource(current, context)) {
         setError("La fuente oficial cambió. Actualiza la consulta antes de descargar.");
         return;
       }
-      const bytes = planningXlsx(operationalPeriodsSheets(snapshot, dashboard, history, selectedInventory));
-      const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
+      stage = "SHEETS";
+      const sheets = operationalPeriodsSheets(snapshot, dashboard, history, selectedInventory, historyComplete);
+      stage = "SERIALIZE";
+      const bytes = planningXlsx(sheets);
+      stage = "BLOB";
+      const blob = new Blob([bytes as BlobPart], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      stage = "OBJECT_URL";
+      const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
       link.download = `FORECAST_Towell_Periodos_${context.source_hash.slice(0, 12)}_g${context.generation}.xlsx`;
+      stage = "NATIVE_CLICK";
       link.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch { setError("No fue posible descargar el XLSX."); }
+    } catch (cause) { setError(operationalDownloadErrorMessage(stage, cause)); }
   }
   return <div className="flex flex-wrap items-center gap-3 text-xs text-slate-600"><span title={context.source_hash}>Fuente oficial · {context.first_period} a {context.last_period} · Actualización {context.generation}{context.sales_contract ? " · Ventas: Towell · Inventario: Estadística" : ""}</span><span>Inventario: {selectedInventory.length ? `${selectedInventory.length} producto-meses con dato` : "Sin dato"}</span><button type="button" className="underline" onClick={() => void download()}>Descargar XLSX de Períodos</button>{error && <p role="alert">{error}</p>}</div>;
 }
@@ -97,14 +114,16 @@ function CompactMatrix({ rows, scope, periods, issue }: { rows: ForecastMatrixRo
   const [id, setId] = useState(rows.length === 1 ? rows[0].product.id : "all");
   const row = rows.find(r => r.product.id === id);
   const selected = row ? [row] : scope;
+  const comparable = comparableForecastRows(selected, periods);
   return <section className="min-w-0 space-y-4 border-t border-slate-200 py-5"><div><h2 className="text-lg font-semibold">Matriz compacta H1–H12</h2><p className="mt-1 text-xs text-slate-500">Tres candidatos congelados · valores almacenados · sin adopción automática</p></div>
     {rows.length > 1 && <ReportSelect label="Producto de la matriz" value={id} onChange={setId} options={[{ value: "all", label: "Total compatible · ver cobertura del alcance" }, ...rows.map(r => ({ value: r.product.id, label: `${r.chain} · ${r.product.description} · ${r.calculation!.calculation_code}` }))]}/>}
     {row && <><dl aria-label="Identidad del cálculo" className="grid gap-x-5 gap-y-3 rounded-md bg-slate-50 p-4 text-sm sm:grid-cols-2 lg:grid-cols-3">{[["Cadena", row.chain], ["Modelo", modelName(row)], ["Color", row.product.commercial?.color ?? "Sin identificar"], ["Producto", row.product.description], ["Calculation Code", row.calculation!.calculation_code], ["Issue Period", row.calculation!.issue_period], ["Created At", row.calculation!.created_at], ["Estado del cálculo", row.calculation!.status], ["Referencia sugerida", row.calculation!.suggested_reference?.model ?? "Sin referencia almacenada"], ["Estado de decisión", row.adopted ? `Adoptado · ${row.adopted.selected_candidate}` : "Sin decisión"]].map(([label, value]) => <div key={label} className="min-w-0"><dt className="text-xs text-slate-500">{label}</dt><dd className="mt-1 break-words font-medium">{value}</dd></div>)}</dl><dl className="grid gap-3 sm:grid-cols-3">{detailMetrics(row).map(m => <div key={m.family}><dt className="text-xs text-slate-500">WAPE retrospectivo · {reportSeries[m.family]}</dt><dd className="text-lg font-semibold">{reportPercent(m.wape)}</dd></div>)}</dl></>}
     {rows.length > 0 && periods.length > 0 ? <ReportTable label="Matriz compacta de forecast" headers={["Periodo", "Horizonte", "Estadístico", "Machine Learning", "Ensemble", ...(selected.some(r => r.adopted) ? ["Towell adoptado"] : [])]} rows={periods.map(p => ({ id: p, cells: [<span key="period" title={p}>{shortPeriod(p)}</span>, `H${(Number(p.slice(0, 4)) - Number(issue!.slice(0, 4))) * 12 + Number(p.slice(5, 7)) - Number(issue!.slice(5, 7))}`, ...[...candidates, ...(selected.some(r => r.adopted) ? ["TOWELL" as const] : [])].map(s => { const q = matrixTotal(selected, p, s); return <span key={s} title={`Cobertura ${q.covered}/${q.eligible}`} className="whitespace-nowrap tabular-nums">{reportNumber(q.value)}{q.covered < q.eligible && <span className={`mt-1 block text-xs ${q.covered ? "text-amber-800" : "text-slate-500"}`}>{q.covered ? "PARCIAL " : ""}{q.covered}/{q.eligible}</span>}</span>; })] }))}/> : <p className="text-sm text-slate-500">Sin cálculo compatible disponible para los periodos seleccionados.</p>}
+    {selected.length > 1 && periods.length > 0 && <details className="text-sm"><summary className="cursor-pointer font-medium">Comparación sobre las mismas variantes · {comparable.length}/{selected.length}</summary><p className="my-3 text-xs text-slate-600">El total anterior conserva cada familia y su cobertura. Esta comparación usa la intersección exacta de variantes con los tres motores en todos los meses seleccionados: {comparable.length} de {selected.filter(item => item.calculation).length} con cálculo compatible; {selected.length} productos en el alcance. Los faltantes no son cero.</p><ReportTable label="Matriz comparativa mismas variantes" headers={["Periodo", "Estadístico", "Machine Learning", "Ensemble", "Cobertura común"]} rows={periods.map(p => ({ id: p, cells: [shortPeriod(p), ...candidates.map(family => reportNumber(matrixTotal(comparable, p, family).value)), `${comparable.length}/${selected.length}`] }))}/><p className="mt-2 break-words text-xs text-slate-500">Variantes comparadas: {comparable.map(item => `${item.chain} · ${item.product.description} · ${item.product.id}`).join("; ") || "Sin intersección comparable"}. No se comparan ni promedian WAPE de conjuntos diferentes.</p></details>}
     {row && <p className="break-all text-xs text-slate-500">Product ID: {row.product.id} · Calculation ID: {row.calculation!.id} · {row.product.commercial?.status ?? "PENDING_CLASSIFICATION"}</p>}
   </section>;
 }
-function PendingProducts({ rows, snapshot }: { rows: ForecastMatrixRow[]; snapshot: ReportSnapshot }) {
+function PendingProducts({ rows, snapshot, history, inventory, historyComplete }: { rows: ForecastMatrixRow[]; snapshot: ReportSnapshot; history: HistoricalRow[]; inventory: OperationalInventory[]; historyComplete: boolean }) {
   const [page, setPage] = useState(1), [size, setSize] = useState<50 | 100 | 250>(50);
-  return <details className="space-y-4 border-t border-slate-200 py-5"><summary className="cursor-pointer text-lg font-semibold">Productos pendientes de cálculo ({rows.length})</summary><p className="text-xs text-slate-500">Permanecen en el alcance. Cambiar filtros no ejecuta motores.</p><ReportTable label="Productos pendientes de cálculo" headers={["Producto", "Modelo", "Color", "Tamaño", "Estado", "Motivo"]} rows={rows.slice((page - 1) * size, page * size).map(r => ({ id: r.product.id, cells: [<div key="product">{r.product.description}<p className="mt-1 text-xs text-slate-500">{r.chain} · {r.product.product_code} · {r.product.id}</p></div>, modelName(r), r.product.commercial?.color ?? "Sin identificar", r.product.commercial?.size ?? (r.product.commercial?.not_applicable?.includes("size") ? "No aplica (documentado)" : "Sin identificar"), r.product.commercial?.status ?? "PENDING_CLASSIFICATION", snapshot.calculations.some(c => c.product_id === r.product.id && c.chain_id === r.product.chain_id) ? "Cálculo almacenado fuera del grupo compatible seleccionado" : snapshot.sourceContext ? "Sin cálculo compatible con la fuente oficial" : "Sin cálculo almacenado en la lectura autorizada"] }))}/><ReportPaging page={page} previous={() => setPage(p => p - 1)} next={() => setPage(p => p + 1)} hasMore={rows.length > page * size} loading={false} size={size} setSize={v => { setSize(v); setPage(1); }}/></details>;
+  return <details className="space-y-4 border-t border-slate-200 py-5"><summary className="cursor-pointer text-lg font-semibold">Productos pendientes de cálculo ({rows.length})</summary><p className="text-xs text-slate-500">Permanecen en el alcance. Cambiar filtros no ejecuta motores.</p><ReportTable label="Productos pendientes de cálculo" headers={["Producto", "Modelo", "Color", "Tamaño", "Estado", "Motivo"]} rows={rows.slice((page - 1) * size, page * size).map(r => ({ id: r.product.id, cells: [<div key="product">{r.product.description}<p className="mt-1 text-xs text-slate-500">{r.chain} · {r.product.product_code} · {r.product.id}</p></div>, modelName(r), r.product.commercial?.color ?? "Sin identificar", r.product.commercial?.size ?? (r.product.commercial?.not_applicable?.includes("size") ? "No aplica (documentado)" : "Sin identificar"), r.product.commercial?.status ?? "PENDING_CLASSIFICATION", confirmedMissingTowellHistory(r, snapshot.sourceContext, history, inventory, historyComplete) ? "Sin historial Towell; sin pronóstico" : snapshot.calculations.some(c => c.product_id === r.product.id && c.chain_id === r.product.chain_id) ? "Cálculo almacenado fuera del grupo compatible seleccionado" : snapshot.sourceContext ? "Sin cálculo compatible con la fuente oficial" : "Sin cálculo almacenado en la lectura autorizada"] }))}/><ReportPaging page={page} previous={() => setPage(p => p - 1)} next={() => setPage(p => p + 1)} hasMore={rows.length > page * size} loading={false} size={size} setSize={v => { setSize(v); setPage(1); }}/></details>;
 }

@@ -135,6 +135,10 @@ class SupabaseDataProvider(DataProvider):
             raise PreviewError("SALES_SOURCE_UNAVAILABLE", 503)
         return context
 
+    def refresh_source_context(self):
+        self.client.refresh_operational_context()
+        return self.source_context()
+
     def source_catalog(self, chain_id, issue_period=None):
         cache_key = chain_id, issue_period
         if cache_key not in self._source_catalogs:

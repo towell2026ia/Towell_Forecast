@@ -159,6 +159,8 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
   const product = selected?.products?.find(p => p.product_id === filters.productId);
   const noEligible = !provisional && (selected?.error_code === "NO_ELIGIBLE_PRODUCTS" || Boolean(filters.productId && product &&
     ["INSUFFICIENT", "COLD_START", "PRE-LAUNCH", "INACTIVE"].includes(product.forecast_status) && !product.horizons?.length));
+  const noTowellHistory = product?.history_months === 0 && !product.horizons?.length && !stored.loading && !stored.error
+    && stored.data?.sourceContext?.sales_contract === "towell-sales-v1" && !salesBlocked;
   const previous = Boolean(busy && current?.result);
   return <section className="space-y-5">
     <div className="flex flex-wrap items-start justify-between gap-3">
@@ -179,6 +181,7 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
     {!client && <p className="text-sm text-slate-500">Conexión operacional pendiente de configuración.</p>}
     {current?.error && <p role="alert" className="text-sm text-rose-700">No fue posible completar la consulta operacional: {operationalErrorMessage(current.error)}</p>}
     {current?.job && <div role="status" className="rounded-xl border bg-white p-3 text-sm"><span>{storedResults ? "Resultados almacenados" : noEligible ? "Historial insuficiente" : humanStatus(current.job.status)}</span>{busy && <ol className="mt-3 flex flex-wrap gap-3 text-xs">{labels.map((label, i) => <li key={label} className={i === stages.indexOf(current.job!.status) ? "font-semibold text-blue-700" : "text-slate-500"}>{i < stages.indexOf(current.job!.status) ? "✓" : i === stages.indexOf(current.job!.status) ? "●" : "○"} {label}</li>)}</ol>}</div>}
+    {noTowellHistory && <p role="status" className="text-sm text-slate-600">Sin historial Towell; sin pronóstico</p>}
     {noEligible && <p role="status" className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">{product?.forecast_status === "INSUFFICIENT" && product.history_months !== undefined
       ? `${product.description}: ${product.history_months} meses de venta consecutivos después de su primera venta; el pronóstico validado requiere ${product.minimum_history_months ?? 6}. No se ejecutaron los modelos estadísticos ni ML para este producto. Una estimación cold start necesitará validación separada antes de mostrarse.`
       : product ? `${product.description}: ${humanStatus(product.forecast_status)}. No hay pronóstico validado ni métricas retrospectivas de este producto.`

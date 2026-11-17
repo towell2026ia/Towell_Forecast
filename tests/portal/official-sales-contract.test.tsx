@@ -3,17 +3,17 @@ import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { SupabaseForecastReadRepository } from "../../lib/forecast-data";
-import { buildForecastMatrix, emptyReportChoice, matchesOfficialSource, type ReportSnapshot } from "../../lib/forecast-reporting";
+import { buildForecastMatrix, chooseCalculations, emptyReportChoice, matchesOfficialSource, type ReportSnapshot } from "../../lib/forecast-reporting";
 import { periodsDashboard } from "../../lib/periods-dashboard";
 import { operationalPeriodsSheets } from "../../lib/operational-periods-xlsx";
 import { salesSourceState, salesUnavailableMessage } from "../../lib/official-sales-source";
 import { ForecastFiltersContext } from "../../app/forecast-towell-app";
-import { ForecastPeriodsView } from "../../app/forecast-periods-view";
+import { ForecastPeriodsView, operationalDownloadErrorMessage } from "../../app/forecast-periods-view";
 import { emptyFilters, type HistoricalRow, type OperationalReadContext } from "../../lib/supabase/types";
 
 const source: OperationalReadContext = { source_hash: "c".repeat(64), authorized_source_hash: "c".repeat(64), generation: 2,
   first_period: "2024-01", last_period: "2026-10", sales_source: "TOWELL", inventory_source: "ESTADISTICA", sales_available: true,
-  sales_contract: "towell-sales-v1", sales_file_sha256: "d".repeat(64), sales_sheet: "Towell" };
+  sales_contract: "towell-sales-v1", sales_file_sha256: "d".repeat(64), sales_sheet: "Towell", sales_training_cutoff: "2026-10" };
 const missing = { ...source, sales_available: false };
 const oldSource = { source_hash: "b".repeat(64), generation: 1 };
 const filters = { ...emptyFilters, chainId: "chain", purchaseType: "RS" as const };
@@ -69,6 +69,34 @@ describe("Towell sales / Estadística inventory source boundary", () => {
     expect(salesSourceState({ source_hash: "a".repeat(64), generation: 1 })).toBe("AVAILABLE");
     expect(matchesOfficialSource(source, missing)).toBe(false);
   });
+  it("matches every accredited pilot field, blocks legacy subcontexts and retains unavailable inventory provenance", () => {
+    expect(matchesOfficialSource({ ...source, sales_unavailable_reason: null }, source)).toBe(true);
+    expect(matchesOfficialSource({ source_hash: source.source_hash, generation: source.generation }, source)).toBe(false);
+    for (const changed of [{ ...source, sales_file_sha256: "e".repeat(64) }, { ...source, first_period: "2024-02" },
+      { ...source, last_period: "2026-11" }, { ...source, sales_training_cutoff: "2026-09" }, { ...source, sales_training_cutoff: undefined },
+      { ...source, sales_sheet: undefined }, { ...source, generation: "2" }, { ...source, sales_available: false }]) {
+      expect(matchesOfficialSource(changed, source)).toBe(false);
+      expect(matchesOfficialSource(source, changed as OperationalReadContext)).toBe(false);
+    }
+    expect(salesSourceState({ ...source, sales_training_cutoff: "2026-11" })).toBe("INVALID");
+    expect(matchesOfficialSource(missing, { ...missing, sales_unavailable_reason: salesUnavailableMessage })).toBe(true);
+    expect(matchesOfficialSource(oldSource, { ...oldSource })).toBe(true);
+  });
+  it("excludes unsupported objectives, future sales cuts, contradictory cutoff metadata and incompatible subcontexts", () => {
+    const s = snapshot(source), original = { ...s.calculations[0], id: "valid", input_snapshot: { source_context: source }, cutoff_at: "2026-10-31" };
+    s.calculations = [original, ...[
+      { objective: "Pedido" }, { issue_period: "2026-11", cutoff_at: "2026-11-30" }, { cutoff_at: "2026-09-30" },
+      { input_snapshot: { source_context: { source_hash: source.source_hash, generation: source.generation } } },
+      { input_snapshot: { source_context: { ...source, sales_file_sha256: "e".repeat(64) } } },
+    ].map((change, index) => ({ ...original, id: `invalid-${index}`, calculation_no: 100 + index, ...change }))];
+    expect([...chooseCalculations(s, emptyReportChoice).values()].map(row => row.id)).toEqual(["valid"]);
+    expect(chooseCalculations({ ...s, sourceContext: missing }, emptyReportChoice).size).toBe(0);
+    const provisional = { job_id: "good", chain_id: "chain", product_id: product.id, issue_period: "2026-10", created_at: "2026-11-05T00:00:00Z",
+      engine_version: "SYNTHETIC", model: "synthetic", confidence: "LOW", source_context: source, horizons: [] };
+    const matrix = buildForecastMatrix({ ...s, calculations: [], provisionals: [provisional, { ...provisional, job_id: "future", issue_period: "2026-11" }] }, emptyReportChoice, [null, null]);
+    expect(matrix.issue).toBe("2026-10");
+    expect(matrix.rows[0].provisional?.job_id).toBe("good");
+  });
   it("invalidates cached source metadata and never queries sales or prior calculations when the sales file is unavailable", async () => {
     const f = clientFixture(); await f.repository.getCommercialCatalog(source);
     const before = f.catalog.mock.calls.length;
@@ -97,6 +125,12 @@ describe("Towell sales / Estadística inventory source boundary", () => {
     expect(sheets.find(sheet => sheet.name === "Inventario")!.rows).toHaveLength(1);
     expect(sheets.find(sheet => sheet.name === "Trazabilidad")!.rows).toContainEqual(["Ventas disponibles", salesUnavailableMessage]);
     expect(() => operationalPeriodsSheets({ ...report, sourceContext: source }, dashboard, [], [stock])).toThrow("official_source_changed");
+    let staleFailure: unknown;
+    try { operationalPeriodsSheets({ ...report, sourceContext: source }, dashboard, [], [stock]); } catch (cause) { staleFailure = cause; }
+    expect(operationalDownloadErrorMessage("SHEETS", staleFailure)).toBe("El contexto del tablero cambió; actualiza la página antes de descargar. Código EXPORT_SHEETS_OFFICIAL_SOURCE_CHANGED.");
+    const safe = operationalDownloadErrorMessage("SERIALIZE", new TypeError("sensitive payload must never be displayed"));
+    expect(safe).toBe("No fue posible descargar el XLSX. Código EXPORT_SERIALIZE_TYPE_ERROR.");
+    expect(safe).not.toContain("sensitive");
   });
   it("shows the explicit missing-sales state in Períodos without an automatic calculation or old forecast", async () => {
     const f = clientFixture(); f.context(missing);

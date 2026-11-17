@@ -111,6 +111,8 @@ def mount_preview_routes(app, config, identity, data, runner, limiter, write_rep
     @router.get("/preview-runs/{job_id}/research")
     def research(job_id: str, request: Request, authorization: str | None = Header(default=None)):
         principal, token = actor(request, authorization)
+        if getattr(config, "local_postgres_config", None) is not None:
+            raise PreviewError("DEEP_RESEARCH_DISABLED", 503)
         if not limiter.allow("research-poll:" + principal.user_id, config.forecast_rate_per_minute):
             raise PreviewError("RATE_001", 429)
         return runner.poll_research(job_id, principal, source_context=data.bind(token).source_context())
@@ -220,6 +222,8 @@ def mount_preview_routes(app, config, identity, data, runner, limiter, write_rep
         return principal, token
 
     def writer():
+        if getattr(config, "local_postgres_config", None) is not None:
+            raise PreviewError("LOCAL_WRITE_DISABLED", 403)
         if not config.supabase_service_role_key or write_repository is None:
             raise PreviewError("REQUIRED_SECRET_MISSING", 503)
         return write_repository

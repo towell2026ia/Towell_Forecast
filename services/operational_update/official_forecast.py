@@ -7,17 +7,20 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from decimal import Decimal, localcontext
 import math
+import os
 from pathlib import Path
 import re
 
 from services.assistant_api.calculation_history import _complete
 from services.assistant_api.commercial_catalog import key
 from services.assistant_api.forecast_execution import execute_forecast
+from services.assistant_api.local_sales_policy import LocalSalesPolicy, SALES_UNAVAILABLE
 from services.forecast_engine.engine import (
     ENGINE_VERSION, ForecastPolicy, forecast_dataset, normalize_retrospective_dataset,
 )
 from .preparation import REPO, file_hash, fingerprint
 from .unification import csv_rows, json_read, write_csv, write_json
+from .towell_sales_source import read_towell_sales_source
 
 
 GROUP_FIELDS = ("chain_id", "account", "format", "model", "presentation", "commercial_code")
@@ -102,6 +105,45 @@ def engine_records(facts, cutoff):
             "available_at": None, "availability_source": "UNKNOWN", "evidence_mode": "RETROSPECTIVE_TRAINING",
         })
     return records, metadata
+
+
+def verify_towell_inputs(directory, manifest, facts, installed_policy=None):
+    """Verify the sealed packet against the current workbook before any engine runs."""
+    policy_file = "Authorized_Sales_Policy.json"
+    if policy_file not in manifest["outputs_sha256"]:
+        raise ValueError("official_forecast_sales_policy_missing")
+    policy = LocalSalesPolicy(json_read(directory / policy_file))
+    if installed_policy is not None and policy.config != installed_policy.config:
+        raise ValueError("official_forecast_sales_context_invalid")
+    context = manifest["forecast_source_context"]
+    if (policy.config["master_sha256"] != context["sales_file_sha256"]
+            or policy.config["source_hash"] != manifest["source_hash"]
+            or policy.config["generation"] != manifest["generation"]
+            or policy.config["last_closed_period"] != manifest["cutoff"]):
+        raise ValueError("official_forecast_sales_context_invalid")
+    try:
+        document = read_towell_sales_source(policy.path.parent.parent, confirmed_closed_period=manifest["cutoff"],
+                                           expected_sha256=policy.config["master_sha256"])
+    except (OSError, ValueError) as error:
+        raise ValueError(SALES_UNAVAILABLE) from error
+    cells = {record["source_reference"]: record for record in document["records"] if record["eligible"]}
+    identities = {row["identity_key"]: row for row in document["identities"]}
+    seen = set()
+    for fact in facts:
+        reference = fact.get("source_reference")
+        cell = cells.get(reference)
+        if not cell or reference in seen:
+            raise ValueError("official_forecast_sales_cell_invalid")
+        identity = identities[cell["identity_key"]]
+        if (fact.get("metric_code") != "SALES" or fact.get("source_sheet") != "Towell"
+                or fact.get("source_sha256") != document["source"]["sha256"]
+                or fact.get("source_file") != document["source"]["name"]
+                or fact.get("source_raw_value_literal") != cell["source_value_literal"]
+                or fact["period"] != cell["period"] or Decimal(fact["value"]) != cell["value"]
+                or any(fact.get(field) != identity[field] for field in ("account", "format", "upc"))):
+            raise ValueError("official_forecast_sales_cell_mismatch")
+        seen.add(reference)
+    return policy
 
 
 def eligibility(records, cutoff, policy):
@@ -200,7 +242,10 @@ def run(directory, manifest_sha, output, *, compute=forecast_dataset, reuse_from
         raise ValueError("official_forecast_generation_invalid")
     manifest, facts = source_inputs(directory, manifest_sha, first_period=first_period)
     declared_provenance = manifest.get("forecast_source_context") or {}
-    if extra_source_context is not None and declared_provenance and extra_source_context != declared_provenance:
+    local_config = os.environ.get("LOCAL_POSTGRES_CONFIG")
+    if local_config and not declared_provenance:
+        raise ValueError("official_forecast_local_sales_contract_required")
+    if extra_source_context is not None and extra_source_context != declared_provenance:
         raise ValueError("official_forecast_sales_context_invalid")
     provenance = dict(extra_source_context or declared_provenance)
     if provenance and (set(provenance) != SALES_CONTEXT_FIELDS
@@ -215,6 +260,8 @@ def run(directory, manifest_sha, output, *, compute=forecast_dataset, reuse_from
         raise ValueError("official_forecast_generation_invalid")
     if provenance and reuse_from is not None:
         raise ValueError("towell_forecast_reuse_forbidden")
+    configured = LocalSalesPolicy(json_read(Path(local_config)).get("authorized_sales_policy")) if local_config else None
+    live_policy = verify_towell_inputs(directory, manifest, facts, configured) if provenance else None
     cutoff = manifest["cutoff"]
     records, metadata = engine_records(facts, cutoff)
     policy = ForecastPolicy()
@@ -322,6 +369,8 @@ def run(directory, manifest_sha, output, *, compute=forecast_dataset, reuse_from
     }
     if source_inputs(directory, manifest_sha, first_period=first_period)[0] != manifest:
         raise ValueError("official_source_changed_during_forecast")
+    if live_policy and not live_policy.available():
+        raise ValueError(SALES_UNAVAILABLE)
     stats["outputs_sha256"] = {path.name: file_hash(path) for path in sorted(output.iterdir())}
     write_json(output / "Summary.json", stats)
     print("forecast complete " + str(stats["families"]), flush=True)

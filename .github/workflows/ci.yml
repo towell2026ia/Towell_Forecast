@@ -30,6 +30,8 @@ jobs:
       - run: python -c "import services.assistant_api.api, services.assistant_api.settings, services.assistant_api.persistence"
       - run: coverage run --source=services.assistant_api --omit='*/test_*.py,*/__main__.py,*/serve.py,*/persistence_admin.py' -m unittest discover -s services/assistant_api -p 'test_*.py' -q
       - run: coverage report -m --fail-under=81
+      - name: Verify Linux mount isolation (POSIX-only on the Windows workstation)
+        run: python -m unittest services.assistant_api.test_container_entrypoint.ContainerEntrypointTests.test_symlink_outside_mount_cannot_be_prepared -v
       - run: python -m unittest discover -s services/statistical_engine -p 'test_*.py' -q
       - run: python -m unittest discover -s services/ml_engine -p 'test_*.py' -q
       - run: python -m unittest discover -s services/ensemble_engine -p 'test_*.py' -q

@@ -151,9 +151,9 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
     app.state.telemetry = metrics
     app.state.auth = identity
     researcher = ColdStartResearch(config.openai_api_key, timeout=config.external_timeout_seconds) \
-        if config.deep_research_enabled else None
+        if config.deep_research_enabled and local_database is None else None
     preview_runner = OperationalMultiChainForecastRunner(storage, concurrency=config.max_forecast_runs,
-        environment=config.app_env) if config.operational_preview_enabled else None
+        environment=config.app_env, require_authorized_sales=local_database is not None) if config.operational_preview_enabled else None
     app.state.preview_runner = preview_runner
     if preview_runner:
         write_repository = SupabaseForecastWriteRepository(config.supabase_url, config.supabase_service_role_key,
@@ -166,7 +166,7 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
         from .rs_research import RSResearch
         research = RSResearch(storage, researcher) if researcher and config.ai_assistant_api_enabled else None
         mount_rs_assistant(app, config, identity, supabase_client, rate_limiter,
-                           RSAssistantWorkflow(storage, research))
+                           RSAssistantWorkflow(storage, research, research_disabled=local_database is not None))
         from .commercial_api import mount_commercial_routes
         mount_commercial_routes(app, identity, supabase_client, rate_limiter)
 
@@ -295,11 +295,12 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
                 "operational_preview": True,
                 "rs_assistant_enabled": config.ai_assistant_api_enabled,
                 "openai_enabled": config.openai_enabled,
-                "deep_research_enabled": config.deep_research_enabled,
+                "deep_research_enabled": config.deep_research_enabled and local_database is None,
+                **({"deep_research_block_reason": "LOCAL_PILOT_RESEARCH_DISABLED"} if local_database is not None else {}),
                 "openai_key_configured": config.openai_api_key.startswith("sk-"),
                 "vintage_persistence": config.vintage_persistence_enabled,
-                "official_publication": config.official_publication_enabled,
-                "champion_publication": config.champion_publication_enabled,
+                "official_publication": config.official_publication_enabled and local_database is None,
+                "champion_publication": config.champion_publication_enabled and local_database is None,
                 "forecast_calculation_history": config.forecast_calculation_history_enabled,
                 "forecast_selection": config.forecast_selection_enabled,
                 "capture_center": config.capture_center_enabled,
