@@ -160,7 +160,12 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
       return { source, job: await read.task };
     }).then(({ source, job }) => {
       if (alive) setPreview(previous => {
-        if (!forecastSourceAvailable(source)) return { key: previewKey, result: null, job: null, error: source?.forecast_contract ? "ORDER_SOURCE_UNAVAILABLE" : "SALES_SOURCE_UNAVAILABLE", loading: false };
+        if (!forecastSourceAvailable(source)) {
+          const error = source?.forecast_contract
+            ? source.target_source_available && source.forecast_block_code === "ORDER_CLOSURE_UNVERIFIED" ? "" : "ORDER_SOURCE_UNAVAILABLE"
+            : "SALES_SOURCE_UNAVAILABLE";
+          return { key: previewKey, result: null, job: null, error, loading: false };
+        }
         const compatible = !source || Boolean(previous?.result?.scopes.length && previous.result.scopes.every(scope => matchesOfficialSource(scope.source_context, source)));
         return compatible && previous?.key === previewKey && (previous.loading || previous.job) ? previous : { key: previewKey, result: ["READY_PREVIEW", "READY_PROVISIONAL"].includes(job?.status ?? "") ? job : null, job, error: "", loading: false };
       });

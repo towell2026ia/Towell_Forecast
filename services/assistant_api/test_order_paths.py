@@ -12,18 +12,18 @@ from unittest.mock import Mock
 from fastapi import FastAPI
 import httpx
 
-from .auth import Principal, ROLE_PERMISSIONS
-from .data_provider import SupabaseDataProvider
-from .local_sales_policy import LocalSalesPolicy, MASTER_NAME
-from .operational_preview import OperationalMultiChainForecastRunner
-from .persistence import LocalPersistenceProvider
-from .preview_api import PreviewRunRequest, mount_preview_routes
-from .rs_assistant import RSAssistantRequest, RSAssistantWorkflow
-from .rs_assistant_forecasts import stored_rs_forecast
-from .supabase_access import PreviewError, SupabaseReadClient, matches_source, require_sales_context
-from . import test_authorized_sales_paths as sales_tests
-from .test_authorized_sales_paths import source_context
-from .test_operational_preview import A, B, PRODUCT, OTHER, USER, fixture
+from services.assistant_api.auth import Principal, ROLE_PERMISSIONS
+from services.assistant_api.data_provider import SupabaseDataProvider
+from services.assistant_api.local_sales_policy import LocalSalesPolicy, MASTER_NAME
+from services.assistant_api.operational_preview import OperationalMultiChainForecastRunner
+from services.assistant_api.persistence import LocalPersistenceProvider
+from services.assistant_api.preview_api import PreviewRunRequest, mount_preview_routes
+from services.assistant_api.rs_assistant import RSAssistantRequest, RSAssistantWorkflow
+from services.assistant_api.rs_assistant_forecasts import stored_rs_forecast
+from services.assistant_api.supabase_access import PreviewError, SupabaseReadClient, matches_source, require_sales_context
+from services.assistant_api import test_authorized_sales_paths as sales_tests
+from services.assistant_api.test_authorized_sales_paths import source_context
+from services.assistant_api.test_operational_preview import A, B, PRODUCT, OTHER, USER, fixture
 
 
 def order_context(*, closed=False):

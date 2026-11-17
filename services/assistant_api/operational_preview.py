@@ -135,8 +135,6 @@ class OperationalMultiChainForecastRunner:
                     selected_ids = job.get("requested_product_ids")
                     if selected_ids is not None:
                         rows = [row for row in rows if row["product_id"] in selected_ids]
-                    if any(row.get("objective", "Venta") != job["objective"] or row.get("chain_id") != chain for row in rows):
-                        raise PreviewError("LINEAGE_MISMATCH", 409)
                     if not rows:
                         raise PreviewError("INSUFFICIENT_HISTORY")
                     latest = max(row["period"] for row in rows)
