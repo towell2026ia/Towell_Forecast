@@ -172,8 +172,11 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
 
     @app.exception_handler(PreviewError)
     async def preview_exception(request: Request, exc: PreviewError):
-        return JSONResponse(status_code=exc.status, content={"status": "error", "error_code": exc.code,
-            "request_id": getattr(request.state, "request_id", None)})
+        content = {"status": "error", "error_code": exc.code,
+                   "request_id": getattr(request.state, "request_id", None)}
+        if exc.code == "SALES_SOURCE_UNAVAILABLE":
+            content["message"] = "Sin cálculo: fuente de ventas no disponible"
+        return JSONResponse(status_code=exc.status, content=content)
 
     @app.middleware("http")
     async def request_context(request: Request, call_next):

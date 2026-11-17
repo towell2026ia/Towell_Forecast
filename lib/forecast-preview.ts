@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { assistantScopeIsValid, parseRsAssistantResponse, type RsAssistantClient } from "./rs-assistant";
 import type { OperationalReadContext } from "./supabase/types";
 import { matchesOfficialSource } from "./forecast-reporting";
+import { salesSourceAvailable, salesSourceState } from "./official-sales-source";
 export type PreviewHorizon = { horizon: number; target_period: string; statistical_value: number; ml_value: number | null; forecast_towell: number; p10: number | null; p50: number; p90: number | null; p95: number | null;
   statistical_model?: string; ml_model?: string | null; model_strategy?: string; classification?: string; forecast_status?: string; certification_status?: string; confidence?: string; band_basis?: "PRODUCT" | "CATEGORY" | "CHAIN" | "INSUFFICIENT"; band_observations?: number; band_status?: "AVAILABLE" | "INSUFFICIENT_BAND_EVIDENCE" };
 export type PreviewProduct = { product_id: string; product_code: string; description: string; category_id: string | null; forecast_status: string; history_months?: number; minimum_history_months?: number; horizons?: PreviewHorizon[]; statistical_model?: string | null; classification?: string | null };
@@ -95,7 +96,7 @@ export interface PreviewClient {
   dispose(): void;
 }
 export class PreviewReadError extends Error { constructor(public code: string) { super(code); } }
-const safeCodes = new Set(["AUTH_REQUIRED", "SCOPE_FORBIDDEN", "REQUEST_001", "PREVIEW_DISABLED", "DUPLICATE_OBSERVATION_CONFLICT", "NO_ELIGIBLE_PRODUCTS", "INSUFFICIENT_HISTORY", "DATA_READ_FAILED", "TEMPORAL_METADATA_MISSING", "DATA_LEAKAGE_DETECTED", "STATISTICAL_FAILED", "ML_FAILED", "ENSEMBLE_FAILED", "PREVIEW_NOT_FOUND", "PREVIEW_NOT_READY", "RATE_001", "VINTAGE_PERSISTENCE_DISABLED", "OFFICIAL_PUBLICATION_DISABLED", "CHAMPION_PUBLICATION_DISABLED", "REQUIRED_SECRET_MISSING", "VINTAGE_WRITE_FAILED", "DATA_QUALITY_BLOCKED", "LINEAGE_MISMATCH", "HASH_MISMATCH"]);
+const safeCodes = new Set(["AUTH_REQUIRED", "SCOPE_FORBIDDEN", "REQUEST_001", "PREVIEW_DISABLED", "SALES_PERIOD_NOT_CLOSED", "DUPLICATE_OBSERVATION_CONFLICT", "NO_ELIGIBLE_PRODUCTS", "INSUFFICIENT_HISTORY", "DATA_READ_FAILED", "TEMPORAL_METADATA_MISSING", "DATA_LEAKAGE_DETECTED", "STATISTICAL_FAILED", "ML_FAILED", "ENSEMBLE_FAILED", "PREVIEW_NOT_FOUND", "PREVIEW_NOT_READY", "RATE_001", "VINTAGE_PERSISTENCE_DISABLED", "OFFICIAL_PUBLICATION_DISABLED", "CHAMPION_PUBLICATION_DISABLED", "REQUIRED_SECRET_MISSING", "VINTAGE_WRITE_FAILED", "DATA_QUALITY_BLOCKED", "LINEAGE_MISMATCH", "HASH_MISMATCH"]);
 export class RailwayPreviewClient implements PreviewClient {
   private controller = new AbortController();
   readonly rsAssistant?: RsAssistantClient;
@@ -127,7 +128,9 @@ export class RailwayPreviewClient implements PreviewClient {
   private async officialSource(context?: OperationalReadContext) {
     const { data, error } = await this.sourceClient.rpc("operational_read_context").abortSignal(this.controller.signal);
     const source = Array.isArray(data) && data.length === 1 ? data[0] as OperationalReadContext : null;
+    if (error && ["SALES_SOURCE_UNAVAILABLE", "OFFICIAL_SOURCE_MISMATCH"].includes(error.code)) throw new PreviewReadError(error.code);
     if (error || !source || !/^[0-9a-f]{64}$/.test(source.source_hash) || !Number.isSafeInteger(source.generation)) throw new PreviewReadError("DATA_READ_FAILED");
+    if (salesSourceState(source) === "INVALID") throw new PreviewReadError("OFFICIAL_SOURCE_MISMATCH");
     if (context && !matchesOfficialSource(source, context)) throw new PreviewReadError("DATA_READ_FAILED");
     return source;
   }
@@ -166,6 +169,7 @@ export class RailwayPreviewClient implements PreviewClient {
   research(jobId: string) { return this.request(`/api/forecast/preview-runs/${encodeURIComponent(jobId)}/research`); }
   async latest(chainId: string | null, productId: string | null, context?: OperationalReadContext) {
     const source = await this.officialSource(context);
+    if (!salesSourceAvailable(source)) return null;
     const params = new URLSearchParams(); if (chainId) params.set("chain_id", chainId); if (productId) params.set("product_id", productId);
     try {
       const result = await this.request(`/api/forecast/preview-latest?${params}`);
@@ -249,6 +253,7 @@ export class RailwayPreviewClient implements PreviewClient {
   }
   async provisionalForecasts(chainId: string | null, productId: string | null, context?: OperationalReadContext) {
     const source = await this.officialSource(context);
+    if (!salesSourceAvailable(source)) return [];
     const rows: import("./forecast-reporting").ProvisionalForecast[] = [];
     for (let offset = 0; offset < 10000; offset += 100) {
       const params = new URLSearchParams({ offset: String(offset), limit: "100" });

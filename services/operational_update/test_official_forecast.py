@@ -7,7 +7,7 @@ import unittest
 from services.forecast_engine.engine import ForecastPolicy, forecast_dataset
 from services.assistant_api.data_provider import SupabaseDataProvider
 from .official_forecast import (
-    _scope_emissions, consolidate_models, eligibility, engine_records, source_inputs, variant_forecasts,
+    _scope_emissions, consolidate_models, eligibility, engine_records, source_inputs, variant_forecasts, run,
 )
 from .preparation import file_hash
 from .unification import write_csv, write_json
@@ -24,6 +24,64 @@ def source_row(period="2026-10", value="10"):
 
 
 class OfficialForecastTests(unittest.TestCase):
+    def _source(self, directory, row, **extra):
+        packet = {"source_hash": "1" * 64, "observations": [row]}
+        write_json(directory / "Import.json", packet)
+        write_csv(directory / "Facts.csv", [row], list(row))
+        manifest = {"schema": "official-source-1", "source_hash": "1" * 64,
+                    "cutoff": row["period"], **extra,
+                    "outputs_sha256": {name: file_hash(directory / name) for name in ("Facts.csv", "Import.json")}}
+        write_json(directory / "Manifest.json", manifest)
+        return file_hash(directory / "Manifest.json")
+
+    def test_accredited_2024_sales_require_an_explicit_earlier_first_period(self):
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            row = source_row("2024-01")
+            seal = self._source(directory, row, cutoff="2026-10")
+            with self.assertRaisesRegex(ValueError, "official_forecast_source_out_of_scope"):
+                source_inputs(directory, seal)
+            self.assertEqual(source_inputs(directory, seal, first_period="2024-01")[1], [row])
+            for invalid in ("2024-00", "2024-13", "2025-01"):
+                with self.assertRaises(ValueError):
+                    source_inputs(directory, seal, first_period=invalid)
+
+    def test_towell_contract_is_sealed_in_generation_two_without_running_an_ineligible_scope(self):
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary) / "source"
+            directory.mkdir()
+            provenance = {"sales_contract": "towell-sales-v1", "sales_file_sha256": "2" * 64,
+                          "sheet": "Towell", "inventory_source": "ESTADISTICA", "authorized_source_hash": "1" * 64}
+            seal = self._source(directory, source_row("2024-01", "0"), generation=2,
+                                forecast_source_context=provenance)
+            def forbidden_engine(*args, **kwargs):
+                raise AssertionError("ineligible zero-only scope must not execute the engine")
+            result = run(directory, seal, Path(temporary) / "results", first_period="2024-01",
+                         context_generation=2, compute=forbidden_engine)
+            self.assertEqual(result["source_context"]["generation"], 2)
+            self.assertTrue(all(result["source_context"][k] == v for k, v in provenance.items()))
+            self.assertEqual(result["chains"][0]["status"], "NO_ELIGIBLE_PRODUCTS")
+            self.assertFalse(result["temporal_certification"])
+            self.assertEqual(result["variant_rows"], 0)
+
+    def test_towell_contract_cannot_reuse_a_cache_or_be_stamped_with_a_wrong_generation(self):
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary) / "source"
+            directory.mkdir()
+            provenance = {"sales_contract": "towell-sales-v1", "sales_file_sha256": "2" * 64,
+                          "sheet": "Towell", "inventory_source": "ESTADISTICA", "authorized_source_hash": "1" * 64}
+            seal = self._source(directory, source_row("2024-01", "0"), generation=2,
+                                forecast_source_context=provenance)
+            with self.assertRaisesRegex(ValueError, "towell_forecast_reuse_forbidden"):
+                run(directory, seal, Path(temporary) / "cache", first_period="2024-01",
+                    context_generation=2, reuse_from=Path(temporary) / "earlier")
+            for invalid in (1, True, 0):
+                with self.assertRaisesRegex(ValueError, "official_forecast_generation_invalid"):
+                    run(directory, seal, Path(temporary) / "wrong", first_period="2024-01", context_generation=invalid)
+            with self.assertRaisesRegex(ValueError, "official_forecast_sales_context_invalid"):
+                run(directory, seal, Path(temporary) / "bad-source", first_period="2024-01", context_generation=2,
+                    extra_source_context={**provenance, "sales_file_sha256": "3" * 64})
+
     def test_reused_scopes_preserve_actual_original_emission_and_new_scopes_get_their_own(self):
         with TemporaryDirectory() as temporary:
             original, revision = Path(temporary) / "original", Path(temporary) / "revision"

@@ -34,6 +34,8 @@ import { ModelMultiselect } from "@/components/forecast/model-multiselect";
 import { PeriodsComparisonChart } from "@/components/forecast/periods-comparison-chart";
 import { periodsDashboard } from "@/lib/periods-dashboard";
 import { emptyReportChoice, leafScopeIds, matchesOfficialSource } from "@/lib/forecast-reporting";
+import { officialSourceKey, salesSourceAvailable, salesSourceState, salesUnavailableMessage, sourceReadMessage } from "@/lib/official-sales-source";
+import { PortalReadError } from "@/lib/portal-read-diagnostic";
 
 const modules = [
   ["inicio", "Inicio", Home], ["historico", "Histórico", History],
@@ -55,22 +57,22 @@ export function useOperationPin() {
   return useCallback(() => pinOperational?.() ?? repository.openOperationalRead?.() ?? Promise.resolve(undefined), [repository, pinOperational]);
 }
 export function useRead<T>(load: () => Promise<T>) {
-  const [result, setResult] = useState<{ load: typeof load; data: T | null; error: boolean } | null>(null);
+  const [result, setResult] = useState<{ load: typeof load; data: T | null; error: boolean; errorCode?: string } | null>(null);
   useEffect(() => {
     let alive = true;
     void Promise.resolve().then(load).then(data => {
       if (alive) setResult({ load, data, error: false });
-    }).catch(() => { if (alive) { logPortalEvent("read_error"); setResult({ load, data: null, error: true }); } });
+    }).catch(error => { if (alive) { logPortalEvent("read_error"); const code = error instanceof PreviewReadError ? error.code : error instanceof PortalReadError ? error.diagnostic.code : error instanceof Error ? error.message : ""; setResult({ load, data: null, error: true, errorCode: sourceReadMessage(code) ? code : undefined }); } });
     return () => { alive = false; };
   }, [load]);
   // Never render the previous filter/user's result during an async transition.
-  return result?.load === load ? { loading: false, ...result } : { loading: true, data: null, error: false };
+  return result?.load === load ? { loading: false, ...result } : { loading: true, data: null, error: false, errorCode: undefined };
 }
 const number = (n: number | null) => n === null ? "Sin dato" : n.toLocaleString("es-MX", { maximumFractionDigits: 3 });
 export function ReadState({ loading, error, empty }: { loading: boolean; error: boolean; empty?: boolean }) {
-  if (loading) return <p role="status" className="rounded-xl border border-slate-200 bg-white p-5 text-sm text-slate-500">Consultando histórico certificado…</p>;
+  if (loading) return <p role="status" className="rounded-xl border border-slate-200 bg-white p-5 text-sm text-slate-500">Consultando histórico comercial…</p>;
   if (error) return <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">No fue posible consultar los datos.</p>;
-  if (empty) return <p className="rounded-xl border border-slate-200 bg-white p-5 text-sm text-slate-500">No hay histórico certificado para este filtro.</p>;
+  if (empty) return <p className="rounded-xl border border-slate-200 bg-white p-5 text-sm text-slate-500">No hay histórico comercial para este filtro.</p>;
   return null;
 }
 function Picker({ label, value, onChange, options, all = "Todas", disabled = false }: { label: string; value: string | null; onChange: (value: string | null) => void; options: { id: string; name: string }[]; all?: string; disabled?: boolean }) {
@@ -93,7 +95,7 @@ export function commercialScopeNavigation(chains: Chain[], chainId: string | nul
     return result;
   };
   const parentId = selected ? ancestry(selected).at(-1)! : null;
-  const visible = chains.filter(chain => chain.has_history || showEmpty);
+  const visible = chains.filter(chain => chain.has_history || chain.has_inventory || showEmpty);
   const parents = [...new Set(visible.map(chain => ancestry(chain).at(-1)!))];
   const members = parentId ? visible.filter(chain => ancestry(chain).includes(parentId)) : [];
   let leaves = new Set<string>();
@@ -118,6 +120,17 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
     return () => pin ??= repository.openOperationalRead?.() ?? Promise.resolve(undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- Module and filters define the lifetime of the read.
   }, [repository, active, filters]);
+  const operationalSource = useRead(useCallback(() => pinOperational(), [pinOperational]));
+  const [lastAssistantSourceKey, setLastAssistantSourceKey] = useState("SOURCE_NOT_RESOLVED");
+  const resolvedAssistantSourceKey = operationalSource.data ? officialSourceKey(operationalSource.data) : operationalSource.error ? officialSourceKey(null, operationalSource.errorCode) : null;
+  useEffect(() => {
+    let alive = true;
+    if (resolvedAssistantSourceKey) queueMicrotask(() => { if (alive) setLastAssistantSourceKey(resolvedAssistantSourceKey); });
+    return () => { alive = false; };
+  }, [resolvedAssistantSourceKey]);
+  // Pending revalidation of the same source must not erase a conversation on
+  // ordinary navigation. A resolved new source or failure remounts it at once.
+  const assistantSourceKey = resolvedAssistantSourceKey ?? lastAssistantSourceKey;
   const chains = useRead(useCallback(async () => repository.getVisibleChains(await pinOperational()), [repository, pinOperational]));
   const selectedIds = selectedScopeIds(filters);
   const multipleFormats = Boolean(selectedIds && selectedIds.length > 1);
@@ -135,6 +148,7 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
     let alive = true;
     const client = repository.previews;
     if (client && !formatPending && !isCE && !multipleFormats) void pinOperational().then(async source => {
+      if (!salesSourceAvailable(source)) { previewRead.current = null; return { source, job: null }; }
       const cached = previewRead.current;
       const sameSource = source ? Boolean(cached?.source && matchesOfficialSource(cached.source, source)) : !cached?.source;
       // Revalidate provenance on navigation, but reuse the same endpoint read
@@ -146,6 +160,7 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
       return { source, job: await read.task };
     }).then(({ source, job }) => {
       if (alive) setPreview(previous => {
+        if (!salesSourceAvailable(source)) return { key: previewKey, result: null, job: null, error: "SALES_SOURCE_UNAVAILABLE", loading: false };
         const compatible = !source || Boolean(previous?.result?.scopes.length && previous.result.scopes.every(scope => matchesOfficialSource(scope.source_context, source)));
         return compatible && previous?.key === previewKey && (previous.loading || previous.job) ? previous : { key: previewKey, result: ["READY_PREVIEW", "READY_PROVISIONAL"].includes(job?.status ?? "") ? job : null, job, error: "", loading: false };
       });
@@ -172,13 +187,15 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
     <Sidebar collapsible="icon" className="border-r border-slate-200">
       <SidebarHeader className="border-b border-slate-200 p-4"><div className="flex items-center gap-3"><div className="grid size-9 shrink-0 place-items-center rounded-xl bg-blue-700 text-sm font-black text-white">FT</div><div className="min-w-0 group-data-[collapsible=icon]:hidden"><p className="truncate text-sm font-bold">FORECAST Towell</p><p className="text-xs text-slate-500">Operación y control</p></div></div></SidebarHeader>
       <SidebarContent><SidebarGroup><SidebarGroupLabel>Módulos</SidebarGroupLabel><SidebarGroupContent><SidebarMenu>{modules.filter(([id]) => id !== "usuarios" || profile.global_role === "ADMIN").map(([id, label, Icon]) => <SidebarMenuItem key={id}><SidebarMenuButton isActive={active === id} tooltip={label} onClick={() => setActive(id)}><Icon/><span>{label}</span></SidebarMenuButton></SidebarMenuItem>)}</SidebarMenu></SidebarGroupContent></SidebarGroup></SidebarContent>
-      <SidebarFooter className="border-t border-slate-200 p-3"><div className="rounded-xl bg-slate-900 p-3 text-white group-data-[collapsible=icon]:hidden"><p className="text-xs font-semibold text-slate-300">Scope seleccionado</p><p className="mt-1 break-words text-sm">{subtitle}</p><p className="mt-2 text-xs text-slate-300">Histórico certificado · Solo lectura</p></div></SidebarFooter>
+      <SidebarFooter className="border-t border-slate-200 p-3"><div className="rounded-xl bg-slate-900 p-3 text-white group-data-[collapsible=icon]:hidden"><p className="text-xs font-semibold text-slate-300">Scope seleccionado</p><p className="mt-1 break-words text-sm">{subtitle}</p><p className="mt-2 text-xs text-slate-300">{operationalSource.data?.sales_contract ? "Histórico autorizado" : "Histórico comercial"} · Solo lectura</p></div></SidebarFooter>
     </Sidebar>
     <SidebarInset className="min-w-0 bg-[#f7f9fc]">
       <header className="sticky top-0 z-30 flex min-h-16 flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-white/95 px-4 py-2 backdrop-blur md:px-7"><div className="flex min-w-0 items-center gap-3"><SidebarTrigger aria-label="Abrir navegación"><PanelLeft/></SidebarTrigger><div className="h-6 w-px bg-slate-200"/><div className="min-w-0"><p className="truncate text-sm font-semibold text-slate-950">{active === "inicio" ? "FORECAST Towell" : title}</p><p className="truncate text-xs text-slate-500">{subtitle}</p></div></div><div className="flex items-center gap-3"><div><p className="max-w-40 truncate text-sm font-medium">{profile.full_name || "Usuario"}</p><p className="text-xs text-slate-500">{profile.global_role}</p></div><Button variant="outline" size="sm" onClick={() => { setFilters({ ...emptyFilters }); void onLogout(); }}><LogOut className="size-4"/><span className="hidden sm:inline">Cerrar sesión</span><span className="sr-only sm:hidden">Cerrar sesión</span></Button></div></header>
       <main className="mx-auto w-full max-w-[1480px] p-4 md:p-7"><GlobalFilters compact={active === "periodos"}/>
+        {operationalSource.error && sourceReadMessage(operationalSource.errorCode) && <p role="alert" className="mb-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{sourceReadMessage(operationalSource.errorCode)}</p>}
+        {operationalSource.data?.sales_contract && <p role="status" className="mb-4 border-l-2 border-blue-200 pl-3 text-xs text-slate-600">Ventas: Towell · Hoja {operationalSource.data.sales_sheet} · Inventario: Estadística · Actualización {operationalSource.data.generation}{salesSourceState(operationalSource.data) === "UNAVAILABLE" ? ` · ${salesUnavailableMessage}` : ""}</p>}
         {isCE ? <p role="status" className="rounded-xl border border-slate-200 bg-white p-5 text-sm text-slate-600">Sin datos de Compra Especial (CE) incorporados en la fuente oficial activa.</p> : formatPending ? <p role="status" className="rounded-xl border border-slate-200 bg-white p-5 text-sm text-slate-600">Consultando el alcance comercial autorizado de la cadena.</p> : <>
-        {active === "inicio" && <Dashboard/>}
+        {active === "inicio" && <Dashboard salesSourceAuthorized={Boolean(operationalSource.data?.sales_contract)}/>}
         {active === "historico" && <HistoryView/>}
         {(active === "motor" || motorVisited) && <div hidden={active !== "motor"}><ForecastEnginesView scope={subtitle} onVisit={() => setMotorVisited(true)}/></div>}
         {active === "calidad" && <QualityView/>}
@@ -189,7 +206,7 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
         </>}
       </main>
     </SidebarInset>
-    <ForecastAssistantErrorBoundary><ForecastAssistant authorized={profile.status === "ACTIVE" && !formatPending && !isCE && !multipleFormats} uiEnabled apiEnabled={false} voiceEnabled={false} mode="local" context={assistantContext} rsAssistant={formatPending || isCE || multipleFormats ? undefined : repository.previews?.rsAssistant}/></ForecastAssistantErrorBoundary>
+    <ForecastAssistantErrorBoundary><ForecastAssistant key={assistantSourceKey} authorized={profile.status === "ACTIVE" && !formatPending && !isCE && !multipleFormats} uiEnabled apiEnabled={false} voiceEnabled={false} mode="local" context={assistantContext} rsAssistant={formatPending || isCE || multipleFormats ? undefined : repository.previews?.rsAssistant}/></ForecastAssistantErrorBoundary>
   </SidebarProvider></ForecastFiltersContext.Provider>;
 }
 
@@ -237,7 +254,7 @@ export function GlobalFilters({ compact = false }: { compact?: boolean }) {
     return [...new Set(pages.flat())].sort();
   }, [repository, scopeIds, pin, formatPending, purchaseType]));
   const chainMap = new Map(chains.data?.map(c => [c.id, c.name]) ?? []);
-  const options = (chains.data ?? []).filter(c => c.has_history || showEmpty).map(c => ({ id: c.id, name: `${c.parentId && chainMap.has(c.parentId) ? chainMap.get(c.parentId) + " → " : ""}${c.name}${c.has_history ? "" : " · Sin histórico"}` }));
+  const options = (chains.data ?? []).filter(c => c.has_history || c.has_inventory || showEmpty).map(c => ({ id: c.id, name: `${c.parentId && chainMap.has(c.parentId) ? chainMap.get(c.parentId) + " → " : ""}${c.name}${c.has_history ? "" : c.has_inventory ? " · Inventario · Sin ventas" : " · Sin histórico"}` }));
   const modelControl = <ModelMultiselect key={`${previewScopeKey(commercialScope)}/${filters.categoryId}/${filters.commercialType}/${filters.classificationStatus}`} value={filters.commercialModels ?? null} onChange={ids => setFilters(f => changeCommercial({ ...f, search: "" }, "commercialModels", ids))} options={commercialOptions(catalog, commercialScope, "commercialModels")} disabled={formatPending || commercial.loading || commercial.error || products.loading || products.error || !commercial.data}/>;
   const periodControls = <>
     <Picker label="Periodo desde" value={filters.periodRange[0]} onChange={id => setFilters(f => ({ ...f, periodRange: [id, f.periodRange[1] && id && f.periodRange[1] < id ? id : f.periodRange[1]] }))} options={(periods.data ?? []).map(p => ({ id: p, name: p }))} disabled={formatPending || periods.loading || periods.error} all="Desde el inicio"/>
@@ -258,7 +275,7 @@ export function GlobalFilters({ compact = false }: { compact?: boolean }) {
     {commercialNavigation && <div className="mb-4 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
       <Picker label="Cadena" value={navigation.parentId} onChange={id => setFilters(f => ({ ...resetForChain(f, id), purchaseType: f.purchaseType ?? "RS", scopeChainIds: id ? commercialScopeNavigation(chains.data ?? [], id, showEmpty).scopeIds : undefined }))} options={navigation.chains.map(c => ({ id: c.id, name: c.name }))} disabled={chains.loading || chains.error} all={profile.global_role === "ADMIN" ? "Todas las cadenas" : "Todas las autorizadas"}/>
       <div className="space-y-2"><Label htmlFor="commercial-purchase-type">Tipo de compra</Label><Select value={purchaseType} onValueChange={value => setFilters(f => ({ ...resetForChain(f, f.chainId), scopeChainIds: f.scopeChainIds, purchaseType: value as "RS" | "CE" }))}><SelectTrigger id="commercial-purchase-type" aria-label="Tipo de compra" className="w-full bg-white"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="RS">RS · Resurtible</SelectItem><SelectItem value="CE">CE · Compra Especial</SelectItem></SelectContent></Select></div>
-      <Picker label="Formato" value={filters.scopeChainIds !== undefined ? null : filters.chainId} onChange={id => setFilters(f => ({ ...resetForChain(f, id ?? navigation.parentId), purchaseType: f.purchaseType ?? "RS", scopeChainIds: id ? undefined : navigation.scopeIds }))} options={navigation.formats.map(c => ({ id: c.id, name: `${c.name}${c.has_history ? "" : " · Sin histórico"}` }))} disabled={!navigation.parentId || chains.loading || chains.error} all="Todos los formatos"/>
+      <Picker label="Formato" value={filters.scopeChainIds !== undefined ? null : filters.chainId} onChange={id => setFilters(f => ({ ...resetForChain(f, id ?? navigation.parentId), purchaseType: f.purchaseType ?? "RS", scopeChainIds: id ? undefined : navigation.scopeIds }))} options={navigation.formats.map(c => ({ id: c.id, name: `${c.name}${c.has_history ? "" : c.has_inventory ? " · Inventario · Sin ventas" : " · Sin histórico"}` }))} disabled={!navigation.parentId || chains.loading || chains.error} all="Todos los formatos"/>
       {modelControl}{periodControls}
     </div>}
     <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -287,7 +304,7 @@ export function GlobalFilters({ compact = false }: { compact?: boolean }) {
   </section>;
 }
 function Intro({ title, copy }: { title: string; copy: string }) { return <div className="mb-5"><h1 className="text-2xl font-semibold tracking-tight text-slate-950 sm:text-3xl">{title}</h1><p className="mt-2 text-sm leading-6 text-slate-500">{copy}</p></div>; }
-export function Dashboard() {
+export function Dashboard({ salesSourceAuthorized = false }: { salesSourceAuthorized?: boolean } = {}) {
   const { repository, filters, preview, seriesVisibility, setSeriesVisibility } = useForecastFilters();
   const pin = useOperationPin();
   const currentSelection = useCurrentForecastSelection(repository.previews, filters.chainId, filters.productId);
@@ -305,7 +322,7 @@ export function Dashboard() {
   const currentHorizons = selectedForecastHorizons(currentSelection);
   const chartCutoff = currentHorizons.length === 12 ? currentSelection?.issue_period.slice(0,7) : cutoff;
   const points = traderPoints(historical.data ?? [], customer.data ?? [], currentHorizons.length ? currentHorizons : scopeHorizons(validScope, filters), chartCutoff, filters, scopeProvisionalHorizons(chartScope, filters));
-  return <div><Intro title="Dashboard ejecutivo" copy="Histórico publicado según tu acceso y los filtros seleccionados."/><ReadState loading={summary.loading} error={summary.error} empty={summary.data?.observationCount === 0}/>{summary.data && <>
+  return <div><Intro title="Dashboard ejecutivo" copy={salesSourceAuthorized ? "Ventas autorizadas de Towell e inventario de Estadística según tu acceso y los filtros seleccionados. Sin certificación LIVE implícita." : "Histórico comercial según tu acceso y los filtros seleccionados."}/><ReadState loading={summary.loading} error={summary.error} empty={summary.data?.observationCount === 0}/>{summary.data && <>
     <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">{[["Scopes con histórico", number(summary.data.scopeCount)], ["Productos visibles", number(summary.data.productCount)], ["Observaciones", number(summary.data.observationCount)], ["Último periodo disponible", summary.data.latestPeriod ?? "Sin dato"]].map(([label, value]) => <Card key={label} className="border-slate-200 shadow-sm"><CardContent className="p-5"><p className="text-sm text-slate-500">{label}</p><p className="mt-4 text-3xl font-semibold tracking-tight text-slate-950">{value}</p></CardContent></Card>)}</div>
     <div className="mt-5 space-y-5">{hasCommercialFilters(filters) ? <StoredScopeChart/> : filters.chainId ? <>
       {currentSelection && <p className="rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-950"><strong>Forecast Towell vigente:</strong> {currentSelection.calculation_code} · {currentSelection.selected_candidate} · H1–H12 seleccionados. No es Champion publicado.</p>}

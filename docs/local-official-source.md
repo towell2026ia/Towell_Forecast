@@ -1,5 +1,46 @@
 # Consulta de la fuente oficial en desarrollo local
 
+## Fuente de ventas del piloto FT-FIX-FUENTES-01
+
+La decisión vigente para este piloto interpreta exclusivamente **Towell K:M**
+del maestro `datos_privados/Copia de Pronostico RS Dic Def V1.xlsx` como Venta
+observada en piezas. El contrato anterior que obtenía ventas de Estadística
+queda sustituido en la operación local. Estadística sólo aporta inventario de
+la columna acreditada; sus ventas, pedidos, entregas y forecasts no se usan para
+entrenar ni validar los motores. Las propuestas del maestro tampoco son reales.
+
+`services.operational_update.towell_sales_source` conserva valores decimales,
+ceros, vacíos, hoja/celda, SHA del archivo y evidencia explícita de cierre. No
+infiere el cierre por contar filas ni inventa `available_at`. La lectura de una
+copia con otro nombre nunca sustituye al maestro. Las referencias y excepciones
+se guardan en un directorio privado nuevo, fuera del repositorio.
+
+La configuración privada local requiere `authorized_sales_policy` con contrato
+`towell-sales-v1`, ruta y SHA del maestro exacto, hash/generación instalados,
+hoja `Towell`, unidad `PIEZAS` y `last_closed_period`. El gateway comprueba esa
+política, el archivo real y el contexto instalado en cada operación. Una fuente
+reemplazada o un puntero incompatible se rechazan incluso tras un reinicio.
+La configuración incompleta falla antes de aceptar consultas; no activa datos
+fixture ni lectores heredados. No habilita escrituras generales ni modifica RLS.
+
+Si el maestro falta, cambió o no puede leerse, las ventas y los resultados se
+bloquean con «Sin cálculo: fuente de ventas no disponible». Catálogo e inventario
+continúan consultables dentro de los permisos existentes. Los cálculos antiguos
+se conservan físicamente para auditoría, pero no cumplen la nueva huella y no
+aparecen como resultados actuales o como recuperación automática.
+
+Las nuevas corridas usan los motores existentes, sin reusar pesos o resultados
+del origen sustituido. Fijan el cierre autorizado y la fecha real de ejecución
+por separado, conservan H1–H12 y publican únicamente resultados provisionales
+locales. La evaluación retrospectiva no acredita WAPE LIVE, FT-Decision ni
+Champion. El portal y su exportador fijan el mismo contexto de datos y resultados.
+
+La preparación y carga local reutilizan el contrato `official-source-1` y su
+cargador transaccional. No se ejecutan migraciones ni se alteran cantidades o
+registros anteriores: una nueva huella y una generación explícita identifican
+la fuente corregida. Los manifiestos, cantidades, hashes reales, conciliaciones
+y exportaciones comerciales permanecen exclusivamente en `datos_privados`.
+
 La adaptación parte de `7594a58fefdf7fcbf195c0739d615f8825ff868f`. Conserva los componentes del portal, los RPC revisados, sus políticas RLS y los motores existentes. No incorpora un motor ni una aplicación alternativa.
 
 `LOCAL_POSTGRES_CONFIG` habilita el adaptador únicamente con `APP_ENV=development` o `test`, `API_HOST=127.0.0.1`, ausencia de identificadores Railway y `SUPABASE_URL=http://127.0.0.1:<API_PORT>`. Producción y staging rechazan esta configuración antes de leer credenciales. La dependencia PostgreSQL es opcional: `services/assistant_api/requirements-local.txt`; el Dockerfile de Railway no la instala.

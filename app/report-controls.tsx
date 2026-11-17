@@ -4,6 +4,7 @@ import { useEffect, type ReactNode } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { ReportChoice, ReportSnapshot } from "@/lib/forecast-reporting";
+import { sourceReadMessage } from "@/lib/official-sales-source";
 
 export const reportNumber = (value: number | null | undefined) => value == null ? "Sin dato" : value.toLocaleString("es-MX", { maximumFractionDigits: 2 });
 export const reportPercent = (value: number | null | undefined) => value == null ? "Sin dato" : `${value.toFixed(2)}%`;
@@ -35,8 +36,8 @@ export function ReportTable({ label, headers, rows }: { label: string; headers: 
 export function ReportPaging({ page, previous, next, hasMore, loading, size, setSize }: { page: number; previous: () => void; next: () => void; hasMore: boolean; loading: boolean; size: number; setSize: (value: 50 | 100 | 250) => void }) {
   return <div className="mt-4 flex flex-wrap items-end justify-between gap-3"><ReportSelect label="Filas por página" value={String(size)} onChange={v => setSize(Number(v) as 50 | 100 | 250)} options={[50, 100, 250].map(v => ({ value: String(v), label: String(v) }))}/><div className="flex items-center gap-3"><Button variant="outline" disabled={page === 1 || loading} onClick={previous}><ChevronLeft className="size-4"/>Anterior</Button><span className="text-sm text-slate-500">Página {page}</span><Button variant="outline" disabled={!hasMore || loading} onClick={next}>Siguiente<ChevronRight className="size-4"/></Button></div></div>;
 }
-export function ReportState({ loading, error, empty }: { loading: boolean; error: boolean; empty?: boolean }) {
-  if (error) return <p role="alert" className="border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">No fue posible consultar los datos y su trazabilidad.</p>;
+export function ReportState({ loading, error, empty, errorCode }: { loading: boolean; error: boolean; empty?: boolean; errorCode?: string }) {
+  if (error) return <p role="alert" className="border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">{sourceReadMessage(errorCode) ?? "No fue posible consultar los datos y su trazabilidad."}</p>;
   if (loading) return <p role="status" className="p-5 text-sm text-slate-500">Consultando datos autorizados...</p>;
   if (empty) return <p className="border border-slate-200 bg-white p-5 text-sm text-slate-500">Sin registros para estos filtros.</p>;
   return null;

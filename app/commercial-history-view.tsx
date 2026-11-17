@@ -5,13 +5,14 @@ import { chooseCalculations, commercialRows, emptyReportChoice, leafScopeIds, re
 import type { Cursor, Filters, ForecastReadRepository, HistoricalRow } from "@/lib/supabase/types";
 import { useForecastFilters, useOperationPin, useRead } from "./forecast-towell-app";
 import { CalculationFilters, ReportPaging, ReportSelect, ReportState, ReportTable, reportNumber, reportPercent } from "./report-controls";
+import { salesSourceAvailable, salesUnavailableMessage } from "@/lib/official-sales-source";
 
 const noReport: ReportSnapshot = { products: [], chains: [], categories: [], calculations: [], horizons: [], decisions: [], live: [], customers: [], provisionals: [], capabilities: { vintage_persistence: false, official_publication: false, champion_publication: false } };
 export function CommercialHistoryView() {
   const { repository, filters } = useForecastFilters();
   const pin = useOperationPin();
   const report = useRead(useCallback(async () => repository.getReportSnapshot ? repository.getReportSnapshot(filters, await pin()) : noReport, [repository, filters, pin]));
-  return <section className="space-y-5"><h1 className="text-2xl font-semibold text-slate-950">Matriz histórica comercial</h1><ReportState loading={report.loading} error={report.error}/>{report.data && <History key={JSON.stringify(filters)} snapshot={report.data} repository={repository} filters={filters}/>}</section>;
+  return <section className="space-y-5"><h1 className="text-2xl font-semibold text-slate-950">Matriz histórica comercial</h1><ReportState loading={report.loading} error={report.error} errorCode={report.errorCode}/>{report.data && <History key={JSON.stringify(filters)} snapshot={report.data} repository={repository} filters={filters}/>}</section>;
 }
 function History({ snapshot, repository, filters }: { snapshot: ReportSnapshot; repository: ForecastReadRepository; filters: Filters }) {
   const [choice, setChoice] = useState({ ...emptyReportChoice });
@@ -42,7 +43,7 @@ function History({ snapshot, repository, filters }: { snapshot: ReportSnapshot; 
     return { ...filters, periodRange: [filters.periodRange[0] && filters.periodRange[0] > (periods[0] ?? "") ? filters.periodRange[0] : periods[0] ?? "2099-12", filters.periodRange[1] && filters.periodRange[1] < (periods.at(-1) ?? "9999") ? filters.periodRange[1] : periods.at(-1) ?? "2000-01"] as Filters["periodRange"] };
   }, [filters, choice, snapshot]);
   const key = `${choice.version}/${choice.issue}/${source}`;
-  return <><CalculationFilters snapshot={snapshot} choice={choice} onChange={setChoice}/><div className="grid gap-4 sm:grid-cols-2"><ReportSelect label="Periodos comerciales" value={source} onChange={setSource} options={[{ value: "history", label: "Histórico original" }, { value: "calculation", label: "Horizontes del cálculo" }]}/><ReportSelect label="Referencia de error y WAPE LIVE" value={metric} onChange={v => setMetric(v as typeof metric)} options={Object.entries(reportSeries).filter(([v]) => v !== "COLD_START").map(([value, label]) => ({ value, label }))}/></div>
+  return <>{!salesSourceAvailable(snapshot.sourceContext) && <p role="status" className="text-sm text-slate-600">{salesUnavailableMessage}</p>}<CalculationFilters snapshot={snapshot} choice={choice} onChange={setChoice}/><div className="grid gap-4 sm:grid-cols-2"><ReportSelect label="Periodos comerciales" value={source} onChange={setSource} options={[{ value: "history", label: "Histórico original" }, { value: "calculation", label: "Horizontes del cálculo" }]}/><ReportSelect label="Referencia de error y WAPE LIVE" value={metric} onChange={v => setMetric(v as typeof metric)} options={Object.entries(reportSeries).filter(([v]) => v !== "COLD_START").map(([value, label]) => ({ value, label }))}/></div>
     {source === "calculation" && <ReportState loading={stored.loading} error={stored.error}/>}
     {(source === "history" || stored.data) && <><CommercialPages key={key} snapshot={snapshot} repository={repository} filters={scopedFilters} choice={choice} metric={metric} stored={source === "calculation" ? stored.data : null}/><Performance snapshot={snapshot} repository={repository} filters={scopedFilters} choice={choice} metric={metric} stored={source === "calculation" ? stored.data : null}/></>}
   </>;

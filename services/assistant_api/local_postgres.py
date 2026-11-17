@@ -20,6 +20,8 @@ import httpx
 
 from .auth import AuthFailure
 from .local_hosted_auth import HostedAuthVerifier
+from .local_sales_policy import LocalSalesPolicy
+from .supabase_access import PreviewError
 
 NAME = re.compile(r"[a-z][a-z0-9_]*\Z")
 TABLES = frozenset({"profiles", "chains", "categories", "products", "user_chain_access",
@@ -82,6 +84,7 @@ class LocalPostgresGateway:
                 or not re.fullmatch(r"[0-9a-f]{32}", c.get("lab_id", ""))
                 or not str(c.get("system_identifier", "")).isdigit()):
             raise ValueError("local_postgres_target_rejected")
+        self.sales_policy = LocalSalesPolicy(c.get("authorized_sales_policy"))
         self.password = unprotect(Path(c["password_dpapi_file"]))
         self.auth = HostedAuthVerifier(settings.local_supabase_auth_url,
             settings.local_supabase_auth_publishable_key, timeout=settings.external_timeout_seconds)
@@ -139,6 +142,10 @@ class LocalPostgresGateway:
             return _response(404, {"code": "LOCAL_ENDPOINT_UNAVAILABLE"})
         try:
             return self.query(request, session, params, body)
+        except PreviewError as exc:
+            return _response(exc.status, {"code": exc.code,
+                "message": "Sin cálculo: fuente de ventas no disponible" if exc.code == "SALES_SOURCE_UNAVAILABLE"
+                else "Fuente anterior excluida; se requiere la fuente de ventas autorizada"})
         except Exception as exc:
             import psycopg
             if isinstance(exc, psycopg.Error):
@@ -161,6 +168,14 @@ class LocalPostgresGateway:
                     or profile[0]["status"] != "ACTIVE"
                     or profile[0]["global_role"] not in {"ADMIN", "EDITOR", "VIEWER"}):
                 return _response(403, {"code": "LOCAL_PROFILE_REQUIRED", "message": "Perfil local activo requerido"})
+            sales_context = None
+            if resource.startswith("rpc/operational_read_") or resource in {
+                    "forecast_calculations", "forecast_calculation_horizons",
+                    "portal_monthly_observations_current", "portal_history_periods", "forecast_runs", "forecast_horizons"}:
+                contexts = c.execute("select * from public.operational_read_context()").fetchall()
+                if len(contexts) != 1:
+                    raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 503)
+                sales_context = self.sales_policy.require(resource, contexts[0])
             if resource.startswith("rpc/"):
                 name = resource[4:]
                 if not name.startswith("operational_read_") or not NAME.fullmatch(name):
@@ -190,6 +205,16 @@ class LocalPostgresGateway:
                 raise ValueError("Unsupported projection")
             projection = sql.SQL("*") if fields == ["*"] else sql.SQL(",").join(map(sql.Identifier, fields))
             conditions = []
+            if sales_context and resource in {"forecast_calculations", "forecast_calculation_horizons"}:
+                # RLS still governs every row. This additional provenance filter
+                # keeps replaced calculations in storage, outside active reads.
+                predicate = sql.SQL("input_snapshot->'source_context'->>'source_hash'=%s and "
+                    "input_snapshot->'source_context'->>'generation'=%s")
+                if resource == "forecast_calculation_horizons":
+                    predicate = sql.SQL("exists(select 1 from public.forecast_calculations fc "
+                        "where fc.id=calculation_id and ") + predicate + sql.SQL(")")
+                conditions.append(predicate)
+                values.extend([sales_context["source_hash"], str(sales_context["generation"])])
             def logical(expression):
                 """Cursor predicates, parsed into identifiers and bound values only."""
                 def split(text):
@@ -259,6 +284,8 @@ class LocalPostgresGateway:
             if offset < 0 or limit < 0:
                 raise ValueError("Invalid range")
             rows = [] if request.method == "HEAD" else c.execute(statement + sql.SQL(" limit %s offset %s"), [*values, limit, offset]).fetchall()
+            if resource == "rpc/operational_read_context":
+                rows = [self.sales_policy.context(row) for row in rows]
             headers = {"Content-Range": f"{offset}-{offset + len(rows) - 1}/{total}" if rows else f"*/{total}", "Range-Unit": "items"}
             if "application/vnd.pgrst.object+json" in request.headers.get("accept", ""):
                 if len(rows) != 1:

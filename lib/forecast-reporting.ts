@@ -1,5 +1,6 @@
 import type { CalculationDetail, CalculationHorizon, SelectionEvent, VintageCapabilities } from "./forecast-preview";
 import type { Category, Chain, HistoricalRow, OperationalReadContext, Product } from "./supabase/types";
+import { salesSourceAvailable, salesSourceState } from "./official-sales-source";
 
 export type ReportSeries = "STATISTICAL" | "ML" | "ENSEMBLE" | "COLD_START" | "TOWELL";
 export const reportSeries: Record<ReportSeries, string> = { STATISTICAL: "Estadístico", ML: "ML", ENSEMBLE: "Ensemble", COLD_START: "Cold Start provisional", TOWELL: "Forecast Towell adoptado" };
@@ -17,7 +18,9 @@ export const emptyReportChoice: ReportChoice = { version: null, issue: null, dec
 export function matchesOfficialSource(value: unknown, context: Pick<OperationalReadContext, "source_hash" | "generation">) {
   if (!value || typeof value !== "object") return false;
   const source = value as Partial<OperationalReadContext>;
-  return source.source_hash === context.source_hash && source.generation === context.generation;
+  return salesSourceState(source) !== "INVALID" && salesSourceState(context) !== "INVALID" &&
+    source.source_hash === context.source_hash && source.generation === context.generation &&
+    (source.sales_available === undefined || !("sales_available" in context) || source.sales_available === (context as OperationalReadContext).sales_available);
 }
 export type ForecastMatrixRow = { product: Product; chain: string; category: string; calculation: ReportCalculation | null; provisional: ProvisionalForecast | null; adopted: ReportDecision | null; values: Record<string, Record<ReportSeries, number | null>> };
 export type DatabaseSection = "history" | "observations" | "catalog" | "calculations" | "models" | "decisions" | "research" | "performance";
@@ -58,6 +61,7 @@ export function leafScopeIds(chains: Chain[], selected?: Set<string>) {
 }
 export function chooseCalculations(snapshot: ReportSnapshot, choice: ReportChoice) {
   const grouped = new Map<string, ReportCalculation>();
+  if (!salesSourceAvailable(snapshot.sourceContext)) return grouped;
   for (const calculation of snapshot.calculations) {
     if (snapshot.sourceContext && !matchesOfficialSource(calculation.input_snapshot?.source_context, snapshot.sourceContext)) continue;
     if (calculation.objective !== "Venta" || !["READY_FOR_DECISION", "DECIDED", "SUPERSEDED"].includes(calculation.status) ||
@@ -81,7 +85,7 @@ export function validDecision(snapshot: ReportSnapshot, calculation: ReportCalcu
   return event;
 }
 export function buildForecastMatrix(snapshot: ReportSnapshot, choice: ReportChoice, periodRange: [string | null, string | null]) {
-  const provisionals = snapshot.sourceContext ? snapshot.provisionals.filter(row => matchesOfficialSource(row.source_context, snapshot.sourceContext!)) : snapshot.provisionals;
+  const provisionals = !salesSourceAvailable(snapshot.sourceContext) ? [] : snapshot.sourceContext ? snapshot.provisionals.filter(row => matchesOfficialSource(row.source_context, snapshot.sourceContext!)) : snapshot.provisionals;
   let selected = chooseCalculations(snapshot, choice);
   const anchor = [...selected.values()].sort((a, b) => a.issue_period.localeCompare(b.issue_period) || a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id)).at(-1);
   const issue = anchor?.issue_period.slice(0, 7) ?? choice.issue ?? provisionals.map(p => p.issue_period).sort().at(-1) ?? null;

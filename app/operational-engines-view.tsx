@@ -17,9 +17,13 @@ import { currentRetrospectivePreview } from "@/lib/preview-presentation";
 import { hasCommercialFilters, previewScopeKey } from "@/lib/commercial-filters";
 import { PreviewPerformancePanel } from "@/components/forecast/preview-performance-panel";
 import type { VintageCapabilities, VintageDetail, VintageSummary } from "@/lib/forecast-preview";
+import { officialSourceKey, salesSourceAvailable, salesUnavailableMessage, sourceReadMessage } from "@/lib/official-sales-source";
 
 const safeError = (error: unknown) => error instanceof PreviewReadError ? error.code : "DATA_READ_FAILED";
 const operationalErrorMessage = (code: string) => ({
+  SALES_SOURCE_UNAVAILABLE: salesUnavailableMessage,
+  SALES_PERIOD_NOT_CLOSED: "El periodo solicitado no tiene cierre de ventas acreditado.",
+  OFFICIAL_SOURCE_MISMATCH: "La fuente operativa no coincide con la fuente de ventas autorizada.",
   PREVIEW_NETWORK_FAILED: "No se pudo establecer la conexión con Railway. La solicitud no obtuvo respuesta del backend.",
   PREVIEW_REQUEST_ABORTED: "La solicitud se canceló antes de obtener respuesta. Vuelve a intentarlo sólo después de revisar la sesión.",
 } as Record<string, string>)[code] ?? code;
@@ -53,6 +57,7 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
   }, [repository, filters, pin, commercialMode, storedMode]));
   const client = repository.previews;
   const readOnly = client?.readOnly === true;
+  const salesBlocked = Boolean(stored.data?.sourceContext && !salesSourceAvailable(stored.data.sourceContext) || sourceReadMessage(stored.errorCode));
   const selectionRead = useCurrentForecastSelection(client, filters.chainId, filters.productId);
   const [localVisibility, setLocalVisibility] = useState<SeriesVisibility>({ ...defaultVisibility });
   const [tab, setTab] = useState<EngineTab>("summary");
@@ -102,7 +107,7 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
     return () => { alive = false; clearTimeout(timer); };
   }, [client, jobId, status, key, filters.productId, setPreview]);
   async function run() {
-    if (!client || running.current || aggregateReadOnly || readOnly) return;
+    if (!client || running.current || aggregateReadOnly || readOnly || salesBlocked) return;
     running.current = true;
     const version = ++revision.current;
     setPreview(previous => ({ key, job: null, result: previous?.key === key ? previous.result : null, error: "", loading: true }));
@@ -131,7 +136,7 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
   const provisional = selected?.provisional_cold_start;
   const stale = !storedResults && !commercialMode && Boolean(current?.result && selected?.status === "PREVIEW" && !currentRetrospectivePreview(current.result, selected));
   const cutoff = selected?.issue_period;
-  const historyKey = `${JSON.stringify(filters)}/${cutoff ?? ""}`;
+  const historyKey = `${JSON.stringify(filters)}/${cutoff ?? ""}/${officialSourceKey(stored.data?.sourceContext ?? selected?.source_context, stored.errorCode)}`;
   useEffect(() => {
     let alive = true;
     if (!filters.chainId) return;
@@ -159,13 +164,14 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div><h1 className="text-2xl font-semibold tracking-tight">Motores de Forecast</h1><p className="mt-2 text-sm text-slate-500">{scope}{filters.categoryId && ` · ${actual?.categoryName ?? "Categoría seleccionada"}`} · {product?.description ?? "Todos los productos"} · {storedResults?.objective ?? "Venta"}</p><p className="mt-1 text-xs text-slate-500">Datos reales hasta: {selected?.latest_actual_period ?? cutoff ?? "corte independiente por scope"} · {storedResults ? "Resultados almacenados · evaluación retrospectiva" : "Preview retrospectivo"}</p></div>
       <div className="flex flex-wrap items-end gap-2">
-        <label className="text-xs text-slate-600">Corte explícito (opcional)<input type="month" min="2000-01" max="2099-12" value={explicitIssuePeriod} onChange={event => setExplicitIssuePeriod(event.target.value)} disabled={!client || profile.global_role === "VIEWER" || busy || aggregateReadOnly || readOnly} className="mt-1 block rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm"/></label>
-        <Button onClick={() => void run()} disabled={!client || profile.global_role === "VIEWER" || busy || aggregateReadOnly || readOnly}>{busy ? "Calculando vista previa…" : "Calcular vista previa"}</Button>
+        <label className="text-xs text-slate-600">Corte explícito (opcional)<input type="month" min="2000-01" max="2099-12" value={explicitIssuePeriod} onChange={event => setExplicitIssuePeriod(event.target.value)} disabled={!client || profile.global_role === "VIEWER" || busy || aggregateReadOnly || readOnly || salesBlocked} className="mt-1 block rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm"/></label>
+        <Button onClick={() => void run()} disabled={!client || profile.global_role === "VIEWER" || busy || aggregateReadOnly || readOnly || salesBlocked}>{busy ? "Calculando vista previa…" : "Calcular vista previa"}</Button>
       </div>
     </div>
     <p className="border-l-2 border-blue-200 pl-3 text-xs leading-5 text-slate-500">Vista previa retrospectiva. Los datos históricos están certificados en valor, pero no en fecha original de disponibilidad; las métricas no constituyen certificación point-in-time.</p>
     {(commercialMode || storedMode) && stored.loading && <p role="status" className="text-sm text-slate-500">Consultando cálculos almacenados del alcance comercial…</p>}
-    {(commercialMode || storedMode) && (stored.error || projection.error) && <p role="alert" className="text-sm text-rose-700">No fue posible consultar los cálculos del alcance comercial. No se sustituyen por el total de la cadena.</p>}
+    {(commercialMode || storedMode) && (stored.error || projection.error) && <p role="alert" className="text-sm text-rose-700">{sourceReadMessage(stored.errorCode) ?? "No fue posible consultar los cálculos del alcance comercial. No se sustituyen por el total de la cadena."}</p>}
+    {stored.data?.sourceContext && !salesSourceAvailable(stored.data.sourceContext) && <p role="status" className="text-sm text-slate-600">{salesUnavailableMessage}</p>}
     {selected?.commercial_projection && <p role="status" className="text-xs text-slate-600">Consulta almacenada · {selected.commercial_projection.products} productos · Estadístico {selected.commercial_projection.statistical}/{selected.commercial_projection.products} · ML {selected.commercial_projection.ml}/{selected.commercial_projection.products} · Ensemble {selected.commercial_projection.ensemble}/{selected.commercial_projection.products}{selected.commercial_projection.ml < selected.commercial_projection.products || selected.commercial_projection.statistical < selected.commercial_projection.products ? " · TOTAL PARCIAL" : ""}. Las curvas suman sus variantes; no se promedian WAPE ni Bias del grupo.</p>}
     {readOnly ? <p role="status" className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">Entorno local de sólo lectura: calcular, recalcular, adoptar, capturar y publicar están bloqueados. Consultar resultados guardados no ejecuta los motores.</p> : aggregateReadOnly && <p className="text-xs text-slate-500">Este alcance comercial consulta resultados almacenados. Selecciona una variante para ejecutar el contrato de cálculo existente.</p>}
     {commercialMode && originalScope && current?.result && currentRetrospectivePreview(current.result, originalScope) && <details className="rounded-xl border bg-white p-4"><summary className="cursor-pointer text-sm font-semibold">Métricas globales de cadena · {originalScope.eligibility?.evaluated ?? "Sin dato"} productos · Fuera del filtro comercial</summary><div className="mt-3"><PreviewPerformancePanel job={current.result} scope={originalScope} productId={null} historical/></div></details>}

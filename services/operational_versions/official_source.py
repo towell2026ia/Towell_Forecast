@@ -23,9 +23,32 @@ def _attributes(row):
 
 
 def _attribute_references(row):
-    return {name: value for name,value in row.items()
+    output = {name: value for name,value in row.items()
             if (name.startswith("source_") and name.endswith("_cell") or name=="master_identity_reference")
             and isinstance(value,str)}
+    # Source-native labels can differ from the already accredited presentation
+    # used by a current catalogue. Preserve both without changing any SQL key,
+    # canonical attributes, RLS policy or source quantity.
+    raw = row.get("source_native_attributes")
+    if raw is not None:
+        if not isinstance(raw, dict) or any(value is not None and not isinstance(value, str) for value in raw.values()):
+            raise ValueError("official_raw_attributes_invalid")
+        output["raw_source_attributes"] = dict(raw)
+    canonical = row.get("canonical_attribute_source")
+    if canonical is not None:
+        if (not isinstance(canonical, dict) or set(canonical) != {"contract", "master_sha256", "identity"}
+                or canonical["contract"] != "towell-sales-v1" or not isinstance(canonical["master_sha256"], str)
+                or not SHA256.fullmatch(canonical["master_sha256"])
+                or not isinstance(canonical["identity"], list) or len(canonical["identity"]) != 3
+                or any(value is not None and not isinstance(value, str) for value in canonical["identity"])):
+            raise ValueError("official_attribute_source_invalid")
+        output["canonical_attribute_source"] = canonical
+    literal = row.get("source_raw_value_literal")
+    if literal is not None:
+        if not isinstance(literal, str):
+            raise ValueError("official_raw_quantity_invalid")
+        output["raw_value_literal"] = literal
+    return output
 
 
 def _uuid(value):

@@ -4,6 +4,7 @@ import { emptyFilters } from "./supabase/types";
 import type { CustomerForecast, DatabasePage, DatabaseSection, ReportCalculation, ReportDecision, ReportHorizon, ReportLive, ReportSnapshot } from "./forecast-reporting";
 import { addReportMonth, amount, matchesOfficialSource } from "./forecast-reporting";
 import { attachCommercial, filteredProducts, hasCommercialFilters, selectedScopeIds } from "./commercial-filters";
+import { salesSourceAvailable, sourceReadMessage } from "./official-sales-source";
 import { actualMetrics, combineObservations, observationFields, observationScope, operationalArguments } from "./forecast-data";
 
 const calculationFields = "id,chain_id,product_id,objective,calculation_no,calculation_code,issue_period,cutoff_at,status,created_at,created_by,preview_id,data_snapshot_hash,content_hash,input_snapshot,candidate_metrics,research_snapshot,suggested_reference,scope_leader,evidence_mode,engine_version,git_sha,recalculation_reason";
@@ -18,6 +19,7 @@ export class SupabaseReportReader {
     return includeForecasts ? query : query.in("metric_code", actualMetrics);
   }
   private async read<T>(table: string, fields: string, filters: Filters, products?: Product[], pin?: { context: OperationalReadContext; includeForecasts: boolean }) {
+    if (pin && !salesSourceAvailable(pin.context)) return [] as T[];
     this.ensureOpen();
     const output: T[] = [];
     const scopes = selectedScopeIds(filters);
@@ -36,6 +38,7 @@ export class SupabaseReportReader {
         }
         const result = await query.abortSignal(this.signal);
         this.ensureOpen();
+        if (result.error && sourceReadMessage(result.error.code)) throw new Error(result.error.code);
         if (result.error || !Array.isArray(result.data)) throw new Error("report_read_failed");
         output.push(...result.data as T[]);
         if (result.data.length < 500) break;
@@ -55,7 +58,7 @@ export class SupabaseReportReader {
     if (products.some(p => !chainIds.has(p.chain_id))) throw new Error("report_catalog_lineage");
     const capabilities = this.repository.previews?.vintageCapabilities ? await this.repository.previews.vintageCapabilities() : { vintage_persistence: false, official_publication: false, champion_publication: false };
     let calculations: ReportCalculation[] = [], horizons: ReportHorizon[] = [], decisions: ReportDecision[] = [], live: ReportLive[] = [];
-    if (capabilities.forecast_calculation_history) {
+    if (salesSourceAvailable(context) && capabilities.forecast_calculation_history) {
       const stored = await this.read<ReportCalculation>("forecast_calculations", calculationFields, filters, products);
       calculations = stored.filter(row => matchesOfficialSource(row.input_snapshot?.source_context, context));
       const currentIds = new Set(calculations.map(row => row.id));
@@ -80,7 +83,7 @@ export class SupabaseReportReader {
       }
     }
     const customers: CustomerForecast[] = [];
-    const provisionals = this.repository.previews?.provisionalForecasts && products.length ?
+    const provisionals = salesSourceAvailable(context) && this.repository.previews?.provisionalForecasts && products.length ?
       (await Promise.all((scopes ?? [null]).map(id => this.repository.previews!.provisionalForecasts!(id, filters.productId, context)))).flat() : [];
     const allowed = new Map(products.map(p => [p.id, p.chain_id]));
     for (const row of [...calculations, ...horizons, ...decisions, ...live, ...customers]) {
@@ -159,7 +162,7 @@ export class SupabaseReportReader {
       headers = ["Tipo", "Cadena", "Producto", "Cálculo", "Periodo", "H", "Candidato", "Error absoluto", "ID"];
       records = snapshot.live.map(v => ({ id: v.id, cells: ["LIVE almacenado", chain.get(v.chain_id) ?? v.chain_id, product.get(v.product_id)?.description ?? v.product_id, calc.get(v.calculation_id)?.calculation_code ?? null, v.target_period.slice(0, 7), v.horizon, v.candidate, v.absolute_error, v.id], detail: { sale_observation_id: v.sale_observation_id, sale_version_no: v.sale_version_no, actual_sale: v.actual_sale, forecast_value: v.forecast_value, evaluated_at: v.evaluated_at } }));
       for (const c of snapshot.calculations) for (const [family, metric] of Object.entries(c.candidate_metrics)) if (metric) records.push({ id: `${c.id}/${family}`, cells: ["Validación retrospectiva", chain.get(c.chain_id) ?? c.chain_id, product.get(c.product_id)?.description ?? c.product_id, c.calculation_code, c.issue_period.slice(0, 7), null, family, null, c.id], detail: { wape_retrospective: metric.wape, bias_retrospective: metric.bias, observations: metric.observations, windows: metric.windows } });
-      if (snapshot.capabilities.forecast_calculation_history) {
+      if (salesSourceAvailable(context) && snapshot.capabilities.forecast_calculation_history) {
         const learning = await this.read<{ id: string; calculation_id: string; chain_id: string; product_id: string; target_period: string; horizon: number; metrics_json: Record<string, unknown>; signals_json: unknown[] }>("forecast_learning_events", "id,calculation_id,chain_id,product_id,target_period,horizon,metrics_json,signals_json", filters, snapshot.products);
         records.push(...learning.filter(v => calc.has(v.calculation_id)).map(v => ({ id: v.id, cells: ["Aprendizaje almacenado", chain.get(v.chain_id) ?? v.chain_id, product.get(v.product_id)?.description ?? v.product_id, calc.get(v.calculation_id)?.calculation_code ?? null, v.target_period.slice(0, 7), v.horizon, null, null, v.id], detail: { metrics: v.metrics_json, signals: v.signals_json } })));
       }
@@ -177,6 +180,7 @@ export class SupabaseReportReader {
     const products = await filteredProducts(this.repository, filters);
     const chains = await this.repository.getVisibleChains(context);
     const headers = ["Periodo", "Cadena", "Producto", "Código", "Métrica", "Valor", "Versión", "Disponibilidad", "Observation ID"];
+    if (!salesSourceAvailable(context)) return { headers, rows: [], hasMore: false };
     if (!products.length) return { headers, rows: [], hasMore: false };
     const raw = section === "observations", id = raw ? "id" : "observation_id";
     const fields = `${id},chain_id,product_id,period,metric_code,value_text,version_no,availability_source,available_at,source_batch_id,source_reference`;

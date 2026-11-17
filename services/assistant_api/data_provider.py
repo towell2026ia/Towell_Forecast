@@ -129,7 +129,11 @@ class SupabaseDataProvider(DataProvider):
         return SupabaseDataProvider(self.client.bind(token))
 
     def source_context(self):
-        return self.client.operational_context()
+        context = self.client.operational_context()
+        if context.get("sales_available") is False:
+            from .supabase_access import PreviewError
+            raise PreviewError("SALES_SOURCE_UNAVAILABLE", 503)
+        return context
 
     def source_catalog(self, chain_id, issue_period=None):
         cache_key = chain_id, issue_period
@@ -178,6 +182,12 @@ class SupabaseDataProvider(DataProvider):
         chain_id = uuid_value(chain_id)
         if objective != "Venta" or mode not in {"RETROSPECTIVE_TRAINING", "POINT_IN_TIME"}:
             raise PreviewError("REQUEST_001")
+        context = self.source_context()
+        training_cutoff = context.get("sales_training_cutoff")
+        if training_cutoff:
+            if issue_period and issue_period > training_cutoff:
+                raise PreviewError("SALES_PERIOD_NOT_CLOSED", 409)
+            issue_period = issue_period or training_cutoff
         params = {"select": "*", "chain_id": f"eq.{chain_id}", "metric_code": "eq.SALES",
                   "order": "product_id.asc,period.asc"}
         if product_id:

@@ -1,6 +1,7 @@
 import { addReportMonth, buildForecastMatrix, matrixTotal, type ForecastMatrixRow, type ReportChoice, type ReportSeries, type ReportSnapshot } from "./forecast-reporting";
 import type { Filters, HistoricalRow, OperationalInventory } from "./supabase/types";
 import { modelKey } from "./commercial-filters";
+import { salesSourceAvailable } from "./official-sales-source";
 
 export const monthNames = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
 export const dashboardSeries = {
@@ -51,7 +52,7 @@ export const shortPeriod = (period: string) => `${monthNames[Number(period.slice
 export function periodsDashboard(snapshot: ReportSnapshot, history: HistoricalRow[], choice: ReportChoice, range: Filters["periodRange"], inventory: OperationalInventory[] = []) {
   const matrix = buildForecastMatrix(snapshot, choice, range);
   const allowed = new Map(matrix.rows.map(r => [r.product.id, r.product.chain_id]));
-  const rows = history.filter(r => allowed.get(r.product_id) === r.chain_id);
+  const rows = salesSourceAvailable(snapshot.sourceContext) ? history.filter(r => allowed.get(r.product_id) === r.chain_id) : [];
   const seen = new Set<string>();
   for (const row of rows) {
     const key = `${row.chain_id}/${row.product_id}/${row.period.slice(0, 7)}`;
@@ -106,7 +107,7 @@ export function periodsDashboard(snapshot: ReportSnapshot, history: HistoricalRo
     const calculated = products.filter(r => r.calculation).length, decided = products.filter(r => r.adopted).length;
     return { ...group, total: products.length, calculated, pending: products.length - calculated, decided, undecided: products.length - decided };
   });
-  return { matrix, cutoff, points, coverage, actualMonths: points.slice(0, 9).filter(p => p.coverage.actual.covered > 0).length,
+  return { matrix, cutoff, points, coverage, sourceContext: snapshot.sourceContext, actualMonths: points.slice(0, 9).filter(p => p.coverage.actual.covered > 0).length,
     priorComplete: [completeness("previous2"), completeness("previous1")],
     kpis: { sales: sum("SALES"), orders: sum("ORDER"), delivery: sum("DELIVERY"), fillRate: orders > 0 ? deliveries / orders * 100 : null, paired: paired.length, expectedPairs: eligible * historicalPeriods.size },
     available: matrix.rows.filter(r => r.calculation).length, adopted: matrix.rows.filter(r => r.adopted).length };

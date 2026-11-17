@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, localcontext
 import math
 from pathlib import Path
+import re
 
 from services.assistant_api.calculation_history import _complete
 from services.assistant_api.commercial_catalog import key
@@ -22,6 +23,8 @@ from .unification import csv_rows, json_read, write_csv, write_json
 GROUP_FIELDS = ("chain_id", "account", "format", "model", "presentation", "commercial_code")
 METADATA_FIELDS = (*GROUP_FIELDS, "product_id", "upc", "color", "product_type")
 FAMILIES = ("statistical", "ml", "ensemble")
+PERIOD = re.compile(r"20\d\d-(0[1-9]|1[0-2])\Z")
+SALES_CONTEXT_FIELDS = {"sales_contract", "sales_file_sha256", "sheet", "inventory_source", "authorized_source_hash"}
 
 
 def _scope_emissions(directory, expected=None, visited=None):
@@ -45,7 +48,7 @@ def _scope_emissions(directory, expected=None, visited=None):
     return result
 
 
-def source_inputs(directory, manifest_sha):
+def source_inputs(directory, manifest_sha, *, first_period="2025-01"):
     directory = Path(directory)
     if file_hash(directory / "Manifest.json") != manifest_sha:
         raise ValueError("official_manifest_hash_mismatch")
@@ -67,7 +70,10 @@ def source_inputs(directory, manifest_sha):
                 for row in packet["observations"]}
     if values != expected or len(values) != len(packet["observations"]):
         raise ValueError("official_csv_import_mismatch")
-    if any(row["purchase_type"] != "RS" or row["period"] < "2025-01" or row["period"] > manifest["cutoff"] for row in facts):
+    if (not isinstance(first_period, str) or not PERIOD.fullmatch(first_period)
+            or first_period > manifest["cutoff"]):
+        raise ValueError("official_forecast_first_period_invalid")
+    if any(row["purchase_type"] != "RS" or row["period"] < first_period or row["period"] > manifest["cutoff"] for row in facts):
         raise ValueError("official_forecast_source_out_of_scope")
     return manifest, facts
 
@@ -185,17 +191,36 @@ def consolidate_models(variants, metadata, cutoff, context):
     return output
 
 
-def run(directory, manifest_sha, output, *, compute=forecast_dataset, reuse_from=None):
+def run(directory, manifest_sha, output, *, compute=forecast_dataset, reuse_from=None,
+        first_period="2025-01", context_generation=1, extra_source_context=None):
     directory, output = Path(directory), Path(output)
     if output.resolve().is_relative_to(REPO) or output.exists():
         raise ValueError("new_private_forecast_output_required")
-    manifest, facts = source_inputs(directory, manifest_sha)
+    if type(context_generation) is not int or context_generation < 1:
+        raise ValueError("official_forecast_generation_invalid")
+    manifest, facts = source_inputs(directory, manifest_sha, first_period=first_period)
+    declared_provenance = manifest.get("forecast_source_context") or {}
+    if extra_source_context is not None and declared_provenance and extra_source_context != declared_provenance:
+        raise ValueError("official_forecast_sales_context_invalid")
+    provenance = dict(extra_source_context or declared_provenance)
+    if provenance and (set(provenance) != SALES_CONTEXT_FIELDS
+            or provenance.get("sales_contract") != "towell-sales-v1"
+            or provenance.get("sheet") != "Towell"
+            or provenance.get("inventory_source") != "ESTADISTICA"
+            or provenance.get("authorized_source_hash") != manifest["source_hash"]
+            or not isinstance(provenance.get("sales_file_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", provenance["sales_file_sha256"])):
+        raise ValueError("official_forecast_sales_context_invalid")
+    if provenance and manifest.get("generation", context_generation) != context_generation:
+        raise ValueError("official_forecast_generation_invalid")
+    if provenance and reuse_from is not None:
+        raise ValueError("towell_forecast_reuse_forbidden")
     cutoff = manifest["cutoff"]
     records, metadata = engine_records(facts, cutoff)
     policy = ForecastPolicy()
-    context = {"source_hash": manifest["source_hash"], "generation": 1,
+    context = {"source_hash": manifest["source_hash"], "generation": context_generation,
                "emitted_at": datetime.now(timezone.utc).isoformat(), "engine_version": ENGINE_VERSION,
-               "catalogue_policy": "LATEST_SOURCE_ATTRIBUTES_AT_CUTOFF_RETROSPECTIVE"}
+               "catalogue_policy": "LATEST_SOURCE_ATTRIBUTES_AT_CUTOFF_RETROSPECTIVE", **provenance}
     changes = []
     first, latest = {}, {}
     for row in facts:
@@ -220,6 +245,7 @@ def run(directory, manifest_sha, output, *, compute=forecast_dataset, reuse_from
         reuse_from = Path(reuse_from)
         reuse = json_read(reuse_from / "Summary.json")
         if (reuse["source_context"]["source_hash"] != manifest["source_hash"]
+                or reuse["source_context"].get("generation", 1) != context_generation
                 or reuse["source_context"]["engine_version"] != ENGINE_VERSION
                 or reuse["cutoff"] != cutoff or reuse["policy"] != asdict(policy)):
             raise ValueError("official_forecast_reuse_context_mismatch")
@@ -294,7 +320,7 @@ def run(directory, manifest_sha, output, *, compute=forecast_dataset, reuse_from
         "catalogue_category_changes": len(changes), "recomputed_scopes": len(chains) - sum(row["reused"] for row in outcomes),
         "recovery_exclusions": all_exclusions,
     }
-    if source_inputs(directory, manifest_sha)[0] != manifest:
+    if source_inputs(directory, manifest_sha, first_period=first_period)[0] != manifest:
         raise ValueError("official_source_changed_during_forecast")
     stats["outputs_sha256"] = {path.name: file_hash(path) for path in sorted(output.iterdir())}
     write_json(output / "Summary.json", stats)
@@ -308,8 +334,11 @@ def main():
     parser.add_argument("--manifest-sha256", required=True)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--reuse-from", type=Path)
+    parser.add_argument("--first-period", default="2025-01")
+    parser.add_argument("--context-generation", type=int, default=1)
     args = parser.parse_args()
-    run(args.source, args.manifest_sha256, args.output, reuse_from=args.reuse_from)
+    run(args.source, args.manifest_sha256, args.output, reuse_from=args.reuse_from,
+        first_period=args.first_period, context_generation=args.context_generation)
 
 
 if __name__ == "__main__":

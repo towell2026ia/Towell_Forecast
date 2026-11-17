@@ -24,6 +24,16 @@ function harness(client: PreviewClient, filters: Filters = { ...emptyFilters, ch
 }
 afterEach(() => vi.unstubAllGlobals());
 describe("E2 operational UI", () => {
+  it("shows the controlled unclosed-sales-period error without replacing it with a generic data failure", async () => {
+    const fetcher = vi.fn(async () => Response.json({ error_code: "SALES_PERIOD_NOT_CLOSED" }, { status: 409 }));
+    vi.stubGlobal("fetch", fetcher);
+    const identity = { auth: { getSession: async () => ({ data: { session: { access_token: "synthetic-access-token" } } }) } } as unknown as SupabaseClient;
+    await expect(new RailwayPreviewClient(identity, "https://backend.example").create("a", "p", "2026-10")).rejects.toMatchObject({ code: "SALES_PERIOD_NOT_CLOSED" });
+    harness(api({ latest: vi.fn(async () => null), create: vi.fn(async () => { throw new PreviewReadError("SALES_PERIOD_NOT_CLOSED"); }) }));
+    await userEvent.click(screen.getByRole("button", { name: "Calcular vista previa" }));
+    expect(await screen.findByText(/El periodo solicitado no tiene cierre de ventas acreditado/)).toBeTruthy();
+    expect(screen.queryByText(/DATA_READ_FAILED/)).toBeNull();
+  });
   it("real engine cards, distribution, cutoff, ML not eligible and no pilot/demo", async () => {
     harness(api()); await screen.findAllByText("2 de 7 · 28.6%");
     expect(screen.getByText("12.5%")).toBeTruthy();

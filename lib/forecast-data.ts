@@ -6,6 +6,8 @@ import { SupabaseUserAdminClient } from "./supabase/user-admin";
 import type { HistoricalMonth, CustomerMonth } from "./forecast-chart-data";
 import { SupabaseReportReader } from "./forecast-report-repository";
 import { attachCommercial, filteredProducts, hasCommercialFilters, matchesChainScope, scopedQueryChainId } from "./commercial-filters";
+import { salesSourceAvailable, salesSourceState } from "./official-sales-source";
+import { matchesOfficialSource } from "./forecast-reporting";
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 type ProductMapping = { id: string; identifier_mappings?: [string | null, string | null][] };
@@ -31,7 +33,7 @@ export function observationScope(filters: Filters, productIds?: string[]) {
 }
 
 function sameContext(a: OperationalReadContext, b: OperationalReadContext) {
-  return a.source_hash === b.source_hash && a.generation === b.generation;
+  return matchesOfficialSource(a, b);
 }
 
 export function assertActiveProfile(profile: Profile | null, userId: string): Profile {
@@ -86,8 +88,10 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
     const { data, error } = await this.client.rpc("operational_read_context").abortSignal(this.controller.signal);
     this.ensureOpen();
     const context = Array.isArray(data) && data.length === 1 ? data[0] as OperationalReadContext | null : null;
+    if (error && ["SALES_SOURCE_UNAVAILABLE", "OFFICIAL_SOURCE_MISMATCH"].includes(error.code)) throw new Error(error.code);
     if (error || !context || !/^[0-9a-f]{64}$/.test(context.source_hash) || !Number.isSafeInteger(context.generation) || context.generation < 0
         || !/^20\d{2}-(0[1-9]|1[0-2])$/.test(context.first_period) || !/^20\d{2}-(0[1-9]|1[0-2])$/.test(context.last_period) || context.first_period > context.last_period) throw new Error("official_source_unavailable");
+    if (salesSourceState(context) === "INVALID") throw new Error("OFFICIAL_SOURCE_MISMATCH");
     return context;
   }
   private async currentContext(context?: OperationalReadContext) {
@@ -166,9 +170,14 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
     // HEAD counts, not raw facts; no per-product query or invented has_history column.
     for (let offset = 0; offset < masters.length; offset += 6) {
       result.push(...await Promise.all(masters.slice(offset, offset + 6).map(async c => {
+        const meta = mappings.get(c.id)?.scope;
+        if (!salesSourceAvailable(context)) {
+          const inventory = await this.client.rpc("operational_read_inventory", { ...operationalArguments(context), p_chain_id: c.id }, { count: "exact", head: true }).select("product_id").abortSignal(this.controller.signal);
+          if (inventory.error) throw new Error("inventory_read_failed");
+          return { ...c, has_history: false, has_inventory: (inventory.count ?? 0) > 0, parentId: meta?.parent_uuid ?? null, scopeType: meta?.scope_type ?? null };
+        }
         const q = await this.actualObservations(context, { ...emptyFilters, chainId: c.id }, true).eq("chain_id", c.id).abortSignal(this.controller.signal);
         this.check(q, "getVisibleChains", observationReader, "head_count");
-        const meta = mappings.get(c.id)?.scope;
         return { ...c, has_history: (q.count ?? 0) > 0, parentId: meta?.parent_uuid ?? null, scopeType: meta?.scope_type ?? null };
       })));
     }
@@ -226,6 +235,7 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
     const c = pagination.cursor;
     if (c && (!uuid.test(c.chain_id) || !uuid.test(c.product_id) || !/^\d{4}-\d{2}-01$/.test(c.period) || !c.context || context && !sameContext(c.context, context))) throw new Error("invalid_cursor");
     context = await this.currentContext(context ?? c?.context);
+    if (!salesSourceAvailable(context)) return { rows: [], next: null, observationCount: 0 };
     const cursorFor = (row: HistoricalRow) => ({ chain_id: row.chain_id, product_id: row.product_id, period: row.period, context });
     if (hasCommercialFilters(filters)) {
       const rows = (await this.reports.history(filters, context)).sort((a, b) => a.chain_id.localeCompare(b.chain_id) || a.product_id.localeCompare(b.product_id) || a.period.localeCompare(b.period));
@@ -253,6 +263,7 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
   }
   async getPeriods(chainId?: string | null, context?: OperationalReadContext) {
     context ??= await this.openOperationalRead();
+    if (!salesSourceAvailable(context)) return [...new Set((await this.reports.inventory({ ...emptyFilters, chainId: chainId ?? null }, context)).map(row => row.period.slice(0, 7)))].sort();
     const parameters = operationalArguments(context);
     const periodsFor = (scope: string | null) => this.client.rpc(periodReader, { ...parameters, p_chain_id: scope })
       .select("period").order("period", { ascending: true }).abortSignal(this.controller.signal);
@@ -267,6 +278,7 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
   async getForecastHistory(filters: Filters, context?: OperationalReadContext): Promise<HistoricalMonth[]> {
     if (!filters.chainId) return []; // Never consolidate overlapping multi-chain scopes.
     context ??= await this.openOperationalRead();
+    if (!salesSourceAvailable(context)) return [];
     const months = new Map<string, HistoricalMonth>();
     let cursor: Cursor | null = null;
     for (let page = 0; page < 800; page++) {
@@ -290,6 +302,7 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
     if (!filters.chainId) return [];
     if (!/^20\d{2}-(0[1-9]|1[0-2])$/.test(issuePeriod)) throw new Error("invalid_period");
     context ??= await this.openOperationalRead();
+    if (!salesSourceAvailable(context)) return [];
     const rows = await this.reports.history(filters, context, true);
     const months = new Map<string, number>();
     for (const row of rows) {
@@ -303,6 +316,7 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
   }
   async getHistoricalSummary(filters: Filters, context?: OperationalReadContext): Promise<Summary> {
     context ??= await this.openOperationalRead();
+    if (!salesSourceAvailable(context)) return { scopeCount: 0, productCount: (await filteredProducts(this, filters)).length, observationCount: 0, latestPeriod: null, byScope: [] };
     if (hasCommercialFilters(filters)) {
       const [chains, products, rows] = await Promise.all([this.getVisibleChains(context), filteredProducts(this, filters), this.reports.history(filters, context)]);
       const byScope = chains.map(chain => ({ chain, observations: rows.filter(r => r.chain_id === chain.id).reduce((n, r) => n + [r.SALES, r.ORDER, r.DELIVERY].filter(v => v !== null).length, 0) })).filter(r => r.observations > 0);

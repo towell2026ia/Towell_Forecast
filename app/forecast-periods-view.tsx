@@ -10,6 +10,7 @@ import { operationalPeriodsSheets } from "@/lib/operational-periods-xlsx";
 import { planningXlsx } from "@/lib/planning-xlsx";
 import { useForecastFilters, useOperationPin, useRead } from "./forecast-towell-app";
 import { CalculationFilters, ReportPaging, ReportSelect, ReportState, ReportTable, reportNumber, reportPercent } from "./report-controls";
+import { salesSourceAvailable, salesUnavailableMessage } from "@/lib/official-sales-source";
 
 const candidates = ["STATISTICAL", "ML", "ENSEMBLE"] as const;
 const modelName = (r: ForecastMatrixRow) => r.product.commercial?.model ? modelKey(r.product.commercial.model) : "Sin identificar";
@@ -29,7 +30,7 @@ function StoredPeriods() {
     const [snapshot, history, inventory] = await Promise.all(context ? [repository.getReportSnapshot(filters, context), repository.getReportHistory?.(historyFilters, context) ?? Promise.resolve([]), repository.getReportInventory?.(filters, context) ?? Promise.resolve([])] : [repository.getReportSnapshot(filters), repository.getReportHistory?.(historyFilters) ?? Promise.resolve([]), Promise.resolve([])]);
     return { snapshot, history, inventory };
   }, [repository, filters, pin]));
-  return <section className="min-w-0 space-y-5"><div><h1 className="text-2xl font-semibold text-slate-950">Periodos</h1><p className="mt-1 text-sm text-slate-500">Desempeño comercial y forecast almacenado</p></div><ReportState loading={report.loading} error={report.error}/>{report.data && <Matrix key={JSON.stringify(filters)} {...report.data} periods={filters.periodRange}/>}</section>;
+  return <section className="min-w-0 space-y-5"><div><h1 className="text-2xl font-semibold text-slate-950">Periodos</h1><p className="mt-1 text-sm text-slate-500">Desempeño comercial y forecast almacenado</p></div><ReportState loading={report.loading} error={report.error} errorCode={report.errorCode}/>{report.data && <Matrix key={JSON.stringify(filters)} {...report.data} periods={filters.periodRange}/>}</section>;
 }
 function Matrix({ snapshot, history, inventory, periods }: { snapshot: ReportSnapshot; history: HistoricalRow[]; inventory: OperationalInventory[]; periods: Filters["periodRange"] }) {
   const [choice, setChoice] = useState({ ...emptyReportChoice });
@@ -51,6 +52,7 @@ function Matrix({ snapshot, history, inventory, periods }: { snapshot: ReportSna
     </details>
     <ReportState loading={false} error={matrix.error}/>
     {dashboard && data && <>
+      {!salesSourceAvailable(snapshot.sourceContext) && <p role="status" className="text-sm text-slate-600">{salesUnavailableMessage}</p>}
       {snapshot.sourceContext && <OperationalDownload snapshot={snapshot} dashboard={dashboard} history={history} inventory={inventory}/>}
       <div aria-label="Alcance de Periodos" className="space-y-2"><p className="text-sm font-semibold text-slate-900">{[...new Set(data.rows.map(r => r.chain))].join(" · ") || "Sin productos coincidentes"}</p><p className="text-xs text-slate-600">{models.length <= 5 ? models.join(" + ") : `${models.length} modelos`} · {data.rows.length} productos · Corte {dashboard.cutoff ?? "Sin dato"}{!data.issue ? " (histórico; sin cálculo)" : ""}</p><p className="text-xs text-slate-500">{data.excludedParentScopes} scopes padre superpuestos excluidos. Las curvas se consolidan por corte, objetivo, versión de motor y modo de evidencia compatibles.</p></div>
       <dl aria-label="Indicadores comerciales" className="grid grid-cols-2 gap-y-5 border-y border-slate-200 py-5 lg:grid-cols-6">{[["Venta real · 9 meses", reportNumber(dashboard.kpis.sales)], ["Pedido · 9 meses", reportNumber(dashboard.kpis.orders)], ["Enviado · 9 meses", reportNumber(dashboard.kpis.delivery)], ["Fill Rate", reportPercent(dashboard.kpis.fillRate)], ["Productos con cálculo / Total", `${dashboard.available}/${data.rows.length}`], ["Con decisión / Total", `${dashboard.adopted}/${data.rows.length}`]].map(([label, value]) => <div key={label} className="min-w-0 border-l border-slate-200 px-3 first:border-l-0"><dt className="text-xs text-slate-500">{label}</dt><dd className="mt-2 break-words text-xl font-semibold tabular-nums text-slate-950">{value}</dd></div>)}</dl>
@@ -89,7 +91,7 @@ function OperationalDownload({ snapshot, dashboard, history, inventory }: { snap
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch { setError("No fue posible descargar el XLSX."); }
   }
-  return <div className="flex flex-wrap items-center gap-3 text-xs text-slate-600"><span title={context.source_hash}>Fuente oficial · {context.first_period} a {context.last_period} · Actualización {context.generation}</span><span>Inventario: {selectedInventory.length ? `${selectedInventory.length} producto-meses con dato` : "Sin dato"}</span><button type="button" className="underline" onClick={() => void download()}>Descargar XLSX de Períodos</button>{error && <p role="alert">{error}</p>}</div>;
+  return <div className="flex flex-wrap items-center gap-3 text-xs text-slate-600"><span title={context.source_hash}>Fuente oficial · {context.first_period} a {context.last_period} · Actualización {context.generation}{context.sales_contract ? " · Ventas: Towell · Inventario: Estadística" : ""}</span><span>Inventario: {selectedInventory.length ? `${selectedInventory.length} producto-meses con dato` : "Sin dato"}</span><button type="button" className="underline" onClick={() => void download()}>Descargar XLSX de Períodos</button>{error && <p role="alert">{error}</p>}</div>;
 }
 function CompactMatrix({ rows, scope, periods, issue }: { rows: ForecastMatrixRow[]; scope: ForecastMatrixRow[]; periods: string[]; issue: string | null }) {
   const [id, setId] = useState(rows.length === 1 ? rows[0].product.id : "all");

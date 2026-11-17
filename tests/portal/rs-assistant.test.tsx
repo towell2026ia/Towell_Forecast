@@ -115,6 +115,18 @@ describe("Scoped RS assistant transport", () => {
 });
 
 describe("Existing assistant panel with explicit RS actions", () => {
+  it.each([
+    ["SALES_SOURCE_UNAVAILABLE", "Sin cálculo: fuente de ventas no disponible"],
+    ["OFFICIAL_SOURCE_MISMATCH", "La fuente operativa no coincide con la fuente de ventas autorizada."],
+    ["SALES_PERIOD_NOT_CLOSED", "El periodo solicitado no tiene cierre de ventas acreditado."],
+  ])("retains the official source blocker %s without a generic response", async (code, message) => {
+    const client = vi.fn<RsAssistantClient>(async () => { throw new PreviewReadError(code); });
+    render(panel(client)); await selectFormat();
+    await userEvent.click(screen.getByRole("button", { name: "Calcular / consultar pronóstico RS" }));
+    expect(await screen.findByText(message)).toBeTruthy();
+    expect(screen.queryByText("La interfaz del asistente no está disponible en este momento.")).toBeNull();
+    expect(client).toHaveBeenCalledOnce();
+  });
   it("keeps explicit execution unavailable to viewers while allowing status reads", async () => {
     const client = vi.fn<RsAssistantClient>(async () => result());
     render(panel(client, { ...context, role: "reader", globalRole: "VIEWER" })); await selectFormat();

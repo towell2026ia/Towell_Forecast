@@ -52,9 +52,15 @@ class SupabaseReadClient:
                     headers={"apikey": self._key, "Authorization": f"Bearer {self._token}"})
             if response.status_code == 401:
                 raise PreviewError("AUTH_REQUIRED", 401)
-            if response.status_code == 403:
-                raise PreviewError("SCOPE_FORBIDDEN", 403)
             if response.status_code != 200:
+                try:
+                    code = response.json().get("code")
+                except (ValueError, AttributeError):
+                    code = None
+                if code in {"SALES_SOURCE_UNAVAILABLE", "OFFICIAL_SOURCE_MISMATCH", "REPLACED_SOURCE_AUDIT_ONLY"}:
+                    raise PreviewError(code, response.status_code)
+                if response.status_code == 403:
+                    raise PreviewError("SCOPE_FORBIDDEN", 403)
                 raise PreviewError("DATA_READ_FAILED", 503)
             return response.json()
         except (httpx.HTTPError, ValueError):
@@ -82,14 +88,35 @@ class SupabaseReadClient:
                     raise ValueError()
             except (TypeError, ValueError, KeyError, AttributeError):
                 raise PreviewError("DATA_READ_FAILED", 503) from None
-            self._operational_context = {"source_hash": source_hash, "generation": generation,
-                                         "first_period": first, "last_period": last}
+            context = {"source_hash": source_hash, "generation": generation,
+                       "first_period": first, "last_period": last}
+            if "sales_contract" in row:
+                if (row.get("sales_contract") != "towell-sales-v1" or row.get("sales_source") != "TOWELL"
+                        or row.get("sales_sheet") != "Towell" or row.get("inventory_source") != "ESTADISTICA"
+                        or row.get("authorized_source_hash") != source_hash
+                        or type(row.get("sales_available")) is not bool
+                        or not re.fullmatch(r"[0-9a-f]{64}", str(row.get("sales_file_sha256", "")))):
+                    raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 503)
+                context.update({key: row[key] for key in (
+                    "sales_contract", "sales_source", "sales_sheet", "inventory_source", "sales_available",
+                    "sales_file_sha256", "authorized_source_hash")})
+                if not row["sales_available"]:
+                    context["sales_unavailable_reason"] = "Sin cálculo: fuente de ventas no disponible"
+                if "sales_training_cutoff" in row:
+                    cutoff = row["sales_training_cutoff"]
+                    if (not isinstance(cutoff, str) or not re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", cutoff)
+                            or cutoff < first or cutoff > last):
+                        raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 503)
+                    context["sales_training_cutoff"] = cutoff
+            self._operational_context = context
         return dict(self._operational_context)
 
     def observation_rows(self, params: dict[str, Any], *, mode: str = "OPERATIONAL",
                          available_through: str | None = None,
                          chain_id: str | None = None) -> list[dict[str, Any]]:
         context = self.operational_context()
+        if context.get("sales_available") is False:
+            raise PreviewError("SALES_SOURCE_UNAVAILABLE", 503)
         arguments = {**params, "p_source_hash": context["source_hash"],
                      "p_generation": context["generation"], "p_mode": mode}
         if chain_id is not None:
