@@ -112,6 +112,10 @@ class OfficialForecastTests(unittest.TestCase):
         ]
 
         class Client:
+            def operational_context(self):
+                return {"source_hash": "a" * 64, "generation": 1,
+                        "first_period": "2025-01", "last_period": "2026-10"}
+
             def rows(self, table, params):
                 if table == "categories":
                     return [{"id": category, "name": "Catalog category"}]

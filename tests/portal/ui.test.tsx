@@ -140,7 +140,7 @@ describe("Multi-chain read-only UI", () => {
     expect(repo.getHistoricalObservations).toHaveBeenCalledWith(filters, { size: 50, cursor: null }, undefined);
     expect(screen.getAllByText("0").length).toBeGreaterThan(0); expect(screen.getAllByText("Sin dato").length).toBeGreaterThan(0);
   });
-  it("UI14 empty state explicit", () => { render(<ReadState loading={false} error={false} empty/>); expect(screen.getByText("No hay histórico certificado para este filtro.")).toBeTruthy(); });
+  it("UI14 empty state explicit without claiming temporal certification", () => { render(<ReadState loading={false} error={false} empty/>); expect(screen.getByText("No hay histórico comercial para este filtro.")).toBeTruthy(); });
   it("UI15 controlled error state, no demo", () => { render(<ReadState loading={false} error/>); expect(screen.getByRole("alert").textContent).toBe("No fue posible consultar los datos."); });
   for (const [id, role] of [["UI16", "VIEWER"], ["UI17", "EDITOR"]] as const) {
     it(`${id} ${role} scope isolation and admin module hidden`, async () => {
