@@ -6,7 +6,8 @@ import { attachCommercial, changeCommercial, commercialOptions, filteredProducts
 import { periodsDashboard } from "../../lib/periods-dashboard";
 import { operationalContext } from "./operational-context-fixture";
 import { operationalPeriodsSheets } from "../../lib/operational-periods-xlsx";
-import { addReportMonth, buildForecastMatrix, emptyReportChoice, type ReportSnapshot } from "../../lib/forecast-reporting";
+import { addReportMonth, buildForecastMatrix, emptyReportChoice, matrixTotal, type ReportSnapshot } from "../../lib/forecast-reporting";
+import { planningXlsx } from "../../lib/planning-xlsx";
 import { emptyFilters, type CommercialClassification, type Filters, type ForecastReadRepository, type HistoricalRow, type Product } from "../../lib/supabase/types";
 import { ForecastFiltersContext, GlobalFilters } from "../../app/forecast-towell-app";
 import { ForecastPeriodsView } from "../../app/forecast-periods-view";
@@ -143,6 +144,37 @@ describe("Purchase type and optional-format scope isolation", () => {
 });
 
 describe("Rolling 9+3 and compatible frozen calculations", () => {
+  it("exports decimal forecast sums without binary tails and preserves exact historical literals", () => {
+    const s = snapshot(); s.sourceContext = operationalContext;
+    s.products.push({ ...s.products[0], id: "second" }, { ...s.products[0], id: "missing" });
+    const first = { ...s.calculations[0], input_snapshot: { source_context: operationalContext } };
+    s.calculations = [first, { ...first, id: "second-calc", product_id: "second" }];
+    const originalHorizons = s.horizons;
+    s.horizons = s.calculations.flatMap((calculation, index) => originalHorizons.map(h => ({ ...h,
+      id: `${calculation.id}/${h.horizon}`, calculation_id: calculation.id, product_id: calculation.product_id,
+      statistical_value: [1.01, 1.02][index], ml_value: [0.1, 0.2][index], ensemble_value: [1.1, 2.2][index],
+    })));
+    const literal = "12.1234567890123456", historical = [history("2026-07", Number(literal), { exact: { SALES: literal } })];
+    const before = JSON.stringify({ s, historical });
+    const d = periodsDashboard(s, historical, emptyReportChoice, [null, null]);
+    expect(1.01 + 1.02).not.toBe(2.03);
+    const sheets = operationalPeriodsSheets(s, d, historical, []), comparison = sheets.find(sheet => sheet.name === "Comparativa")!;
+    const worksheets = new TextDecoder().decode(planningXlsx(sheets)).match(/<worksheet[\s\S]*?<\/worksheet>/g)!;
+    const xml = new DOMParser().parseFromString(worksheets[1], "application/xml");
+    for (const [series, label, expected] of [["STATISTICAL", "Forecast Estadístico", 2.03], ["ML", "Forecast ML", 0.3], ["ENSEMBLE", "Forecast Ensemble", 3.3]] as const) {
+      expect(d.points[9].values[series]).toBe(expected);
+      expect(d.points[9].coverage[series]).toMatchObject({ covered: 2, eligible: 3 });
+      const index = comparison.headers.indexOf(label);
+      expect(comparison.rows[9][index]).toBe(expected);
+      expect(xml.querySelector(`c[r="${String.fromCharCode(65 + index)}14"] v`)?.textContent).toBe(String(expected));
+    }
+    expect(sheets.find(sheet => sheet.name === "Histórico comercial")!.rows[0][4]).toBe(literal);
+    expect(d.points[8].coverage.actual.exact).toBe(literal);
+    expect(JSON.stringify({ s, historical })).toBe(before);
+    // The decimal summation also retains legitimate precision beyond cents.
+    const rows = d.matrix.rows.slice(0, 2).map((row, i) => ({ ...row, values: { "2026-08": { ...row.values["2026-08"], STATISTICAL: [0.0000001, 0.0000002][i] } } }));
+    expect(matrixTotal(rows, "2026-08", "STATISTICAL").value).toBe(0.0000003);
+  });
   it("places Nov-25 through Jul-26 actuals then Aug/Sep/Oct H1/H2/H3, with twelve prior positions", () => {
     const s = snapshot(), before = JSON.stringify(s);
     const h = Array.from({ length: 36 }, (_, i) => history(addReportMonth("2023-11", i), i));

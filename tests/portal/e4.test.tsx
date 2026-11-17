@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { E4Operations } from "../../components/forecast/e4-operations";
 import { ForecastEnginesTabs } from "../../components/forecast/forecast-engines-tabs";
 import { selectedForecastHorizons } from "../../lib/forecast-e4-ui";
@@ -25,6 +25,59 @@ const client = { calculations: vi.fn(async () => [summary]), currentSelection: v
   calculationDetail: vi.fn(async () => detail) } as unknown as PreviewClient;
 
 describe("E4 UI contracts", () => {
+  it("shows a pending read instead of declaring C1 absent while a saved C2 is loading", async () => {
+    let resolveRows!: (rows: CalculationSummary[]) => void;
+    const pending = new Promise<CalculationSummary[]>(resolve => { resolveRows = resolve; });
+    const saved = { ...summary, id: "saved-c2", calculation_no: 2, calculation_code: "C2" };
+    const reading = { calculations: vi.fn(async () => pending),
+      currentSelection: vi.fn(async () => { throw new PreviewReadError("E4_DISABLED"); }),
+      calculationDetail: vi.fn(async () => ({ ...detail, ...saved })) } as unknown as PreviewClient;
+    render(<E4Operations mode="decision" client={reading} chainId="chain-1" productId="product-1" canWrite={false} canDecide={false}/>);
+    expect(screen.getByText("Consultando cálculos guardados…")).toBeTruthy();
+    expect(screen.queryByText(/Aún no existe C1|No hay cálculos compatibles/)).toBeNull();
+    await act(async () => resolveRows([saved]));
+    expect(await screen.findByText("C2")).toBeTruthy();
+    await screen.findByText(/Lineage: preview preview-1/);
+    expect(screen.queryByText("Consultando cálculos guardados…")).toBeNull();
+    expect(screen.queryByText(/Aún no existe C1|No hay cálculos compatibles/)).toBeNull();
+  });
+
+  it("clears rows, detail and selection on scope change and ignores a late previous-product response", async () => {
+    let resolveNext!: (rows: CalculationSummary[]) => void, resolveOldDetail!: (value: CalculationDetail) => void;
+    const nextRows = new Promise<CalculationSummary[]>(resolve => { resolveNext = resolve; });
+    const oldPending = new Promise<CalculationDetail>(resolve => { resolveOldDetail = resolve; });
+    const event: SelectionEvent = { id: "first-decision", calculation_id: summary.id, selected_candidate: "STATISTICAL", selected_curve: [],
+      selected_by: "actor-first", selected_at: "2026-10-13T20:00:00Z", decision_reason: null, comment: null };
+    const oldDetail = { ...detail, selection_events: [event] };
+    const calculationDetail = vi.fn().mockResolvedValueOnce(oldDetail).mockImplementationOnce(async () => oldPending);
+    const scoped = { calculations: vi.fn(async (_chain: string, product: string) => product === "product-1" ? [summary] : nextRows),
+      currentSelection: vi.fn(async (_chain: string, product: string) => product === "product-1" ? { ...event, calculation_code: "C1", issue_period: issue } : null), calculationDetail } as unknown as PreviewClient;
+    const view = (productId: string) => <E4Operations mode="decision" client={scoped} chainId="chain-1" productId={productId} canWrite={false} canDecide={false}/>;
+    const { rerender } = render(view("product-1"));
+    await screen.findByText("actor-first");
+    fireEvent.click(screen.getByRole("button", { name: "Ver detalle" }));
+    rerender(view("product-2"));
+    expect(screen.getByText("Consultando cálculos guardados…")).toBeTruthy();
+    expect(screen.queryByText("C1")).toBeNull();
+    expect(screen.queryByText("actor-first")).toBeNull();
+    expect(screen.queryByText(/Lineage: preview/)).toBeNull();
+    expect(screen.queryByText(/No hay cálculos compatibles/)).toBeNull();
+    await act(async () => resolveOldDetail(oldDetail));
+    expect(screen.queryByText("actor-first")).toBeNull();
+    await act(async () => resolveNext([]));
+    expect(await screen.findByText("No hay cálculos compatibles para este producto.")).toBeTruthy();
+    expect(screen.queryByText("actor-first")).toBeNull();
+    expect(screen.queryByText(/Consultando decisión vigente/)).toBeNull();
+  });
+
+  it("shows a safe read error rather than an empty-history assertion", async () => {
+    const reading = { calculations: vi.fn(async () => { throw new Error("unsafe internal query detail"); }), currentSelection: vi.fn(async () => null) } as unknown as PreviewClient;
+    render(<E4Operations mode="decision" client={reading} chainId="chain-1" productId="product-1" canWrite canDecide/>);
+    expect((await screen.findByRole("alert")).textContent).toBe("No fue posible consultar los cálculos.");
+    expect(screen.queryByText(/Aún no existe C1|No hay cálculos compatibles|unsafe internal/)).toBeNull();
+    expect((screen.getByRole("button", { name: "Calcular forecast H1–H12" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it("shows all alternatives and the suggestion without preselecting or writing a decision", async () => {
     const reference = { family: "ensemble", model: "weighted", wape: 18.1144 } as CalculationDetail["suggested_reference"];
     const metric = { product_id: "product-1", bias: null, mae: null, rmse: null, observations: 24,

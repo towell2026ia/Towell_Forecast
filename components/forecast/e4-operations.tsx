@@ -70,10 +70,16 @@ function CalculationCurveChart({ detail, compare }: { detail: CalculationDetail;
   </div>;
 }
 
-export function E4Operations({ mode, client, chainId, productId, canWrite: writeAllowed, canDecide: decideAllowed, children }: {
+type E4OperationsProps = {
   mode: "decision" | "history"; client: PreviewClient; chainId: string | null; productId: string | null;
   canWrite: boolean; canDecide: boolean; children?: React.ReactNode;
-}) {
+};
+export function E4Operations(props: E4OperationsProps) {
+  // A new commercial scope cannot inherit rows, detail or a decision from the
+  // previous product, including late responses to its outstanding requests.
+  return <ScopedE4Operations key={JSON.stringify([props.chainId, props.productId])} {...props}/>;
+}
+function ScopedE4Operations({ mode, client, chainId, productId, canWrite: writeAllowed, canDecide: decideAllowed, children }: E4OperationsProps) {
   const canWrite = writeAllowed && client.readOnly !== true;
   const canDecide = decideAllowed && client.readOnly !== true;
   const [rows, setRows] = useState<CalculationSummary[]>([]);
@@ -88,25 +94,36 @@ export function E4Operations({ mode, client, chainId, productId, canWrite: write
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [revision, setRevision] = useState(0);
+  const [readState, setReadState] = useState<{ client: PreviewClient; revision: number; status: "READY" | "ERROR" } | null>(null);
+  const loading = !readState || readState.client !== client || readState.revision !== revision;
+  const readFailed = !loading && readState?.status === "ERROR";
   const running = useRef(false);
   const calculationRequest = useRef<{ signature: string; key: string } | null>(null);
   useEffect(() => {
     let alive = true;
-    if (chainId && productId && client.calculations) {
-      const selection = client.currentSelection?.(chainId, productId).catch(error => {
-        if (error instanceof PreviewReadError && error.code === "E4_DISABLED") return null;
-        throw error;
-      }) ?? Promise.resolve(null);
-      void Promise.all([client.calculations(chainId, productId), selection])
-        .then(([list, selection]) => { if (alive) { setRows(list); setCurrent(selection); } })
-        .catch(() => { if (alive) setError("No fue posible consultar los cálculos."); });
+    if (chainId && productId) {
+      void Promise.resolve().then(() => {
+        if (!alive) return;
+        setRows([]); setCurrent(null); setDetail(null); setCompare(null);
+        setCandidate(null); setReason(""); setComment(""); setRecalcReason(""); setError("");
+        if (!client.calculations) throw new Error("calculation_reader_unavailable");
+        const selection = client.currentSelection?.(chainId, productId).catch(error => {
+          if (error instanceof PreviewReadError && error.code === "E4_DISABLED") return null;
+          throw error;
+        }) ?? Promise.resolve(null);
+        return Promise.all([client.calculations(chainId, productId), selection]);
+      }).then(result => {
+        if (alive && result) { setRows(result[0]); setCurrent(result[1]); setReadState({ client, revision, status: "READY" }); }
+      }).catch(() => {
+        if (alive) { setRows([]); setCurrent(null); setDetail(null); setCompare(null); setError("No fue posible consultar los cálculos."); setReadState({ client, revision, status: "ERROR" }); }
+      });
     }
     return () => { alive = false; };
   }, [client, chainId, productId, revision]);
   useEffect(() => {
     let alive = true;
     const target = rows.find(row => row.id === current?.calculation_id) ?? rows[0];
-    if (!detail && target && client.calculationDetail) void client.calculationDetail(target.id)
+    if (!loading && !readFailed && !detail && target && client.calculationDetail) void client.calculationDetail(target.id)
       .then(async result => { if (alive) { setDetail(result);
         if (mode === "history") {
           const previous = rows.find(row => row.id !== target.id && row.status === "SUPERSEDED");
@@ -115,7 +132,7 @@ export function E4Operations({ mode, client, chainId, productId, canWrite: write
       } })
       .catch(() => { if (alive) setError("No fue posible abrir el cálculo."); });
     return () => { alive = false; };
-  }, [client, rows, current, detail, mode]);
+  }, [client, rows, current, detail, mode, loading, readFailed]);
   async function open(id: string) {
     if (!client.calculationDetail) return;
     setError("");
@@ -181,13 +198,14 @@ export function E4Operations({ mode, client, chainId, productId, canWrite: write
     {mode === "history" && tab === "official" ? children : <>
       <div className="rounded-xl border bg-white p-5">
         <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="font-semibold">{mode === "decision" ? "Decisión del Forecast Towell" : "Cálculos inmutables"}</h2><p className="mt-1 text-sm text-slate-500">C1/C2/C3 son cálculos operativos. Un vintage y un Champion tienen certificación y publicación separadas.</p></div>
-          {canWrite && <Button onClick={() => void calculate()} disabled={busy}>{busy ? "Calculando H1–H12…" : rows.length ? "Recalcular forecast H1–H12" : "Calcular forecast H1–H12"}</Button>}</div>
+          {canWrite && <Button onClick={() => void calculate()} disabled={busy || loading || readFailed}>{busy ? "Calculando H1–H12…" : rows.length ? "Recalcular forecast H1–H12" : "Calcular forecast H1–H12"}</Button>}</div>
         {rows.length > 0 && canWrite && <label className="mt-3 block text-sm">Motivo del recálculo
           <select className="mt-1 w-full rounded border p-2" value={recalcReason} onChange={event => setRecalcReason(event.target.value)}><option value="">Selecciona un motivo</option>{["Nuevo mes disponible", "Nueva información del cliente", "Cambio comercial", "Cambio importante de demanda", "Revisión gerencial", "Nueva evidencia externa", "Corrección de datos", "Otro"].map(value => <option key={value}>{value}</option>)}</select></label>}
-        <p className="mt-3 text-sm"><strong>Forecast Towell vigente:</strong> {current ? `${current.calculation_code} · ${names[current.selected_candidate]}` : "Sin decisión"}. Un nuevo cálculo no sustituye la decisión vigente.</p>
-        <div className="mt-4 overflow-x-auto"><table className="min-w-full text-left text-sm"><thead><tr className="border-b"><th className="p-2">Cálculo</th><th className="p-2">Corte</th><th className="p-2">Referencia*</th><th className="p-2">Estado</th><th className="p-2">Fecha</th><th className="p-2">Abrir</th></tr></thead><tbody>{rows.map(row => <tr className="border-b" key={row.id}><td className="p-2">{row.calculation_code}</td><td className="p-2">{row.issue_period.slice(0,7)}</td><td className="p-2">{row.suggested_reference?.model ?? "—"}</td><td className="p-2">{current?.calculation_code === row.calculation_code ? "Vigente" : row.status}</td><td className="p-2">{row.created_at.slice(0,10)}</td><td className="p-2"><Button variant="outline" size="sm" onClick={() => void open(row.id)}>Ver detalle</Button></td></tr>)}</tbody></table>{!rows.length && <p className="mt-3 text-slate-500">Aún no existe C1 para este producto.</p>}</div>
+        <p className="mt-3 text-sm"><strong>Forecast Towell vigente:</strong> {loading ? "Consultando decisión vigente…" : readFailed ? "No disponible" : current ? `${current.calculation_code} · ${names[current.selected_candidate]}` : "Sin decisión"}. Un nuevo cálculo no sustituye la decisión vigente.</p>
+        {loading && <p role="status" className="mt-3 text-sm text-slate-500">Consultando cálculos guardados…</p>}
+        <div className="mt-4 overflow-x-auto"><table className="min-w-full text-left text-sm"><thead><tr className="border-b"><th className="p-2">Cálculo</th><th className="p-2">Corte</th><th className="p-2">Referencia*</th><th className="p-2">Estado</th><th className="p-2">Fecha</th><th className="p-2">Abrir</th></tr></thead><tbody>{!loading && !readFailed && rows.map(row => <tr className="border-b" key={row.id}><td className="p-2">{row.calculation_code}</td><td className="p-2">{row.issue_period.slice(0,7)}</td><td className="p-2">{row.suggested_reference?.model ?? "—"}</td><td className="p-2">{current?.calculation_code === row.calculation_code ? "Vigente" : row.status}</td><td className="p-2">{row.created_at.slice(0,10)}</td><td className="p-2"><Button variant="outline" size="sm" onClick={() => void open(row.id)}>Ver detalle</Button></td></tr>)}</tbody></table>{!loading && !readFailed && !rows.length && <p className="mt-3 text-slate-500">No hay cálculos compatibles para este producto.</p>}</div>
       </div>
-      {detail && <div className="space-y-4 rounded-xl border bg-white p-5 text-sm"><h3 className="font-semibold">{detail.calculation_code} · {detail.issue_period.slice(0,7)} · {detail.status}</h3>
+      {!loading && !readFailed && detail && <div className="space-y-4 rounded-xl border bg-white p-5 text-sm"><h3 className="font-semibold">{detail.calculation_code} · {detail.issue_period.slice(0,7)} · {detail.status}</h3>
         <p className="text-sm">Creado: {new Date(detail.created_at).toLocaleString("es-MX")} · Corte de datos: {detail.issue_period.slice(0,7)}</p>
         <CalculationCurveChart detail={detail} compare={mode === "history" ? compare : null}/>
         <p>Referencia sugerida: {detail.suggested_reference?.model ?? "Sin recomendación comparable"} * · No es Champion publicado.</p>

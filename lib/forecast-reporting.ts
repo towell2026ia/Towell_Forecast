@@ -117,7 +117,19 @@ export function buildForecastMatrix(snapshot: ReportSnapshot, choice: ReportChoi
 }
 export function matrixTotal(rows: ForecastMatrixRow[], period: string, series: ReportSeries) {
   const values = rows.map(row => row.values[period]?.[series] ?? null).filter((v): v is number => v !== null);
-  return { value: values.length ? values.reduce((sum, v) => sum + v, 0) : null, covered: values.length, eligible: rows.length };
+  // Sum the stored decimal quantities before converting once for chart/XLSX.
+  // Binary addition creates tails such as 1.01 + 1.02 = 2.0300000000000002.
+  // Preserve each quantity's precision; this does not round historical data.
+  const parts = values.map(value => {
+    const [coefficient, exponent = "0"] = String(value).split("e");
+    const [integer, fraction = ""] = coefficient.split(".");
+    return { integer: BigInt(integer + fraction), scale: fraction.length - Number(exponent) };
+  });
+  const scale = Math.max(0, ...parts.map(part => part.scale));
+  const total = parts.reduce((sum, part) => sum + part.integer * BigInt(10) ** BigInt(scale - part.scale), BigInt(0));
+  const digits = (total < BigInt(0) ? -total : total).toString().padStart(scale + 1, "0");
+  const decimal = `${total < BigInt(0) ? "-" : ""}${scale ? `${digits.slice(0, -scale)}.${digits.slice(-scale)}` : digits}`;
+  return { value: values.length ? Number(decimal) : null, covered: values.length, eligible: rows.length };
 }
 export type CommercialRow = HistoricalRow & { calculation: ReportCalculation | null; customer: number | null; towellHistory: number | null; statistical: number | null; ml: number | null; ensemble: number | null; adopted: number | null; absoluteError: number | null; liveError: number | null; liveActual: number | null; wapeLive: number | null; fillRate: number | null; evidence: string };
 export function commercialRows(history: HistoricalRow[], snapshot: ReportSnapshot, choice: ReportChoice, metric: Exclude<ReportSeries, "COLD_START"> = "TOWELL", now = new Date()): CommercialRow[] {

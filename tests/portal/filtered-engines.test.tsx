@@ -134,7 +134,7 @@ describe("Commercial engine selection uses stored filtered curves", () => {
     expect(cells[2].textContent).not.toContain("PARCIAL");
     expect(screen.getAllByText("PARCIAL 1/2").length).toBeGreaterThan(12);
   });
-  it("formats floating-point aggregate tails without changing data, export quantities, zero or missing values", async () => {
+  it("keeps decimal aggregate quantities consistent in export and display without changing stored data, zero or missing values", async () => {
     const { repository, snapshot } = fixture();
     snapshot.horizons = snapshot.horizons.map(h => ({ ...h, statistical_value: h.product_id === "blue" ? 10002.74 : 47125.67,
       ml_value: h.product_id === "blue" ? 0 : null, ensemble_value: null }));
@@ -142,7 +142,7 @@ describe("Commercial engine selection uses stored filtered curves", () => {
     const sheets = () => operationalPeriodsSheets(snapshot, periodsDashboard(snapshot, [], emptyReportChoice, [null, null]), [], []);
     const exportBefore = JSON.stringify(sheets());
     const comparative = sheets().find(s => s.name === "Comparativa")!;
-    expect(comparative.rows.find(row => row[0] === "2026-11")![comparative.headers.indexOf("Forecast Estadístico")]).toBe(10002.74 + 47125.67);
+    expect(comparative.rows.find(row => row[0] === "2026-11")![comparative.headers.indexOf("Forecast Estadístico")]).toBe(57128.41);
     mount(repository, <ForecastPeriodsView/>);
     const table = await screen.findByRole("table", { name: "Matriz compacta de forecast" });
     const cells = within(within(table).getByText("Nov-26").closest("tr")!).getAllByRole("cell");
