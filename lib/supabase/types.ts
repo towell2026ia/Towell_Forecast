@@ -8,6 +8,8 @@ export type Product = { id: string; chain_id: string; category_id: string | null
 export type Filters = { chainId: string | null; scopeChainIds?: string[]; purchaseType?: "RS" | "CE" | null; productId: string | null; categoryId: string | null; periodRange: [string | null, string | null]; search: string; commercialType?: string | null; commercialModels?: string[] | null; commercialColor?: string | null; commercialSize?: string | null; classificationStatus?: string | null };
 export const emptyFilters: Filters = { chainId: null, productId: null, categoryId: null, periodRange: [null, null], search: "" };
 export type OperationalReadContext = { source_hash: string; generation: number; first_period: string; last_period: string;
+  forecast_contract?: "pedido-towell-v1"; objective?: "Pedido"; target_metric?: "ORDER"; target_sheet?: "Pedidos"; target_file_sha256?: string;
+  training_cutoff?: string | null; forecast_available?: boolean; target_source_available?: boolean; forecast_block_code?: string | null; forecast_unavailable_reason?: string | null; unit?: "PIEZAS";
   sales_source?: "TOWELL"; inventory_source?: "ESTADISTICA"; sales_available?: boolean;
   sales_unavailable_reason?: "Sin cálculo: fuente de ventas no disponible";
   sales_training_cutoff?: string;

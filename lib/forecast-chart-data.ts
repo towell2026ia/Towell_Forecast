@@ -1,7 +1,8 @@
 import type { Filters } from "./supabase/types";
-import type { PreviewAggregate, PreviewCandidate, PreviewHorizon, PreviewScope, ProductCandidate, SuggestedReference } from "./forecast-preview";
+import type { PreviewAggregate, PreviewCandidate, PreviewHorizon, PreviewJob, PreviewScope, ProductCandidate, SuggestedReference } from "./forecast-preview";
 import { hasCommercialFilters, matchesCommercial, matchesChainScope, modelKey, selectedScopeIds } from "./commercial-filters";
 import { buildForecastMatrix, emptyReportChoice, matchesOfficialSource, matrixTotal, validDecision, type ReportSnapshot } from "./forecast-reporting";
+import { forecastObjective, forecastSourceAvailable, forecastTrainingCutoff } from "./official-sales-source";
 
 export type HistoricalMonth = { period: string; sale: number | null; order: number | null; delivery: number | null };
 export type CustomerMonth = { period: string; value: number };
@@ -51,14 +52,17 @@ function savedMetric(candidate: ProductCandidate): PreviewCandidate {
 // Present already stored curves for the exact commercial selection. This does
 // not execute a forecast or derive a group WAPE from individual percentages.
 export function storedCommercialScope(snapshot: ReportSnapshot, filters: Filters, original?: PreviewScope | null): PreviewScope {
-  if (!filters.chainId || !snapshot.sourceContext || snapshot.products.some(product => !matchesChainScope(product.chain_id, filters)
+  const chainIds = [...new Set(snapshot.products.map(product => product.chain_id))].sort();
+  const presentationChain = filters.chainId ?? chainIds[0];
+  if (!presentationChain || !snapshot.sourceContext || snapshot.products.some(product => !matchesChainScope(product.chain_id, filters)
       || filters.productId && product.id !== filters.productId || !matchesCommercial(product, filters))) throw new Error("stored_scope_mismatch");
   const matrix = buildForecastMatrix(snapshot, emptyReportChoice, [null, null]);
   const selected = matrix.rows.find(row => row.calculation)?.calculation;
   const source = original?.chain_id === filters.chainId && matchesOfficialSource(original.source_context, snapshot.sourceContext)
+    && (original.objective ?? "Venta") === forecastObjective(snapshot.sourceContext)
     && (!selected || original.engine_version === selected.engine_version && original.issue_period === selected.issue_period.slice(0, 7)
       && (!original.mode || original.mode === selected.evidence_mode)) ? original : null;
-  const issue = matrix.issue ?? snapshot.sourceContext.last_period;
+  const issue = matrix.issue ?? forecastTrainingCutoff(snapshot.sourceContext) ?? "";
   const distribution: Record<string, number> = {}, mlWinners: Record<string, string | null> = {};
   const candidates: ProductCandidate[] = [], suggestions: Record<string, SuggestedReference> = {};
   const products = matrix.rows.map(row => {
@@ -114,7 +118,7 @@ export function storedCommercialScope(snapshot: ReportSnapshot, filters: Filters
   });
   const aggregates: PreviewAggregate[] = [];
   for (const level of ["chain", "category"] as const) {
-    const keys = level === "chain" ? [filters.chainId] : [...new Set(matrix.rows.map(row => row.product.category_id).filter((key): key is string => Boolean(key)))];
+    const keys = level === "chain" ? [presentationChain] : [...new Set(matrix.rows.map(row => row.product.category_id).filter((key): key is string => Boolean(key)))];
     for (const key of keys) for (const [index, period] of matrix.periods.entries()) {
       const members = matrix.rows.filter(row => level === "chain" || row.product.category_id === key);
       const stat = matrixTotal(members, period, "STATISTICAL"), ml = matrixTotal(members, period, "ML"), ensemble = matrixTotal(members, period, "ENSEMBLE");
@@ -134,13 +138,13 @@ export function storedCommercialScope(snapshot: ReportSnapshot, filters: Filters
   });
   const singleStat = products.length === 1 ? statCandidates[0] : undefined;
   const singleMl = products.length === 1 ? candidates.find(c => c.family === "ml") : undefined;
-  return { ...source, chain_id: filters.chainId, chain_name: snapshot.chains.find(chain => chain.id === filters.chainId)?.name,
+  return { ...source, chain_id: presentationChain, chain_name: filters.chainId ? snapshot.chains.find(chain => chain.id === filters.chainId)?.name : `${chainIds.length} cadenas autorizadas`, objective: forecastObjective(snapshot.sourceContext) ?? undefined,
     status: "PREVIEW", issue_period: issue, latest_actual_period: snapshot.sourceContext.last_period,
     engine_version: selected?.engine_version ?? source?.engine_version, mode: "RETROSPECTIVE_TRAINING", evaluation_mode: "RETROSPECTIVE_EVALUATION",
     source_context: snapshot.sourceContext, provisional_cold_start: undefined, products, aggregates,
-    commercial_projection: { filter_key: commercialScopeKey(filters), products: products.length, statistical, ml, ensemble: statistical,
+    commercial_projection: { filter_key: commercialScopeKey(filters), chain_ids: chainIds, product_ids: products.map(p => p.product_id).sort(), products: products.length, statistical, ml, ensemble: statistical,
       ml_models: [...new Set(Object.values(mlWinners).filter((model): model is string => Boolean(model)))], source: "STORED_CALCULATIONS" },
-    stored_results: { objective: selected?.objective ?? "Venta", issue_period: issue,
+    stored_results: { objective: selected?.objective ?? forecastObjective(snapshot.sourceContext) ?? "Sin objetivo acreditado", issue_period: issue || "Sin cierre acreditado",
       consolidated_metrics_status: products.length === 1 ? "SINGLE_PRODUCT" : "NOT_ACCREDITED",
       consolidated_reason: products.length === 1 ? "Métricas retrospectivas guardadas del producto y cálculo seleccionado."
         : "WAPE consolidado no acreditado: no se guardaron los errores y denominadores comparables por observación. No se promedian porcentajes.",
@@ -150,7 +154,7 @@ export function storedCommercialScope(snapshot: ReportSnapshot, filters: Filters
         const emittedAt = typeof provenance?.emitted_at === "string" && Number.isFinite(Date.parse(provenance.emitted_at)) ? provenance.emitted_at : null;
         const history = snapshot.decisions.filter(event => event.product_id === row.product.id && event.chain_id === row.product.chain_id).map(event => {
           const calculation = snapshot.calculations.find(c => c.id === event.calculation_id && c.product_id === row.product.id && c.chain_id === row.product.chain_id
-            && c.objective === "Venta" && matchesOfficialSource(c.input_snapshot?.source_context, snapshot.sourceContext!));
+            && c.objective === forecastObjective(snapshot.sourceContext) && matchesOfficialSource(c.input_snapshot?.source_context, snapshot.sourceContext!));
           if (!calculation) throw new Error("stored_decision_lineage_invalid");
           validDecision({ ...snapshot, decisions: [event] }, calculation);
           return { id: event.id, calculation_id: calculation.id, calculation_code: calculation.calculation_code,
@@ -180,13 +184,80 @@ export function storedCommercialScope(snapshot: ReportSnapshot, filters: Filters
       suggested_references: suggestions, product_ml_winners: mlWinners, product_candidates: candidates, no_degradation: null, automatic_promotion: false },
   };
 }
+export function exactSelectionScope(job: PreviewJob, snapshot: ReportSnapshot, filters: Filters): PreviewScope {
+  const context = snapshot.sourceContext, expected = new Map(snapshot.products.map(product => [product.id, product]));
+  const requested = job.requested_product_ids;
+  const chainIds = [...new Set(snapshot.products.map(product => product.chain_id))].sort();
+  if (!context || !forecastSourceAvailable(context) || !expected.size || job.objective !== forecastObjective(context)
+    || !requested || new Set(requested).size !== requested.length || requested.length !== expected.size || requested.some(id => !expected.has(id))
+    || snapshot.products.some(product => !matchesChainScope(product.chain_id, filters) || !matchesCommercial(product, filters))) throw new Error("exact_preview_scope_mismatch");
+  const products = new Map<string, NonNullable<PreviewScope["products"]>[number]>(), candidates: ProductCandidate[] = [];
+  const suggestions: Record<string, SuggestedReference> = {}, cuts = new Set<string>(), seenChains = new Set<string>();
+  for (const scope of job.scopes) {
+    if (!chainIds.includes(scope.chain_id) || seenChains.has(scope.chain_id) || scope.objective !== job.objective
+      || !matchesOfficialSource(scope.source_context, context) || scope.engine_version !== job.engine_version
+      || !/^20\d{2}-(0[1-9]|1[0-2])$/.test(scope.issue_period ?? "")) throw new Error("exact_preview_scope_mismatch");
+    seenChains.add(scope.chain_id);
+    if (scope.issue_period) cuts.add(scope.issue_period.slice(0, 7));
+    for (const product of scope.products ?? []) {
+      if (expected.get(product.product_id)?.chain_id !== scope.chain_id || products.has(product.product_id)) throw new Error("exact_preview_scope_mismatch");
+      const curve = product.horizons ?? [];
+      if (curve.length && (curve.length !== 12 || new Set(curve.map(h => h.horizon)).size !== 12 || curve.some(h => !Number.isSafeInteger(h.horizon) || h.horizon < 1 || h.horizon > 12
+        || h.target_period.slice(0, 7) !== addMonth(scope.issue_period!, h.horizon)
+        || !Number.isFinite(h.statistical_value) || h.statistical_value! < 0 || !Number.isFinite(h.forecast_towell) || h.forecast_towell < 0
+        || h.ml_value !== null && (!Number.isFinite(h.ml_value) || h.ml_value < 0)))) throw new Error("exact_preview_horizon_invalid");
+      products.set(product.product_id, product);
+    }
+    for (const candidate of scope.selection?.product_candidates ?? []) {
+      if (expected.get(candidate.product_id)?.chain_id !== scope.chain_id) throw new Error("exact_preview_scope_mismatch");
+      candidates.push(candidate);
+    }
+    for (const [id, suggestion] of Object.entries(scope.selection?.suggested_references ?? {})) {
+      if (expected.get(id)?.chain_id !== scope.chain_id) throw new Error("exact_preview_scope_mismatch");
+      suggestions[id] = suggestion;
+    }
+  }
+  if (cuts.size !== 1 || seenChains.size !== chainIds.length) throw new Error("exact_preview_cuts_not_aligned");
+  const issue = [...cuts][0];
+  if (issue > (forecastTrainingCutoff(context) ?? "")) throw new Error("exact_preview_cut_not_closed");
+  const members = snapshot.products.map(product => products.get(product.id) ?? { product_id: product.id, product_code: product.product_code,
+    description: product.description, category_id: product.category_id, forecast_status: "SIN_PRONOSTICO", horizons: [] });
+  const rows = snapshot.products.map(product => ({ product, chain: snapshot.chains.find(chain => chain.id === product.chain_id)?.name ?? product.chain_id,
+    category: "", calculation: null, provisional: null, adopted: null, values: Object.fromEntries(Array.from({ length: 12 }, (_, i) => {
+      const period = addMonth(issue, i + 1), horizon = products.get(product.id)?.horizons?.find(h => h.target_period.slice(0, 7) === period);
+      return [period, { STATISTICAL: horizon?.statistical_value ?? null, ML: horizon?.ml_value ?? null, ENSEMBLE: horizon?.forecast_towell ?? null, TOWELL: null, COLD_START: null }];
+    })) }));
+  const presentationChain = filters.chainId ?? chainIds[0], aggregates = Array.from({ length: 12 }, (_, i) => {
+    const period = addMonth(issue, i + 1);
+    return { level: "chain" as const, key: presentationChain, horizon: i + 1, target_period: period,
+      statistical_value: matrixTotal(rows, period, "STATISTICAL").value ?? undefined, ml_value: matrixTotal(rows, period, "ML").value,
+      forecast_towell: matrixTotal(rows, period, "ENSEMBLE").value! };
+  }).filter(h => h.forecast_towell !== null);
+  const stat = members.filter(product => product.horizons?.length === 12).length;
+  const ml = members.filter(product => product.horizons?.length === 12 && product.horizons.every(h => h.ml_value !== null)).length;
+  const methods: Record<string, number> = {};
+  for (const product of members) if (product.horizons?.[0]?.statistical_model) methods[product.horizons[0].statistical_model] = (methods[product.horizons[0].statistical_model] ?? 0) + 1;
+  const mlCandidates = [...new Set(candidates.filter(c => c.family === "ml").map(c => c.model))].map(model => ({ model, family: "ml" as const, available: true,
+    by_product: candidates.filter(c => c.family === "ml" && c.model === model).map(savedMetric) }));
+  return { chain_id: presentationChain, chain_name: filters.chainId ? snapshot.chains.find(chain => chain.id === filters.chainId)?.name : `${chainIds.length} cadenas autorizadas`,
+    objective: job.objective, status: "PREVIEW", issue_period: issue, latest_actual_period: context.last_period, mode: job.mode, evaluation_mode: "RETROSPECTIVE_EVALUATION",
+    engine_version: job.engine_version, source_context: context, products: members, aggregates,
+    commercial_projection: { filter_key: commercialScopeKey(filters), chain_ids: chainIds, product_ids: [...expected.keys()].sort(), products: expected.size,
+      statistical: stat, ml, ensemble: stat, ml_models: mlCandidates.map(c => c.model), source: "EXACT_SELECTION" },
+    eligibility: { visible_products: expected.size, evaluated: expected.size, stat_eligible: stat, ml_eligible: ml },
+    statistical: { status: stat ? "COMPLETED" : "NOT_ELIGIBLE", models: methods, candidates: candidates.filter(c => c.family === "statistical").map(savedMetric), scope_candidates: [], retrospective_wape: null, retrospective_bias: null },
+    ml: { status: ml ? "COMPLETED" : "NOT_ELIGIBLE", training_samples: null, leader: null, candidates: mlCandidates, retrospective_wape: null, retrospective_bias: null },
+    selection: { published_champion: null, preview_leader: null, preview_challenger: null, suggested_references: suggestions, product_candidates: candidates,
+      product_ml_winners: Object.fromEntries(candidates.filter(c => c.family === "ml").map(c => [c.product_id, c.model])), no_degradation: null, automatic_promotion: false } };
+}
 export function scopeHorizons(scope: PreviewScope | null, filters: Filters): Horizon[] {
-  if (!scope || !filters.chainId || scope.chain_id !== filters.chainId || !scope.issue_period) return [];
+  const projected = scope?.commercial_projection?.filter_key === commercialScopeKey(filters) && Boolean(scope.commercial_projection.chain_ids?.length);
+  if (!scope || !filters.chainId && !projected || filters.chainId && scope.chain_id !== filters.chainId || !scope.issue_period) return [];
   // A product-scoped run cannot masquerade as the full category/chain aggregate.
   let rows: Horizon[];
   if (filters.productId) rows = scope.products?.find(p => p.product_id === filters.productId && (!filters.categoryId || p.category_id === filters.categoryId))?.horizons ?? [];
   else if ((filters.search.trim() || hasCommercialFilters(filters)) && scope.commercial_projection?.filter_key !== commercialScopeKey(filters)) rows = [];
-  else rows = scope.aggregates?.filter(r => r.level === (filters.categoryId ? "category" : "chain") && r.key === (filters.categoryId ?? filters.chainId)) ?? [];
+  else rows = scope.aggregates?.filter(r => r.level === (filters.categoryId && !projected ? "category" : "chain") && r.key === (filters.categoryId && !projected ? filters.categoryId : filters.chainId ?? scope.chain_id)) ?? [];
   // Dates and numbers remain backend values; malformed/partial results are not repaired.
   if (rows.length !== 12 || new Set(rows.map(r => r.horizon)).size !== 12 || rows.some(r => r.horizon < 1 || r.horizon > 12 || r.target_period !== addMonth(scope.issue_period!, r.horizon) || !Number.isFinite(r.forecast_towell))) return [];
   return [...rows].sort((a, b) => a.horizon - b.horizon);
@@ -202,7 +273,7 @@ export function scopeProvisionalHorizons(scope: PreviewScope | null, filters: Fi
   return [...rows].sort((a, b) => a.horizon - b.horizon);
 }
 export function traderPoints(history: HistoricalMonth[], customer: CustomerMonth[], horizons: Horizon[], cutoff: string | undefined, filters: Filters, provisional: ProvisionalHorizon[] = []): TraderPoint[] {
-  if (!filters.chainId) return [];
+  if (!filters.chainId && !hasCommercialFilters(filters) && !filters.search.trim() && !filters.productId) return [];
   const historical = history.filter(r => (!cutoff || r.period <= cutoff) && (!filters.periodRange[0] || r.period >= filters.periodRange[0]) && (!filters.periodRange[1] || r.period <= filters.periodRange[1]));
   const byPeriod = new Map(historical.map(r => [r.period, r]));
   const fcst = new Map(horizons.map(r => [r.target_period, r]));

@@ -17,7 +17,7 @@ from .orchestrator import ForecastOrchestrator
 from .forecast_execution import execute_forecast
 from .persistence import content_hash
 from .rs_assistant_data import load_rs_scope
-from .supabase_access import PreviewError, uuid_value
+from .supabase_access import PreviewError, uuid_value, forecast_objective, require_sales_context
 from .tools import fold
 
 PUBLIC_CONTEXT = re.compile(
@@ -73,8 +73,18 @@ class RSAssistantWorkflow:
 
     def answer(self, body, scoped, *, may_start_research=False):
         scope, rows = scoped["scope"], scoped["records"]
-        key = content_hash({"engine": ENGINE_VERSION, "scope": scope, "records": rows})
-        if body.action == "answer" and "stored_forecast" in scoped:
+        context = scoped.get("source_context")
+        objective = forecast_objective(context)
+        if body.action == "forecast":
+            require_sales_context(context)
+            if context and objective == "Pedido":
+                # ORDER computation has one exact multi-scope entry point;
+                # the assistant is an observer, not a second scope resolver.
+                raise PreviewError("BOUNDED_SELECTION_REQUIRED", 409)
+        key = content_hash({"engine": ENGINE_VERSION, "scope": scope, "records": rows, "source_context": context})
+        if context and context.get("forecast_available") is False:
+            forecast = None
+        elif body.action == "answer" and "stored_forecast" in scoped:
             # Ordinary answers read the same frozen E4 curves as Períodos. A
             # missing stored result stays missing; it never triggers a run or
             # substitutes an independently calculated assistant-cache result.
@@ -85,7 +95,7 @@ class RSAssistantWorkflow:
             variants = {r["product_id"] for r in rows}
             if not variants or len(variants) > 50:
                 raise PreviewError("RS_FORECAST_SCOPE_UNAVAILABLE", 409)
-            series = normalize_retrospective_dataset(rows, scope["period"])
+            series = normalize_retrospective_dataset(rows, scope["period"], objective=objective)
             eligible = {item.product_id for item in series
                         if len(item.history(scope["period"])) >= ForecastPolicy().min_train_observations}
             usable = [r for r in rows if r["product_id"] in eligible]
@@ -96,7 +106,7 @@ class RSAssistantWorkflow:
             try:
                 forecast = self.storage.get("rs_assistant_forecasts", key)
                 if forecast is None:
-                    result, exclusions = execute_forecast(usable, scope["period"], compute=self.compute, objective="Venta",
+                    result, exclusions = execute_forecast(usable, scope["period"], compute=self.compute, objective=objective,
                                                          evidence_mode="RETROSPECTIVE_TRAINING")
                     if not result.get("chains"):
                         raise PreviewError("RS_FORECAST_SCOPE_UNAVAILABLE", 409)

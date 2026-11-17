@@ -117,7 +117,9 @@ describe("Scoped RS assistant transport", () => {
 describe("Existing assistant panel with explicit RS actions", () => {
   it.each([
     ["SALES_SOURCE_UNAVAILABLE", "Sin cálculo: fuente de ventas no disponible"],
-    ["OFFICIAL_SOURCE_MISMATCH", "La fuente operativa no coincide con la fuente de ventas autorizada."],
+    ["OFFICIAL_SOURCE_MISMATCH", "La fuente operativa no coincide con la autorizada para esta consulta."],
+    ["ORDER_SOURCE_UNAVAILABLE", "Sin cálculo: fuente de pedidos no disponible."],
+    ["ORDER_CLOSURE_UNVERIFIED", "Sin cálculo: cierre de Pedido no acreditado."],
     ["SALES_PERIOD_NOT_CLOSED", "El periodo solicitado no tiene cierre de ventas acreditado."],
   ])("retains the official source blocker %s without a generic response", async (code, message) => {
     const client = vi.fn<RsAssistantClient>(async () => { throw new PreviewReadError(code); });

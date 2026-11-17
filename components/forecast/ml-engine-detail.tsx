@@ -2,7 +2,7 @@
 import { useState } from "react";
 import type { PreviewScope } from "@/lib/forecast-preview";
 import type { Filters } from "@/lib/supabase/types";
-import { defaultVisibility, percent, periodLabel, quantity, traderPoints, type HistoricalMonth, type Horizon, type SeriesVisibility } from "@/lib/forecast-chart-data";
+import { commercialScopeKey, defaultVisibility, percent, periodLabel, quantity, traderPoints, type HistoricalMonth, type Horizon, type SeriesVisibility } from "@/lib/forecast-chart-data";
 import { productCandidate } from "@/lib/ml-preview-data";
 import { retrospectiveMetric, metricEvidence } from "@/lib/statistical-preview-data";
 import { ForecastGrid } from "./forecast-horizon-table";
@@ -11,8 +11,9 @@ import { StatisticalHorizonAccuracy } from "./statistical-horizon-chart";
 
 export function MLEngineDetail({ scope, scopes, filters, historical, horizons, historyError, cutsStatus }: { scope: PreviewScope | null; scopes: PreviewScope[]; filters: Filters; historical: HistoricalMonth[]; horizons: Horizon[]; historyError?: boolean; cutsStatus?: string }) {
   const [visible, setVisible] = useState<SeriesVisibility>({ ...defaultVisibility, order: false, delivery: false, statistical: true, ml: true });
-  if (!filters.chainId) return <section className="space-y-4"><h2 className="text-xl font-semibold">Machine Learning · Cobertura por cadena</h2><p className="text-sm text-slate-500">Sin suma global de scopes.</p>{cutsStatus === "CUTS_NOT_ALIGNED" && <p className="text-xs text-blue-800">CUTS_NOT_ALIGNED</p>}<ForecastGrid headers={["Cadena", "Corte", "Training samples", "ML elegibles", "Modelo", "WAPE retrospectivo", "Bias retrospectivo"]} rows={scopes.map(s => [s.chain_name ?? s.chain_id, periodLabel(s.issue_period), quantity(s.ml?.training_samples), quantity(s.eligibility?.ml_eligible), s.ml?.leader ?? "—", percent(s.ml?.retrospective_wape), percent(s.ml?.retrospective_bias)])}/></section>;
-  if (!scope || scope.chain_id !== filters.chainId) return <p className="text-sm text-slate-500">Sin vista previa ML para la cadena seleccionada.</p>;
+  const projected = scope?.commercial_projection?.filter_key === commercialScopeKey(filters) && Boolean(scope.commercial_projection.chain_ids?.length);
+  if (!filters.chainId && !projected) return <section className="space-y-4"><h2 className="text-xl font-semibold">Machine Learning · Cobertura por cadena</h2><p className="text-sm text-slate-500">Sin suma global de scopes.</p>{cutsStatus === "CUTS_NOT_ALIGNED" && <p className="text-xs text-blue-800">CUTS_NOT_ALIGNED</p>}<ForecastGrid headers={["Cadena", "Corte", "Training samples", "ML elegibles", "Modelo", "WAPE retrospectivo", "Bias retrospectivo"]} rows={scopes.map(s => [s.chain_name ?? s.chain_id, periodLabel(s.issue_period), quantity(s.ml?.training_samples), quantity(s.eligibility?.ml_eligible), s.ml?.leader ?? "—", percent(s.ml?.retrospective_wape), percent(s.ml?.retrospective_bias)])}/></section>;
+  if (!scope || scope.chain_id !== filters.chainId && !projected) return <p className="text-sm text-slate-500">Sin vista previa ML para la cadena seleccionada.</p>;
   const ml = scope.ml, stored = scope.stored_results;
   const candidates = (ml?.candidates ?? []).filter(candidate => !stored || !filters.productId || candidate.by_product?.some(row => row.product_id === filters.productId));
   const commercial = scope.commercial_projection;

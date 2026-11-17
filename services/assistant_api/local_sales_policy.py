@@ -28,13 +28,14 @@ LEGACY_READERS = frozenset({
 
 class LocalSalesPolicy:
     def __init__(self, config):
-        if (not isinstance(config, dict) or config.get("contract") != SALES_CONTRACT
-                or config.get("sheet") != "Towell" or config.get("unit") != "PIEZAS"
+        if (not isinstance(config, dict) or config.get("contract") not in {SALES_CONTRACT, "pedido-towell-v1"}
+                or config.get("sheet") != ("Pedidos" if config.get("contract") == "pedido-towell-v1" else "Towell") or config.get("unit") != "PIEZAS"
                 or any(not isinstance(config.get(key), str)
                        or not re.fullmatch(r"[0-9a-f]{64}", config[key])
                        for key in ("master_sha256", "source_hash"))
                 or type(config.get("generation")) is not int or config["generation"] < 1
-                or not re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", str(config.get("last_closed_period", "")))):
+                or (not (config.get("contract") == "pedido-towell-v1" and config.get("last_closed_period") is None)
+                    and not re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", str(config.get("last_closed_period", ""))))):
             raise ValueError("local_authorized_sales_policy_required")
         self.path = Path(config.get("master_path", ""))
         if (not self.path.is_absolute() or self.path.name != MASTER_NAME
@@ -56,9 +57,17 @@ class LocalSalesPolicy:
                 or actual.get("source_hash") != self.config["source_hash"]
                 or actual.get("generation") != self.config["generation"]
                 or not isinstance(actual.get("last_period"), str)
-                or actual["last_period"] < self.config["last_closed_period"]):
+                or self.config["last_closed_period"] is not None and actual["last_period"] < self.config["last_closed_period"]):
             raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 503)
         available = self.available()
+        if self.config["contract"] == "pedido-towell-v1":
+            closed = self.config["last_closed_period"] is not None
+            return {**actual, "forecast_contract": "pedido-towell-v1", "objective": "Pedido", "target_metric": "ORDER",
+                "target_sheet": "Pedidos", "target_file_sha256": self.config["master_sha256"], "training_cutoff": self.config["last_closed_period"],
+                "authorized_source_hash": self.config["source_hash"], "target_source_available": available, "forecast_available": available and closed,
+                "forecast_block_code": None if closed else "ORDER_CLOSURE_UNVERIFIED",
+                "forecast_unavailable_reason": "Sin cálculo: fuente de pedidos no disponible" if not available else None if closed else "Sin cálculo: cierre de Pedido no acreditado",
+                "inventory_source": "ESTADISTICA", "unit": "PIEZAS"}
         return {**actual, "sales_contract": SALES_CONTRACT,
                 "sales_source": "TOWELL", "sales_sheet": "Towell",
                 "sales_file_sha256": self.config["master_sha256"],
@@ -72,6 +81,9 @@ class LocalSalesPolicy:
         context = self.context(actual)
         if resource in LEGACY_READERS:
             raise PreviewError("REPLACED_SOURCE_AUDIT_ONLY", 403)
-        if resource in SALES_READERS and not context["sales_available"]:
-            raise PreviewError("SALES_SOURCE_UNAVAILABLE", 503)
+        if resource in SALES_READERS:
+            if context.get("target_source_available") is False:
+                raise PreviewError("ORDER_SOURCE_UNAVAILABLE", 503)
+            if context.get("sales_available") is False:
+                raise PreviewError("SALES_SOURCE_UNAVAILABLE", 503)
         return context

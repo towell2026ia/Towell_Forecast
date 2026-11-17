@@ -176,6 +176,10 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
                    "request_id": getattr(request.state, "request_id", None)}
         if exc.code == "SALES_SOURCE_UNAVAILABLE":
             content["message"] = "Sin cálculo: fuente de ventas no disponible"
+        if exc.code == "ORDER_SOURCE_UNAVAILABLE":
+            content["message"] = "Sin cálculo: fuente de pedidos no disponible"
+        if exc.code == "ORDER_CLOSURE_UNVERIFIED":
+            content["message"] = "Sin cálculo: cierre de Pedido no acreditado"
         return JSONResponse(status_code=exc.status, content=content)
 
     @app.middleware("http")
@@ -293,6 +297,7 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
                 "version": config.app_version, "environment": config.app_env, "providers": providers,
                 "local_postgres": local_database is not None,
                 "operational_preview": True,
+                "local_bounded_preview": local_database is not None,
                 "rs_assistant_enabled": config.ai_assistant_api_enabled,
                 "openai_enabled": config.openai_enabled,
                 "deep_research_enabled": config.deep_research_enabled and local_database is None,

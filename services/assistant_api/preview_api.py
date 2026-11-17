@@ -5,7 +5,7 @@ from fastapi import APIRouter, Header, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from .auth import ADMIN, EXECUTE, AuthFailure, authorize
-from .supabase_access import PreviewError, uuid_value
+from .supabase_access import PreviewError, uuid_value, forecast_objective, matches_source, require_sales_context
 from .quality_gates import QualityPolicy, data_quality, forecast_quality, observed_service
 from .operational_preview import snapshot_hash
 from .vintage_service import candidate_payload
@@ -15,6 +15,9 @@ class PreviewRunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     chain_id: str | None = None
     product_id: str | None = None
+    chain_ids: list[str] | None = Field(default=None, min_length=1, max_length=100)
+    product_ids: list[str] | None = Field(default=None, min_length=1, max_length=2000)
+    source_context: dict | None = None
     objective: str = "Venta"
     issue_period: str | None = Field(default=None, pattern=r"^20\d{2}-(0[1-9]|1[0-2])$")
     mode: str = "RETROSPECTIVE_TRAINING"
@@ -78,11 +81,37 @@ def mount_preview_routes(app, config, identity, data, runner, limiter, write_rep
             authorize(principal, EXECUTE)
         except AuthFailure:
             raise PreviewError("SCOPE_FORBIDDEN", 403) from None
-        if body.objective != "Venta" or body.mode not in {"RETROSPECTIVE_TRAINING", "POINT_IN_TIME"}:
+        source = data.bind(token)
+        current = source.client.operational_context() if hasattr(source, "client") else None
+        bounded = body.chain_ids is not None or body.product_ids is not None
+        if body.objective != forecast_objective(current) or body.mode not in {"RETROSPECTIVE_TRAINING", "POINT_IN_TIME"}:
             raise PreviewError("REQUEST_001")
-        scopes = [uuid_value(body.chain_id)] if body.chain_id else sorted(principal.execute_chain_ids)
+        if bounded:
+            if not body.chain_ids or not body.product_ids or body.chain_id or body.product_id:
+                raise PreviewError("REQUEST_001")
+            scopes = [uuid_value(value) for value in body.chain_ids]
+            products_requested = [uuid_value(value) for value in body.product_ids]
+            if len(set(scopes)) != len(scopes) or len(set(products_requested)) != len(products_requested):
+                raise PreviewError("REQUEST_001")
+            if not matches_source(body.source_context, current):
+                raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 409)
+        else:
+            if getattr(config, "local_postgres_config", None) is not None:
+                raise PreviewError("BOUNDED_SELECTION_REQUIRED", 409)
+            scopes = [uuid_value(body.chain_id)] if body.chain_id else sorted(principal.execute_chain_ids)
         if not scopes or not set(scopes).issubset(principal.execute_chain_ids):
             raise PreviewError("SCOPE_FORBIDDEN", 403)
+        # A captured month is not a certified close. Reject before catalogue,
+        # job/cache access, or compute when ORDER has no accredited close.
+        require_sales_context(current, required=getattr(config, "local_postgres_config", None) is not None)
+        if bounded:
+            catalogue = source.client.catalog_rows(as_of=body.issue_period)
+            selected = [row for row in catalogue if row.get("product_id") in products_requested]
+            found = {row["product_id"]: row["chain_id"] for row in selected}
+            if (len(selected) != len(found) or set(found) != set(products_requested)
+                    or set(found.values()) != set(scopes)
+                    or any(row.get("purchase_type") != "RS" for row in selected)):
+                raise PreviewError("SCOPE_FORBIDDEN", 403)
         if body.product_id:
             uuid_value(body.product_id)
             if not body.chain_id:
@@ -93,8 +122,12 @@ def mount_preview_routes(app, config, identity, data, runner, limiter, write_rep
                 raise PreviewError("SCOPE_FORBIDDEN", 403)
         if not limiter.allow("preview-create:" + principal.user_id, config.forecast_rate_per_minute):
             raise PreviewError("RATE_001", 429)
-        return runner.submit(data.bind(token), principal, chain_ids=scopes, product_id=body.product_id,
-                             mode=body.mode, issue_period=body.issue_period, all_scopes=body.chain_id is None)
+        arguments = {"chain_ids": scopes, "product_id": body.product_id,
+                     "mode": body.mode, "issue_period": body.issue_period,
+                     "all_scopes": not bounded and body.chain_id is None}
+        if bounded:
+            arguments.update(product_ids=products_requested, objective=body.objective)
+        return runner.submit(source, principal, **arguments)
 
     @router.get("/preview-runs/{job_id}")
     def status(job_id: str, request: Request, authorization: str | None = Header(default=None)):

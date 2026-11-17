@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { PreviewReadError } from "@/lib/forecast-preview";
-import { defaultVisibility, quantity, scopeHorizons, scopeProvisionalHorizons, storedCommercialScope, traderPoints, type CustomerMonth, type HistoricalMonth, type SeriesVisibility } from "@/lib/forecast-chart-data";
+import { defaultVisibility, exactSelectionScope, quantity, scopeHorizons, scopeProvisionalHorizons, storedCommercialScope, traderPoints, type CustomerMonth, type HistoricalMonth, type SeriesVisibility } from "@/lib/forecast-chart-data";
 import { ForecastTraderChart } from "@/components/forecast/forecast-trader-chart";
 import { EngineComparison } from "@/components/forecast/engine-comparison";
 import { E4Operations } from "@/components/forecast/e4-operations";
@@ -17,12 +17,15 @@ import { currentRetrospectivePreview } from "@/lib/preview-presentation";
 import { hasCommercialFilters, previewScopeKey } from "@/lib/commercial-filters";
 import { PreviewPerformancePanel } from "@/components/forecast/preview-performance-panel";
 import type { VintageCapabilities, VintageDetail, VintageSummary } from "@/lib/forecast-preview";
-import { officialSourceKey, salesSourceAvailable, salesUnavailableMessage, sourceReadMessage } from "@/lib/official-sales-source";
+import { forecastObjective, forecastSourceAvailable, forecastTrainingCutoff, forecastUnavailableMessage, isOrderSource, officialSourceKey, salesUnavailableMessage, sourceReadMessage } from "@/lib/official-sales-source";
+import { buildForecastMatrix, emptyReportChoice } from "@/lib/forecast-reporting";
 
 const safeError = (error: unknown) => error instanceof PreviewReadError ? error.code : "DATA_READ_FAILED";
 const operationalErrorMessage = (code: string) => ({
   SALES_SOURCE_UNAVAILABLE: salesUnavailableMessage,
   SALES_PERIOD_NOT_CLOSED: "El periodo solicitado no tiene cierre de ventas acreditado.",
+  ORDER_CLOSURE_UNVERIFIED: "El cierre de Pedidos aún no está acreditado.",
+  ORDER_PERIOD_NOT_CLOSED: "El periodo solicitado no tiene cierre de Pedidos acreditado.",
   OFFICIAL_SOURCE_MISMATCH: "La fuente operativa no coincide con la fuente de ventas autorizada.",
   PREVIEW_NETWORK_FAILED: "No se pudo establecer la conexión con Railway. La solicitud no obtuvo respuesta del backend.",
   PREVIEW_REQUEST_ABORTED: "La solicitud se canceló antes de obtener respuesta. Vuelve a intentarlo sólo después de revisar la sesión.",
@@ -45,9 +48,8 @@ const labels = ["En cola", "Datos", "Elegibilidad", "Estadístico", "Machine Lea
 export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit?: () => void }) {
   const { repository, filters, profile, seriesVisibility, setSeriesVisibility, preview: sharedPreview, setPreview: sharedSetPreview } = useForecastFilters();
   const pin = useOperationPin();
-  const commercialMode = Boolean(filters.chainId && !filters.productId && (hasCommercialFilters(filters) || filters.search.trim() || filters.categoryId));
-  const aggregateReadOnly = commercialMode;
-  const storedMode = Boolean(filters.chainId && repository.getReportSnapshot && repository.openOperationalRead);
+  const commercialMode = Boolean(!filters.productId && (hasCommercialFilters(filters) || filters.search.trim() || filters.categoryId));
+  const storedMode = Boolean(repository.getReportSnapshot && repository.openOperationalRead && (filters.chainId || commercialMode || filters.productId));
   const stored = useRead(useCallback(async () => {
     if (!commercialMode && !storedMode) return null;
     if (!repository.getReportSnapshot) throw new Error("stored_scope_unavailable");
@@ -57,11 +59,16 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
   }, [repository, filters, pin, commercialMode, storedMode]));
   const client = repository.previews;
   const readOnly = client?.readOnly === true;
-  const salesBlocked = Boolean(stored.data?.sourceContext && !salesSourceAvailable(stored.data.sourceContext) || sourceReadMessage(stored.errorCode));
+  const salesBlocked = Boolean(stored.data?.sourceContext && !forecastSourceAvailable(stored.data.sourceContext) || sourceReadMessage(stored.errorCode));
+  const scopeSnapshot = useMemo(() => stored.data ? { ...stored.data, products: buildForecastMatrix(stored.data, emptyReportChoice, [null, null]).rows.map(row => row.product) } : null, [stored.data]);
   const selectionRead = useCurrentForecastSelection(client, filters.chainId, filters.productId);
   const [localVisibility, setLocalVisibility] = useState<SeriesVisibility>({ ...defaultVisibility });
   const [tab, setTab] = useState<EngineTab>("summary");
   const [e4Capabilities, setE4Capabilities] = useState<VintageCapabilities | null>(null);
+  const boundedPreview = Boolean(client?.createSelection && e4Capabilities?.local_bounded_preview && isOrderSource(stored.data?.sourceContext));
+  const aggregateReadOnly = commercialMode && !boundedPreview;
+  const calculationReadOnly = readOnly && !boundedPreview;
+  const exactSelectionMissing = boundedPreview && (!scopeSnapshot?.products.length || !(filters.chainId || filters.productId || filters.commercialModels?.length));
   useEffect(() => {
     let alive = true;
     if (client?.vintageCapabilities) void client.vintageCapabilities().then(flags => { if (alive) setE4Capabilities(flags); })
@@ -75,8 +82,10 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
   const visible = seriesVisibility ?? localVisibility, setVisible = setSeriesVisibility ?? setLocalVisibility;
   const [history, setHistory] = useState<{ key: string; rows: HistoricalMonth[]; customer: CustomerMonth[]; categoryName: string | null; error: boolean; customerError: boolean } | null>(null);
   const key = previewScopeKey(filters);
+  const operationKey = `${key}/${officialSourceKey(stored.data?.sourceContext, stored.errorCode)}`;
   const current = (sharedPreview === undefined ? localPreview : sharedPreview)?.key === key ? (sharedPreview === undefined ? localPreview : sharedPreview) : null;
   const revision = useRef(0), running = useRef(false);
+  const pendingOperation = useRef<{ key: string; operationKey: string } | null>(null);
   const visited = useRef(onVisit);
   useEffect(() => { visited.current?.(); return () => { revision.current += 1; }; }, []);
   // Standalone component fixtures retain their read path; the application root owns the shared read.
@@ -88,7 +97,14 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
     }).catch(error => { if (alive) setLocalPreview({ key, result: null, job: null, error: safeError(error), loading: false }); });
     return () => { alive = false; };
   }, [sharedPreview, client, filters.chainId, filters.productId, key]);
-  useEffect(() => { revision.current += 1; running.current = false; setExplicitIssuePeriod(""); }, [key]);
+  useEffect(() => {
+    revision.current += 1; running.current = false; setExplicitIssuePeriod("");
+    const previous = pendingOperation.current;
+    if (previous && previous.operationKey !== operationKey) {
+      pendingOperation.current = null;
+      setPreview(value => value?.key === previous.key ? null : value);
+    }
+  }, [operationKey, setPreview]);
   const jobId = current?.job?.job_id, status = current?.job?.status;
   useEffect(() => {
     if (!client || !jobId || !status || ["READY_PREVIEW", "READY_PROVISIONAL", "NOT_ELIGIBLE", "FAILED"].includes(status)) return;
@@ -98,38 +114,48 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
       try {
         const job = await client!.status(id);
         const result = ["READY_PREVIEW", "READY_PROVISIONAL"].includes(job.status) ? await client!.result(id, filters.productId) : null;
+        if (result && current?.job?.requested_product_ids && scopeSnapshot) exactSelectionScope(result, scopeSnapshot, filters);
         if (!alive || version !== revision.current) return;
         setPreview(previous => previous?.key === key ? { ...previous, job, result: ["READY_PREVIEW", "READY_PROVISIONAL"].includes(job.status) ? result ?? previous.result : ["NOT_ELIGIBLE", "FAILED"].includes(job.status) ? null : previous.result, error: "", loading: false } : previous);
         if (!["READY_PREVIEW", "READY_PROVISIONAL", "NOT_ELIGIBLE", "FAILED"].includes(job.status)) timer = setTimeout(poll, 2500);
-      } catch (error) { if (alive && version === revision.current) setPreview(previous => previous?.key === key ? { ...previous, error: safeError(error) } : previous); }
+      } catch (error) { if (alive && version === revision.current) setPreview(previous => previous?.key === key ? { ...previous,
+        ...(previous.job?.requested_product_ids ? { result: null, job: { ...previous.job, status: "FAILED" } } : {}), error: safeError(error) } : previous); }
     }
     timer = setTimeout(poll, 1500);
     return () => { alive = false; clearTimeout(timer); };
-  }, [client, jobId, status, key, filters.productId, setPreview]);
+  }, [client, jobId, status, key, operationKey, filters, setPreview, scopeSnapshot, current?.job?.requested_product_ids]);
   async function run() {
-    if (!client || running.current || aggregateReadOnly || readOnly || salesBlocked) return;
+    if (!client || running.current || aggregateReadOnly || calculationReadOnly || salesBlocked || stored.loading || stored.error || exactSelectionMissing) return;
     running.current = true;
+    pendingOperation.current = { key, operationKey };
     const version = ++revision.current;
     setPreview(previous => ({ key, job: null, result: previous?.key === key ? previous.result : null, error: "", loading: true }));
     try {
-      const job = explicitIssuePeriod
+      const job = boundedPreview && scopeSnapshot?.sourceContext && client.createSelection ? await client.createSelection({ objective: forecastObjective(scopeSnapshot.sourceContext)!,
+        chain_ids: [...new Set(scopeSnapshot.products.map(p => p.chain_id))].sort(), product_ids: scopeSnapshot.products.map(p => p.id).sort(),
+        issue_period: explicitIssuePeriod || null, source_context: scopeSnapshot.sourceContext }) : explicitIssuePeriod
         ? await client.create(filters.chainId, filters.productId, explicitIssuePeriod)
         : await client.create(filters.chainId, filters.productId);
-      if (revision.current === version) setPreview(previous => ({ key, job, result: previous?.key === key ? previous.result : null, error: "", loading: false }));
+      const result = ["READY_PREVIEW", "READY_PROVISIONAL"].includes(job.status) ? await client.result(job.job_id, filters.productId) : null;
+      if (boundedPreview && result && scopeSnapshot) exactSelectionScope(result, scopeSnapshot, filters);
+      if (revision.current === version) setPreview(previous => ({ key, job, result: result ?? (previous?.key === key ? previous.result : null), error: "", loading: false }));
     }
     catch (error) { if (revision.current === version) setPreview(previous => ({ key, job: null, result: previous?.key === key ? previous.result : null, error: safeError(error), loading: false })); }
     finally { if (revision.current === version) running.current = false; }
   }
   const busy = current?.loading || Boolean(current?.job && !["READY_PREVIEW", "READY_PROVISIONAL", "NOT_ELIGIBLE", "FAILED"].includes(current.job.status));
   const scopes = current?.job && ["NOT_ELIGIBLE", "FAILED"].includes(current.job.status) ? current.job.scopes : current?.result?.scopes ?? current?.job?.scopes ?? [];
-  const originalScope = filters.chainId ? scopes.find(s => s.chain_id === filters.chainId) ?? null : null;
+  const targetObjective = storedMode ? stored.data?.sourceContext ? forecastObjective(stored.data.sourceContext) : null : forecastObjective();
+  const originalScope = filters.chainId ? scopes.find(s => s.chain_id === filters.chainId && (s.objective ?? "Venta") === targetObjective) ?? null : null;
   const projection = useMemo(() => {
     try {
+      if (scopeSnapshot && current?.result?.requested_product_ids && current.result.requested_product_ids.length === scopeSnapshot.products.length
+        && current.result.requested_product_ids.every(id => scopeSnapshot.products.some(p => p.id === id))) return { scope: exactSelectionScope(current.result, scopeSnapshot, filters), error: false };
       const useStored = commercialMode || storedMode && (readOnly || Boolean(stored.data?.calculations.length) || !originalScope);
-      return { scope: (commercialMode || storedMode) && (stored.loading || stored.error) ? null : useStored ? stored.data ? storedCommercialScope(stored.data, filters, originalScope) : null : originalScope, error: false };
+      return { scope: (commercialMode || storedMode) && (stored.loading || stored.error) ? null : useStored ? scopeSnapshot?.products.length ? storedCommercialScope(scopeSnapshot, filters, originalScope) : null : originalScope, error: false };
     }
     catch { return { scope: null, error: true }; }
-  }, [commercialMode, storedMode, readOnly, stored.data, stored.loading, stored.error, filters, originalScope]);
+  }, [commercialMode, storedMode, readOnly, stored.data, stored.loading, stored.error, filters, originalScope, scopeSnapshot, current?.result]);
   const selected = projection.scope;
   const storedResults = selected?.stored_results;
   const operationalHistory = Boolean(e4Capabilities?.forecast_calculation_history || storedResults);
@@ -139,13 +165,13 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
   const historyKey = `${JSON.stringify(filters)}/${cutoff ?? ""}/${officialSourceKey(stored.data?.sourceContext ?? selected?.source_context, stored.errorCode)}`;
   useEffect(() => {
     let alive = true;
-    if (!filters.chainId) return;
+    if (!filters.chainId && !commercialMode) return;
     const readHistory = pin().then(context => repository.getForecastHistory?.(filters, context) ?? []);
     const readCustomer = cutoff && repository.getCustomerForecast ? pin().then(source => repository.getCustomerForecast!(filters, cutoff, source)) : Promise.resolve([]);
     const readCategories = filters.categoryId && repository.getCategories ? repository.getCategories(filters.chainId) : Promise.resolve([]);
     void Promise.allSettled([readHistory, readCustomer, readCategories]).then(([h, c, categories]) => { if (alive) setHistory({ key: historyKey, rows: h.status === "fulfilled" ? h.value : [], customer: c.status === "fulfilled" ? c.value : [], categoryName: categories.status === "fulfilled" ? categories.value.find(category => category.id === filters.categoryId && category.chain_id === filters.chainId)?.name ?? null : null, error: h.status === "rejected", customerError: c.status === "rejected" }); });
     return () => { alive = false; };
-  }, [repository, filters, cutoff, historyKey, pin]);
+  }, [repository, filters, cutoff, historyKey, pin, commercialMode]);
   const actual = history?.key === historyKey ? history : null;
   const ownStored = storedResults?.products.find(row => row.product_id === filters.productId);
   const currentSelection = storedMode && (stored.loading || stored.error || projection.error) ? null : storedResults ? ownStored?.decision && selectionRead?.calculation_id === ownStored.decision.calculation_id &&
@@ -164,18 +190,19 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
   const previous = Boolean(busy && current?.result);
   return <section className="space-y-5">
     <div className="flex flex-wrap items-start justify-between gap-3">
-      <div><h1 className="text-2xl font-semibold tracking-tight">Motores de Forecast</h1><p className="mt-2 text-sm text-slate-500">{scope}{filters.categoryId && ` · ${actual?.categoryName ?? "Categoría seleccionada"}`} · {product?.description ?? "Todos los productos"} · {storedResults?.objective ?? "Venta"}</p><p className="mt-1 text-xs text-slate-500">Datos reales hasta: {selected?.latest_actual_period ?? cutoff ?? "corte independiente por scope"} · {storedResults ? "Resultados almacenados · evaluación retrospectiva" : "Preview retrospectivo"}</p></div>
+      <div><h1 className="text-2xl font-semibold tracking-tight">Motores de Forecast</h1><p className="mt-2 text-sm text-slate-500">{scope}{filters.categoryId && ` · ${actual?.categoryName ?? "Categoría seleccionada"}`} · {product?.description ?? "Todos los productos"} · {storedResults?.objective ?? targetObjective ?? "Sin objetivo acreditado"}</p><p className="mt-1 text-xs text-slate-500">{isOrderSource(stored.data?.sourceContext) ? `Datos disponibles hasta: ${selected?.latest_actual_period ?? "Sin dato"} · Cierre acreditado: ${forecastTrainingCutoff(stored.data?.sourceContext) ?? "Sin acreditar"}` : `Datos reales hasta: ${selected?.latest_actual_period ?? cutoff ?? "corte independiente por scope"}`} · {storedResults ? "Resultados almacenados · evaluación retrospectiva" : "Preview retrospectivo"}</p></div>
       <div className="flex flex-wrap items-end gap-2">
-        <label className="text-xs text-slate-600">Corte explícito (opcional)<input type="month" min="2000-01" max="2099-12" value={explicitIssuePeriod} onChange={event => setExplicitIssuePeriod(event.target.value)} disabled={!client || profile.global_role === "VIEWER" || busy || aggregateReadOnly || readOnly || salesBlocked} className="mt-1 block rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm"/></label>
-        <Button onClick={() => void run()} disabled={!client || profile.global_role === "VIEWER" || busy || aggregateReadOnly || readOnly || salesBlocked}>{busy ? "Calculando vista previa…" : "Calcular vista previa"}</Button>
+        <label className="text-xs text-slate-600">Corte explícito (opcional)<input type="month" min="2000-01" max={forecastTrainingCutoff(stored.data?.sourceContext) ?? "2099-12"} value={explicitIssuePeriod} onChange={event => setExplicitIssuePeriod(event.target.value)} disabled={!client || profile.global_role === "VIEWER" || busy || aggregateReadOnly || calculationReadOnly || salesBlocked || exactSelectionMissing} className="mt-1 block rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm"/></label>
+        <Button onClick={() => void run()} disabled={!client || profile.global_role === "VIEWER" || busy || aggregateReadOnly || calculationReadOnly || salesBlocked || stored.loading || stored.error || exactSelectionMissing}>{busy ? "Calculando vista previa…" : "Calcular vista previa"}</Button>
       </div>
     </div>
-    <p className="border-l-2 border-blue-200 pl-3 text-xs leading-5 text-slate-500">Vista previa retrospectiva. Los datos históricos están certificados en valor, pero no en fecha original de disponibilidad; las métricas no constituyen certificación point-in-time.</p>
+    <p className="border-l-2 border-blue-200 pl-3 text-xs leading-5 text-slate-500">Vista previa retrospectiva. {isOrderSource(stored.data?.sourceContext) ? "Los históricos de Pedido están autorizados como fuente, pero no acreditan su fecha original de disponibilidad" : "Los datos históricos están certificados en valor, pero no en fecha original de disponibilidad"}; las métricas no constituyen certificación point-in-time.</p>
     {(commercialMode || storedMode) && stored.loading && <p role="status" className="text-sm text-slate-500">Consultando cálculos almacenados del alcance comercial…</p>}
     {(commercialMode || storedMode) && (stored.error || projection.error) && <p role="alert" className="text-sm text-rose-700">{sourceReadMessage(stored.errorCode) ?? "No fue posible consultar los cálculos del alcance comercial. No se sustituyen por el total de la cadena."}</p>}
-    {stored.data?.sourceContext && !salesSourceAvailable(stored.data.sourceContext) && <p role="status" className="text-sm text-slate-600">{salesUnavailableMessage}</p>}
-    {selected?.commercial_projection && <p role="status" className="text-xs text-slate-600">Consulta almacenada · {selected.commercial_projection.products} productos · Estadístico {selected.commercial_projection.statistical}/{selected.commercial_projection.products} · ML {selected.commercial_projection.ml}/{selected.commercial_projection.products} · Ensemble {selected.commercial_projection.ensemble}/{selected.commercial_projection.products}{selected.commercial_projection.ml < selected.commercial_projection.products || selected.commercial_projection.statistical < selected.commercial_projection.products ? " · TOTAL PARCIAL" : ""}. Las curvas suman sus variantes; no se promedian WAPE ni Bias del grupo.</p>}
-    {readOnly ? <p role="status" className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">Entorno local de sólo lectura: calcular, recalcular, adoptar, capturar y publicar están bloqueados. Consultar resultados guardados no ejecuta los motores.</p> : aggregateReadOnly && <p className="text-xs text-slate-500">Este alcance comercial consulta resultados almacenados. Selecciona una variante para ejecutar el contrato de cálculo existente.</p>}
+    {stored.data?.sourceContext && !forecastSourceAvailable(stored.data.sourceContext) && <p role="status" className="text-sm text-slate-600">{forecastUnavailableMessage(stored.data.sourceContext)} No se han definido H1–H3.</p>}
+    {exactSelectionMissing && <p className="text-sm text-slate-600">Selecciona un modelo o una cadena para calcular únicamente sus productos autorizados.</p>}
+    {selected?.commercial_projection && <p role="status" className="text-xs text-slate-600">{selected.commercial_projection.source === "EXACT_SELECTION" ? "Vista previa de selección exacta" : "Consulta almacenada"} · {selected.commercial_projection.products} productos · Estadístico {selected.commercial_projection.statistical}/{selected.commercial_projection.products} · ML {selected.commercial_projection.ml}/{selected.commercial_projection.products} · Ensemble {selected.commercial_projection.ensemble}/{selected.commercial_projection.products}{selected.commercial_projection.ml < selected.commercial_projection.products || selected.commercial_projection.statistical < selected.commercial_projection.products ? " · TOTAL PARCIAL" : ""}. Las curvas suman sus variantes; no se promedian WAPE ni Bias del grupo.</p>}
+    {readOnly ? <p role="status" className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">{boundedPreview ? "Sólo se admite el preview local acotado a productos autorizados y con cierre acreditado. Adoptar, capturar, publicar y crear cálculos E4 permanecen bloqueados." : "Entorno local de sólo lectura: calcular, recalcular, adoptar, capturar y publicar están bloqueados."} Consultar resultados guardados no ejecuta los motores.</p> : aggregateReadOnly && <p className="text-xs text-slate-500">Este alcance comercial consulta resultados almacenados. Selecciona una variante para ejecutar el contrato de cálculo existente.</p>}
     {commercialMode && originalScope && current?.result && currentRetrospectivePreview(current.result, originalScope) && <details className="rounded-xl border bg-white p-4"><summary className="cursor-pointer text-sm font-semibold">Métricas globales de cadena · {originalScope.eligibility?.evaluated ?? "Sin dato"} productos · Fuera del filtro comercial</summary><div className="mt-3"><PreviewPerformancePanel job={current.result} scope={originalScope} productId={null} historical/></div></details>}
     {profile.global_role === "VIEWER" && <p className="text-sm text-slate-500">Sólo consulta: no tienes permiso para iniciar corridas.</p>}
     {!client && <p className="text-sm text-slate-500">Conexión operacional pendiente de configuración.</p>}
@@ -183,7 +210,7 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
     {current?.job && <div role="status" className="rounded-xl border bg-white p-3 text-sm"><span>{storedResults ? "Resultados almacenados" : noEligible ? "Historial insuficiente" : humanStatus(current.job.status)}</span>{busy && <ol className="mt-3 flex flex-wrap gap-3 text-xs">{labels.map((label, i) => <li key={label} className={i === stages.indexOf(current.job!.status) ? "font-semibold text-blue-700" : "text-slate-500"}>{i < stages.indexOf(current.job!.status) ? "✓" : i === stages.indexOf(current.job!.status) ? "●" : "○"} {label}</li>)}</ol>}</div>}
     {noTowellHistory && <p role="status" className="text-sm text-slate-600">Sin historial Towell; sin pronóstico</p>}
     {noEligible && <p role="status" className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">{product?.forecast_status === "INSUFFICIENT" && product.history_months !== undefined
-      ? `${product.description}: ${product.history_months} meses de venta consecutivos después de su primera venta; el pronóstico validado requiere ${product.minimum_history_months ?? 6}. No se ejecutaron los modelos estadísticos ni ML para este producto. Una estimación cold start necesitará validación separada antes de mostrarse.`
+      ? `${product.description}: ${product.history_months} meses de ${targetObjective === "Pedido" ? "pedido" : "venta"} consecutivos después de su primer registro; el pronóstico validado requiere ${product.minimum_history_months ?? 6}. No se ejecutaron los modelos estadísticos ni ML para este producto. Una estimación cold start necesitará validación separada antes de mostrarse.`
       : product ? `${product.description}: ${humanStatus(product.forecast_status)}. No hay pronóstico validado ni métricas retrospectivas de este producto.`
       : "Ningún producto de este alcance cumple todavía los mínimos de historial para un pronóstico validado. No se generaron cifras."}</p>}
     {current?.job?.status === "FAILED" && selected?.error_code && selected.error_code !== "NO_ELIGIBLE_PRODUCTS" && <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">El cálculo no se completó. Código: {selected.error_code}. No se publicó ningún pronóstico.</p>}
@@ -199,12 +226,12 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
       <div className="border-t border-blue-200 pt-3"><h3 className="font-medium">Investigación pública complementaria</h3>{provisional.research?.status === "PENDING" ? <p>Consultando fuentes públicas…</p> : provisional.research?.status === "COMPLETED" ? <><p className="whitespace-pre-wrap">{provisional.research.summary}</p><ul>{provisional.research.sources?.map(source => <li key={source.url}><a className="underline" href={source.url} target="_blank" rel="noopener noreferrer">{source.title}</a></li>)}</ul></> : <p>{provisional.research?.status === "DISABLED" ? "No habilitada en el servidor. La estimación cuantitativa no depende de esta consulta." : `${researchFailure(provisional.research?.reason)} La estimación cuantitativa permanece independiente.`}</p>}</div>
     </section>}
     <ForecastEnginesTabs value={tab} onChange={setTab} operational={operationalHistory}/>
-    {tab === "decision" && operationalHistory && client && <div role="tabpanel" id="engine-panel-decision" aria-labelledby="engine-tab-decision" className="space-y-5">{storedResults && selected && <EngineComparison scope={selected} horizons={horizons} productId={filters.productId}/>}<E4Operations key={`${key}/decision`} mode="decision" client={client} chainId={filters.chainId} productId={filters.productId} canWrite={!readOnly && profile.global_role !== "VIEWER"} canDecide={!readOnly && profile.global_role === "ADMIN" && Boolean(e4Capabilities?.forecast_selection)}/></div>}
-    {tab === "history" && operationalHistory && client && <div role="tabpanel" id="engine-panel-history" aria-labelledby="engine-tab-history"><E4Operations key={`${key}/history`} mode="history" client={client} chainId={filters.chainId} productId={filters.productId} canWrite={!readOnly && profile.global_role !== "VIEWER"} canDecide={false}><VintagesPanel key={filters.chainId ?? "all"} chainId={filters.chainId}/></E4Operations></div>}
+    {tab === "decision" && operationalHistory && client && <div role="tabpanel" id="engine-panel-decision" aria-labelledby="engine-tab-decision" className="space-y-5">{selected && <EngineComparison scope={selected} horizons={horizons} productId={filters.productId}/>}<E4Operations key={`${key}/${officialSourceKey(stored.data?.sourceContext)}/decision`} mode="decision" client={client} chainId={filters.chainId} productId={filters.productId} canWrite={!readOnly && profile.global_role !== "VIEWER"} canDecide={!readOnly && profile.global_role === "ADMIN" && Boolean(e4Capabilities?.forecast_selection)}/></div>}
+    {tab === "history" && operationalHistory && client && <div role="tabpanel" id="engine-panel-history" aria-labelledby="engine-tab-history"><E4Operations key={`${key}/${officialSourceKey(stored.data?.sourceContext)}/history`} mode="history" client={client} chainId={filters.chainId} productId={filters.productId} canWrite={!readOnly && profile.global_role !== "VIEWER"} canDecide={false}><VintagesPanel key={filters.chainId ?? "all"} chainId={filters.chainId}/></E4Operations></div>}
     {tab === "vintages" && <div role="tabpanel" id="engine-panel-vintages" aria-labelledby="engine-tab-vintages"><VintagesPanel key={filters.chainId ?? "all"} chainId={filters.chainId}/></div>}
     {tab === "statistical" && <div role="tabpanel" id="engine-panel-statistical" aria-labelledby="engine-tab-statistical" className="space-y-4">{provisional ? <><p className="rounded-xl border bg-white p-5 text-sm text-slate-600">El motor estadístico validado requiere más historial propio. Se grafica el líder provisional de comparables, no un pronóstico estadístico certificado ni un WAPE de este producto.</p><ForecastTraderChart points={points} cutoff={cutoff} visible={visible} onChange={series => setVisible(v => ({ ...v, [series]: !v[series] }))}/></> : noEligible ? <p className="rounded-xl border bg-white p-5 text-sm text-slate-600">No se ejecutó el motor estadístico: el producto no reúne el historial mínimo. No hay WAPE, Bias ni pronóstico que mostrar.</p> : <StatisticalEngineDetail scope={stale ? null : selected} scopes={stale ? [] : scopes} filters={filters} historical={actual?.rows ?? []} historyError={actual?.error} cutsStatus={current?.result?.cuts_status ?? current?.job?.cuts_status} compareTowell={compareTowell} onCompare={() => setCompareTowell(v => !v)}/>}</div>}
     {tab === "ml" && <div role="tabpanel" id="engine-panel-ml" aria-labelledby="engine-tab-ml" className="space-y-4">{provisional ? <><p className="rounded-xl border bg-white p-5 text-sm text-slate-600">Random Forest global, trayectoria análoga y baseline se evaluaron con comparables. La línea muestra sólo el método provisional elegido; no inventamos una línea ML separada cuando Random Forest no ganó.</p><ForecastTraderChart points={points} cutoff={cutoff} visible={visible} onChange={series => setVisible(v => ({ ...v, [series]: !v[series] }))}/></> : noEligible ? <p className="rounded-xl border bg-white p-5 text-sm text-slate-600">No se ejecutó Machine Learning para este producto. No se atribuyen métricas de otros productos al producto seleccionado.</p> : <MLEngineDetail scope={stale ? null : selected} scopes={stale ? [] : scopes} filters={filters} historical={actual?.rows ?? []} horizons={horizons} historyError={actual?.error} cutsStatus={current?.result?.cuts_status ?? current?.job?.cuts_status}/>}</div>}
-    {tab === "summary" && <div role="tabpanel" id="engine-panel-summary" aria-labelledby="engine-tab-summary" className="space-y-5">{filters.chainId ? <>
+    {tab === "summary" && <div role="tabpanel" id="engine-panel-summary" aria-labelledby="engine-tab-summary" className="space-y-5">{filters.chainId || selected?.commercial_projection ? <>
       {!noEligible && !provisional && <ForecastSummary scope={selected} horizons={horizons}/>}
       {product && <p className="text-sm text-slate-500">{product.description} · {humanStatus(product.forecast_status)}{!horizons.length && !provisional && ` · Sin forecast elegible: ${product.forecast_status}`}</p>}
       {actual?.error && <p role="alert" className="text-sm text-rose-700">No fue posible consultar el histórico para la gráfica.</p>}

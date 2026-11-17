@@ -1,7 +1,7 @@
 import { addReportMonth, buildForecastMatrix, matrixTotal, type ForecastMatrixRow, type ReportChoice, type ReportSeries, type ReportSnapshot } from "./forecast-reporting";
 import type { Filters, HistoricalRow, OperationalInventory } from "./supabase/types";
 import { modelKey } from "./commercial-filters";
-import { salesSourceAvailable } from "./official-sales-source";
+import { forecastObjective, forecastHistoryAvailable, forecastTrainingCutoff } from "./official-sales-source";
 
 export const monthNames = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
 export const dashboardSeries = {
@@ -13,6 +13,15 @@ export const dashboardSeries = {
   customer: { label: "Forecast Cliente", color: "#8263a3" },
 };
 export type DashboardSeries = keyof typeof dashboardSeries;
+export function dashboardLabel(series: DashboardSeries, objective: string) {
+  if (objective === "Pedido") {
+    if (series === "previous1") return "Pedido año −1";
+    if (series === "previous2") return "Pedido año −2";
+    if (series === "order") return "Pedido histórico";
+    if (series === "inventory") return "Inventario en tienda";
+  }
+  return dashboardSeries[series].label;
+}
 type Quantity = { value: number | null; exact?: string; covered: number; eligible: number };
 export type DashboardFillRate = { value: number | null; ordered: number | null; delivered: number | null; orderedExact: string | null; deliveredExact: string | null; covered: number; eligible: number };
 export type DashboardPoint = { month: string; period: string; horizon: number | null; values: Record<DashboardSeries, number | null>; coverage: Record<DashboardSeries, Quantity>; fillRate?: DashboardFillRate };
@@ -21,7 +30,7 @@ function quantity(values: (number | null)[], eligible: number): Quantity {
   const found = values.filter((v): v is number => v !== null);
   return { value: found.length ? found.reduce((sum, n) => sum + n, 0) : null, covered: found.length, eligible };
 }
-function exactQuantity(values: (string | null)[], eligible: number): Quantity {
+export function exactQuantity(values: (string | null)[], eligible: number): Quantity {
   const parts = values.filter((value): value is string => value !== null).map(value => value.split("."));
   if (!parts.length) return { value: null, covered: 0, eligible };
   const scale = Math.max(...parts.map(([, decimals]) => decimals?.length ?? 0));
@@ -52,7 +61,9 @@ export const shortPeriod = (period: string) => `${monthNames[Number(period.slice
 export function periodsDashboard(snapshot: ReportSnapshot, history: HistoricalRow[], choice: ReportChoice, range: Filters["periodRange"], inventory: OperationalInventory[] = []) {
   const matrix = buildForecastMatrix(snapshot, choice, range);
   const allowed = new Map(matrix.rows.map(r => [r.product.id, r.product.chain_id]));
-  const rows = salesSourceAvailable(snapshot.sourceContext) ? history.filter(r => allowed.get(r.product_id) === r.chain_id) : [];
+  const objective = forecastObjective(snapshot.sourceContext);
+  const historicalMetric = objective === "Pedido" ? "ORDER" : "SALES";
+  const rows = forecastHistoryAvailable(snapshot.sourceContext) ? history.filter(r => allowed.get(r.product_id) === r.chain_id) : [];
   const seen = new Set<string>();
   for (const row of rows) {
     const key = `${row.chain_id}/${row.product_id}/${row.period.slice(0, 7)}`;
@@ -66,32 +77,34 @@ export function periodsDashboard(snapshot: ReportSnapshot, history: HistoricalRo
     if (stockKeys.has(key) || !/^\d+(?:\.\d+)?$/.test(row.quantity_text)) throw new Error("duplicate_or_invalid_inventory");
     stockKeys.add(key);
   }
-  const cutoff = matrix.issue ?? snapshot.sourceContext?.last_period ?? rows.filter(r => r.SALES !== null || r.ORDER !== null || r.DELIVERY !== null).map(r => r.period.slice(0, 7)).sort().at(-1) ?? null;
+  const cutoff = objective === "Pedido" ? matrix.issue ?? forecastTrainingCutoff(snapshot.sourceContext) ?? null : matrix.issue ?? snapshot.sourceContext?.last_period ?? rows.filter(r => r.SALES !== null || r.ORDER !== null || r.DELIVERY !== null).map(r => r.period.slice(0, 7)).sort().at(-1) ?? null;
+  const historySlots = !cutoff && objective === "Pedido" ? 12 : 9;
+  const axisEnd = cutoff ?? snapshot.sourceContext?.last_period ?? null;
   const eligible = allowed.size;
-  const points: DashboardPoint[] = cutoff ? Array.from({ length: 12 }, (_, i) => {
-    const period = addReportMonth(cutoff, i - 8);
+  const points: DashboardPoint[] = axisEnd ? Array.from({ length: 12 }, (_, i) => {
+    const period = addReportMonth(axisEnd, i - historySlots + 1);
     const metrics = {} as Record<DashboardSeries, Quantity>;
-    for (const [key, offset, field] of [["previous2", -24, "SALES"], ["previous1", -12, "SALES"], ["actual", 0, "SALES"], ["order", 0, "ORDER"], ["delivery", 0, "DELIVERY"]] as const) {
+    for (const [key, offset, field] of [["previous2", -24, historicalMetric], ["previous1", -12, historicalMetric], ["actual", 0, "SALES"], ["order", 0, "ORDER"], ["delivery", 0, "DELIVERY"]] as const) {
       const target = addReportMonth(period, offset);
       const members = rows.filter(row => row.period.slice(0, 7) === target);
-      metrics[key] = !inRange(period, range) || offset === 0 && i >= 9 ? { value: null, covered: 0, eligible }
+      metrics[key] = !inRange(period, range) || offset === 0 && i >= historySlots ? { value: null, covered: 0, eligible }
         : exactQuantity(members.map(row => row.exact?.[field] ?? (row[field] === null ? null : String(row[field]))), eligible);
     }
     metrics.inventory = inRange(period, range) ? exactQuantity(stock.filter(row => row.period.slice(0, 7) === period).map(row => row.quantity_text), eligible) : { value: null, covered: 0, eligible };
     metrics.towellHistory = inRange(period, range) ? exactQuantity(rows.filter(row => row.period.slice(0, 7) === period).map(row => row.exact?.FCST_TOWELL_HISTORY ?? null), eligible) : { value: null, covered: 0, eligible };
     for (const series of ["STATISTICAL", "ML", "ENSEMBLE", "COLD_START", "TOWELL"] as ReportSeries[]) {
-      metrics[series] = i >= 9 && inRange(period, range) ? matrixTotal(matrix.rows, period, series) : { value: null, covered: 0, eligible };
+      metrics[series] = i >= historySlots && inRange(period, range) ? matrixTotal(matrix.rows, period, series) : { value: null, covered: 0, eligible };
     }
     // Latest validated version known at the selected cut; never sum versions.
-    const customer = matrix.rows.map(r => snapshot.customers.filter(c => c.chain_id === r.product.chain_id && c.product_id === r.product.id && c.target_period.slice(0, 7) === period && c.issue_period.slice(0, 7) <= cutoff)
+    const customer = matrix.rows.map(r => snapshot.customers.filter(c => c.chain_id === r.product.chain_id && c.product_id === r.product.id && c.target_period.slice(0, 7) === period && c.issue_period.slice(0, 7) <= axisEnd)
       .sort((a, b) => a.issue_period.localeCompare(b.issue_period) || a.version_no - b.version_no).at(-1)?.value ?? null);
     metrics.customer = snapshot.sourceContext
       ? inRange(period, range) ? exactQuantity(rows.filter(row => row.period.slice(0, 7) === period).map(row => row.exact?.FCST_CLIENTE_HISTORY ?? null), eligible) : { value: null, covered: 0, eligible }
-      : i >= 9 && inRange(period, range) ? quantity(customer, eligible) : { value: null, covered: 0, eligible };
-    const fillRate = monthlyFillRate(i < 9 && inRange(period, range) ? rows.filter(row => row.period.slice(0, 7) === period) : [], eligible);
-    return { month: shortPeriod(period), period, horizon: i >= 9 ? i - 8 : null, coverage: metrics, values: Object.fromEntries(Object.entries(metrics).map(([k, q]) => [k, q.value])) as DashboardPoint["values"], fillRate };
+      : i >= historySlots && inRange(period, range) ? quantity(customer, eligible) : { value: null, covered: 0, eligible };
+    const fillRate = monthlyFillRate(i < historySlots && inRange(period, range) ? rows.filter(row => row.period.slice(0, 7) === period) : [], eligible);
+    return { month: shortPeriod(period), period, horizon: i >= historySlots ? i - historySlots + 1 : null, coverage: metrics, values: Object.fromEntries(Object.entries(metrics).map(([k, q]) => [k, q.value])) as DashboardPoint["values"], fillRate };
   }) : [];
-  const historicalPeriods = new Set(points.slice(0, 9).filter(p => inRange(p.period, range)).map(p => p.period));
+  const historicalPeriods = new Set(points.slice(0, historySlots).filter(p => inRange(p.period, range)).map(p => p.period));
   const actual = rows.filter(r => historicalPeriods.has(r.period.slice(0, 7)));
   const sum = (field: "SALES" | "ORDER" | "DELIVERY") => quantity(actual.map(r => r[field]), eligible * historicalPeriods.size).value;
   const paired = actual.filter(r => r.ORDER !== null && r.DELIVERY !== null);
@@ -107,7 +120,7 @@ export function periodsDashboard(snapshot: ReportSnapshot, history: HistoricalRo
     const calculated = products.filter(r => r.calculation).length, decided = products.filter(r => r.adopted).length;
     return { ...group, total: products.length, calculated, pending: products.length - calculated, decided, undecided: products.length - decided };
   });
-  return { matrix, cutoff, points, coverage, sourceContext: snapshot.sourceContext, actualMonths: points.slice(0, 9).filter(p => p.coverage.actual.covered > 0).length,
+  return { matrix, cutoff, points, coverage, objective, historySlots, sourceContext: snapshot.sourceContext, actualMonths: points.slice(0, historySlots).filter(p => p.coverage[objective === "Pedido" ? "order" : "actual"].covered > 0).length,
     priorComplete: [completeness("previous2"), completeness("previous1")],
     kpis: { sales: sum("SALES"), orders: sum("ORDER"), delivery: sum("DELIVERY"), fillRate: orders > 0 ? deliveries / orders * 100 : null, paired: paired.length, expectedPairs: eligible * historicalPeriods.size },
     available: matrix.rows.filter(r => r.calculation).length, adopted: matrix.rows.filter(r => r.adopted).length };

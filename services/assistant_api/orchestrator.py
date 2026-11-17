@@ -248,9 +248,14 @@ class ForecastOrchestrator:
         if research is not None:
             parts.append("La investigación pública complementa el análisis comercial. Sus hallazgos no cambian el pronóstico.")
         if forecast is not None:
-            parts.append("Pronóstico provisional de Venta sobre las variantes RS acreditadas. Compara la cobertura por motor y el WAPE y Bias retrospectivos cuando estén disponibles. La evaluación LIVE requiere evidencia temporal.")
+            objective = "Pedido" if scope.get("objective") == "Pedido" else "Venta"
+            parts.append(f"Pronóstico provisional de {objective} sobre las variantes RS acreditadas. Compara la cobertura por motor y el WAPE y Bias retrospectivos cuando estén disponibles. La evaluación LIVE requiere evidencia temporal.")
         elif any(word in topic for word in ("forecast", "pronostic", "wape", "bias", "motor", "sesgo")):
-            parts.append("No hay un cálculo para esta selección y versión. Usa Calcular / consultar pronóstico RS. WAPE y Bias LIVE requieren evidencia temporal independiente.")
+            context = scoped.get("source_context") or {}
+            if context.get("forecast_block_code") == "ORDER_CLOSURE_UNVERIFIED":
+                parts.append("Sin cálculo: cierre de Pedido no acreditado. El histórico capturado puede consultarse; no acredita un mes cerrado ni WAPE LIVE.")
+            else:
+                parts.append("No hay un cálculo para esta selección y versión. Usa Calcular / consultar pronóstico RS. WAPE y Bias LIVE requieren evidencia temporal independiente.")
         if any(word in topic for word in ("wape", "bias", "sesgo", "compar")):
             parts.append("Un WAPE menor indica menor error absoluto ponderado. En este motor el Bias usa real menos pronóstico, por lo que un valor positivo indica subestimación y uno negativo sobreestimación. Compara métricas sólo con periodos y coberturas equivalentes.")
         if any(word in topic for word in ("inventario", "desabasto", "sobreinvent", "riesgo", "recomend")):

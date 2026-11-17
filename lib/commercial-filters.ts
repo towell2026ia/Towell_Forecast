@@ -18,6 +18,11 @@ export function scopedQueryChainId(filters: Filters): string | undefined {
   return ids?.length === 1 ? ids[0] : undefined;
 }
 export function previewScopeKey(filters: Filters) {
+  if (hasCommercialFilters(filters) || filters.search || filters.categoryId) {
+    return JSON.stringify([filters.chainId, selectedScopeIds(filters)?.sort() ?? null, filters.purchaseType ?? null,
+      filters.productId, filters.categoryId, filters.search, filters.commercialType ?? null, filters.commercialModels?.map(modelKey).sort() ?? null,
+      filters.commercialSize ?? null, filters.commercialColor ?? null, filters.classificationStatus ?? null]);
+  }
   return !filters.purchaseType && filters.scopeChainIds === undefined ? `${filters.chainId}/${filters.productId}` :
     JSON.stringify([filters.purchaseType ?? null, filters.chainId, selectedScopeIds(filters)?.sort() ?? null, filters.productId]);
 }

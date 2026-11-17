@@ -130,6 +130,8 @@ class SupabaseDataProvider(DataProvider):
 
     def source_context(self):
         context = self.client.operational_context()
+        from .supabase_access import require_sales_context
+        require_sales_context(context)
         if context.get("sales_available") is False:
             from .supabase_access import PreviewError
             raise PreviewError("SALES_SOURCE_UNAVAILABLE", 503)
@@ -177,22 +179,27 @@ class SupabaseDataProvider(DataProvider):
     def load(self, name: str) -> dict[str, Any]:
         raise NotImplementedError("preview_only_no_legacy_snapshots")
 
-    def records(self, *, chain_id: str, product_id: str | None = None, objective: str = "Venta",
+    def records(self, *, chain_id: str, product_id: str | None = None, objective: str | None = None,
                 issue_period: str | None = None, mode: str = "RETROSPECTIVE_TRAINING") -> list[dict[str, Any]]:
-        from .supabase_access import PreviewError, uuid_value
+        from .supabase_access import PreviewError, uuid_value, forecast_objective, forecast_cutoff
         from services.forecast_engine.engine import month_end
         if not self.client:
             raise PreviewError("AUTH_REQUIRED", 401)
         chain_id = uuid_value(chain_id)
-        if objective != "Venta" or mode not in {"RETROSPECTIVE_TRAINING", "POINT_IN_TIME"}:
+        if mode not in {"RETROSPECTIVE_TRAINING", "POINT_IN_TIME"}:
             raise PreviewError("REQUEST_001")
         context = self.source_context()
-        training_cutoff = context.get("sales_training_cutoff")
+        active_objective = forecast_objective(context)
+        objective = objective or active_objective
+        if objective != active_objective:
+            raise PreviewError("FORECAST_OBJECTIVE_MISMATCH", 409)
+        metric = "ORDER" if objective == "Pedido" else "SALES"
+        training_cutoff = forecast_cutoff(context)
         if training_cutoff:
             if issue_period and issue_period > training_cutoff:
                 raise PreviewError("SALES_PERIOD_NOT_CLOSED", 409)
             issue_period = issue_period or training_cutoff
-        params = {"select": "*", "chain_id": f"eq.{chain_id}", "metric_code": "eq.SALES",
+        params = {"select": "*", "chain_id": f"eq.{chain_id}", "metric_code": f"eq.{metric}",
                   "order": "product_id.asc,period.asc"}
         if product_id:
             params["product_id"] = f"eq.{uuid_value(product_id)}"
@@ -207,7 +214,7 @@ class SupabaseDataProvider(DataProvider):
         records, seen = [], set()
         for row in self.client.observation_rows(params, mode="TEMPORAL" if temporal else "OPERATIONAL",
                                                 available_through=available_through, chain_id=chain_id):
-            if row.get("chain_id") != chain_id or row.get("metric_code") != "SALES" or row.get("product_id") not in products \
+            if row.get("chain_id") != chain_id or row.get("metric_code") != metric or row.get("product_id") not in products \
                     or product_id and row.get("product_id") != product_id:
                 raise PreviewError("DATA_READ_FAILED", 503)
             identity = (chain_id, row["product_id"], row["period"])
@@ -223,10 +230,10 @@ class SupabaseDataProvider(DataProvider):
                 "product_code": product["product_code"], "description": product["description"],
                 "variant": source[product["id"]].get("color") or "", "category_id": category,
                 "category": source[product["id"]].get("product_type") or "UNCLASSIFIED", "category_name": source[product["id"]].get("product_type") or "Sin categoría",
-                "period": row["period"][:7], "objective": "Venta", "value": row.get("value_text", row["value"]),
+                "period": row["period"][:7], "objective": objective, "target_metric": metric, "value": row.get("value_text", row["value"]),
                 "available_at": row.get("available_at"), "availability_source": row.get("availability_source"),
                 "source_id": row.get("observation_id") or row.get("id"), "version_no": row.get("version_no"),
-                "source_batch_id": row.get("source_batch_id"), "evidence_mode": mode})
+                "source_batch_id": row.get("source_batch_id"), "source_reference": row.get("source_reference"), "evidence_mode": mode})
         return records
 
     def decisions(self) -> list[dict[str, Any]]:

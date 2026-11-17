@@ -7,7 +7,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from .auth import ADMIN, EXECUTE, AuthFailure, authorize
 from .calculation_history import snapshot_from_preview, live_metrics, validate_selection
 from .operational_preview import snapshot_hash
-from .supabase_access import PreviewError, matches_source, require_sales_context, uuid_value
+from .supabase_access import (PreviewError, matches_source, require_sales_context, uuid_value,
+                              forecast_objective, forecast_cutoff, accredited_context)
 
 
 class CalculationRequest(BaseModel):
@@ -122,17 +123,20 @@ def mount_e4_routes(app, config, identity, data, runner, writer):
         catalog = source.product_catalog(chain)
         if not any(row["id"] == product for row in catalog):
             raise PreviewError("SCOPE_FORBIDDEN", 403)
-        preview = runner.persistence.get("forecast_previews", body.preview_id)
-        if not preview or preview.get("chain_id") != chain or preview.get("objective") != "Venta":
-            raise PreviewError("PREVIEW_NOT_READY", 409)
         context = source.client.operational_context()
         require_sales_context(context, required=getattr(config, "local_postgres_config", None) is not None)
+        preview = runner.persistence.get("forecast_previews", body.preview_id)
+        if not preview or preview.get("chain_id") != chain or preview.get("objective") != forecast_objective(context):
+            raise PreviewError("PREVIEW_NOT_READY", 409)
         if (not matches_source(preview.get("source_context"), context)
-                or context.get("sales_contract") == "towell-sales-v1"
-                   and str(preview.get("issue_period", "")) > context["sales_training_cutoff"]):
+                or accredited_context(context)
+                   and str(preview.get("issue_period", "")) > forecast_cutoff(context)):
             raise PreviewError("PREVIEW_NOT_READY", 409)
         rows = source.records(chain_id=chain, issue_period=preview["issue_period"],
             mode=preview.get("mode") or preview.get("evidence_mode") or "RETROSPECTIVE_TRAINING")
+        requested_ids = preview.get("requested_product_ids")
+        if requested_ids:
+            rows = [row for row in rows if row.get("product_id") in requested_ids]
         if snapshot_hash(rows) != preview.get("dataset_hash"):
             raise PreviewError("HASH_MISMATCH", 409)
         payload = snapshot_from_preview(preview, product_id=product, preview_id=body.preview_id,

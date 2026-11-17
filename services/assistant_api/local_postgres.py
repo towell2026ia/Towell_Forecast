@@ -145,6 +145,8 @@ class LocalPostgresGateway:
         except PreviewError as exc:
             return _response(exc.status, {"code": exc.code,
                 "message": "Sin cálculo: fuente de ventas no disponible" if exc.code == "SALES_SOURCE_UNAVAILABLE"
+                else "Sin cálculo: fuente de pedidos no disponible" if exc.code == "ORDER_SOURCE_UNAVAILABLE"
+                else "Sin cálculo: cierre de Pedido no acreditado" if exc.code == "ORDER_CLOSURE_UNVERIFIED"
                 else "Fuente anterior excluida; se requiere la fuente de ventas autorizada"})
         except Exception as exc:
             import psycopg
@@ -215,6 +217,10 @@ class LocalPostgresGateway:
                         "where fc.id=calculation_id and ") + predicate + sql.SQL(")")
                 conditions.append(predicate)
                 values.extend([sales_context["source_hash"], str(sales_context["generation"])])
+                if sales_context.get("forecast_available") is False:
+                    # The history-only ORDER source has no accredited training
+                    # cutoff. Report no current calculation, never a retired one.
+                    conditions.append(sql.SQL("false"))
             def logical(expression):
                 """Cursor predicates, parsed into identifiers and bound values only."""
                 def split(text):

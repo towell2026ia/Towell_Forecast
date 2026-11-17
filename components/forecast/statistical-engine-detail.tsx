@@ -1,7 +1,7 @@
 "use client";
 import type { PreviewScope } from "@/lib/forecast-preview";
 import type { Filters } from "@/lib/supabase/types";
-import { percent, periodLabel, quantity, scopeHorizons, traderPoints, type HistoricalMonth } from "@/lib/forecast-chart-data";
+import { commercialScopeKey, percent, periodLabel, quantity, scopeHorizons, traderPoints, type HistoricalMonth } from "@/lib/forecast-chart-data";
 import { retrospectiveMetric, getStatisticalCandidates, metricEvidence, selectedStatisticalModel, selectionExplanation, statisticalCoverage, statisticalModelDistribution, statisticalRanking, statisticalStatus } from "@/lib/statistical-preview-data";
 import { ForecastGrid } from "./forecast-horizon-table";
 import { StatisticalModelDistribution } from "./statistical-model-distribution";
@@ -12,8 +12,9 @@ import { StatisticalHorizonTable } from "./statistical-horizon-table";
 
 function KPIs({ rows }: { rows: [string, string][] }) { return <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">{rows.map(([label, value]) => <div className="rounded-xl border bg-white p-4" key={label}><p className="text-xs text-slate-500">{label}</p><p title={label.includes("WAPE") || label.includes("Bias") ? metricEvidence : undefined} className="mt-3 text-xl font-semibold">{value}</p></div>)}</div>; }
 export function StatisticalEngineDetail({ scope, scopes, filters, historical, historyError, cutsStatus, compareTowell, onCompare }: { scope: PreviewScope | null; scopes: PreviewScope[]; filters: Filters; historical: HistoricalMonth[]; historyError?: boolean; cutsStatus?: string; compareTowell: boolean; onCompare: () => void }) {
-  const selectedScope = scope?.chain_id === filters.chainId ? scope : null;
-  if (!filters.chainId) return <section className="space-y-4"><h2 className="text-xl font-semibold">Motor Estadístico · Cobertura por cadena</h2><p className="text-sm text-slate-500">No se consolidan ni suman scopes parent/child.</p>{cutsStatus === "CUTS_NOT_ALIGNED" && <p className="text-xs text-blue-800">Cortes diferentes por cadena · CUTS_NOT_ALIGNED</p>}<ForecastGrid headers={["Cadena", "Corte", "Productos", "Stat elegibles", "Cobertura", "Modelo más seleccionado", "Status"]} rows={scopes.map(s => { const c = statisticalCoverage(s); return [s.chain_name ?? s.chain_id, periodLabel(s.issue_period), quantity(c.total), quantity(c.eligible), percent(c.percent), statisticalModelDistribution(s)[0]?.model ?? "—", statisticalStatus(s.error_code ?? s.status)]; })}/></section>;
+  const projected = scope?.commercial_projection?.filter_key === commercialScopeKey(filters) && Boolean(scope.commercial_projection.chain_ids?.length);
+  const selectedScope = scope?.chain_id === filters.chainId || !filters.chainId && projected ? scope : null;
+  if (!filters.chainId && !selectedScope) return <section className="space-y-4"><h2 className="text-xl font-semibold">Motor Estadístico · Cobertura por cadena</h2><p className="text-sm text-slate-500">No se consolidan ni suman scopes parent/child.</p>{cutsStatus === "CUTS_NOT_ALIGNED" && <p className="text-xs text-blue-800">Cortes diferentes por cadena · CUTS_NOT_ALIGNED</p>}<ForecastGrid headers={["Cadena", "Corte", "Productos", "Stat elegibles", "Cobertura", "Modelo más seleccionado", "Status"]} rows={scopes.map(s => { const c = statisticalCoverage(s); return [s.chain_name ?? s.chain_id, periodLabel(s.issue_period), quantity(c.total), quantity(c.eligible), percent(c.percent), statisticalModelDistribution(s)[0]?.model ?? "—", statisticalStatus(s.error_code ?? s.status)]; })}/></section>;
   if (!selectedScope) return <p className="text-sm text-slate-500">Sin vista previa estadística para la cadena seleccionada.</p>;
   const product = selectedScope.products?.find(p => p.product_id === filters.productId && (!filters.categoryId || p.category_id === filters.categoryId));
   const commercial = selectedScope.commercial_projection;

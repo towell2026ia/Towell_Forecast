@@ -8,7 +8,7 @@ from decimal import Decimal, InvalidOperation, localcontext
 import uuid
 
 from services.forecast_engine.engine import add_month
-from .supabase_access import PreviewError, matches_source
+from .supabase_access import PreviewError, matches_source, forecast_objective, require_sales_context
 
 
 STATUSES = {"READY_FOR_DECISION", "DECIDED", "SUPERSEDED"}
@@ -80,6 +80,10 @@ def stored_rs_forecast(client, context, *, chain_id, product_ids, period):
     Model/format/presentation membership comes from the source-native catalogue
     validated by load_rs_scope; UPC/name similarities never expand this scope.
     """
+    require_sales_context(context, for_training=False)
+    if context.get("forecast_available") is False:
+        return None
+    objective = forecast_objective(context)
     ids = sorted({_uuid(value) for value in product_ids})
     if not ids:
         return None
@@ -101,7 +105,7 @@ def stored_rs_forecast(client, context, *, chain_id, product_ids, period):
                 _invalid()
             if not matches_source(snapshot.get("source_context"), context):
                 continue
-            if row.get("objective") != "Venta" or row.get("status") not in STATUSES:
+            if row.get("objective") != objective or row.get("status") not in STATUSES:
                 continue
             if (type(row.get("calculation_no")) is not int or row["calculation_no"] < 1
                     or not isinstance(row.get("calculation_code"), str) or not row["calculation_code"]

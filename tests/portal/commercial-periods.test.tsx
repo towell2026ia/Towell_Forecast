@@ -11,7 +11,7 @@ import { planningXlsx } from "../../lib/planning-xlsx";
 import { emptyFilters, type CommercialClassification, type Filters, type ForecastReadRepository, type HistoricalRow, type Product } from "../../lib/supabase/types";
 import { ForecastFiltersContext, GlobalFilters } from "../../app/forecast-towell-app";
 import { ForecastPeriodsView } from "../../app/forecast-periods-view";
-import { PeriodsComparisonChart } from "../../components/forecast/periods-comparison-chart";
+import { PeriodsComparisonChart, PeriodsInventoryChart } from "../../components/forecast/periods-comparison-chart";
 import { RailwayPreviewClient } from "../../lib/forecast-preview";
 import { SupabaseReportReader } from "../../lib/forecast-report-repository";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -24,6 +24,49 @@ function snapshot(): ReportSnapshot {
   return { products: [{ ...product, commercial: classification }], chains: [chain], categories: [], calculations: [{ id: "calc", chain_id: "c", product_id: "p", objective: "Venta", calculation_no: 1, calculation_code: "C1", issue_period: "2026-07", status: "READY_FOR_DECISION", created_at: "2026-10-13T00:00:00Z", created_by: "actor", suggested_reference: null, recalculation_reason: null, candidate_metrics: {}, input_snapshot: {}, research_snapshot: null, data_snapshot_hash: "hash", preview_id: "preview", engine_version: "v4", git_sha: "sha", evidence_mode: "RETROSPECTIVE_TRAINING" }], horizons: Array.from({ length: 12 }, (_, i) => ({ id: String(i), calculation_id: "calc", chain_id: "c", product_id: "p", horizon: i + 1, target_period: addReportMonth("2026-07", i + 1), statistical_value: 9800.26, ml_value: 10494.38, ensemble_value: 9973.79, p10: null, p50: 9973.79, p90: null, p95: null, band_basis: "INSUFFICIENT", band_observations: 0, statistical_model: "SBA", ml_model: "RF" })), decisions: [], live: [], provisionals: [], customers: [], capabilities: { vintage_persistence: false, champion_publication: false, official_publication: false } };
 }
 function history(period: string, sales: number | null = 10, overrides: Partial<HistoricalRow> = {}): HistoricalRow { return { chain_id: "c", product_id: "p", product, chain: chain.name, period, SALES: sales, ORDER: 10, DELIVERY: 9, availability: "UNKNOWN", ...overrides }; }
+
+describe("Pedido and inventory at a pinned local source", () => {
+  const orderContext = { ...operationalContext, source_hash: "d".repeat(64), authorized_source_hash: "d".repeat(64), generation: 3,
+    forecast_contract: "pedido-towell-v1", objective: "Pedido", target_metric: "ORDER", target_sheet: "Pedidos", target_file_sha256: "e".repeat(64),
+    unit: "PIEZAS", inventory_source: "ESTADISTICA", target_source_available: true, training_cutoff: null,
+    forecast_available: false, forecast_block_code: "ORDER_CLOSURE_UNVERIFIED", first_period: "2024-01", last_period: "2026-10" } as const;
+  it("exports observed orders before closure, preserves inventory zero and leaves horizons unassigned", () => {
+    const s = { ...snapshot(), sourceContext: orderContext };
+    const data = [history("2026-07", 81, { ORDER: 13.75, DELIVERY: null }), history("2025-07", 95, { ORDER: 11 })];
+    const stock = [{ chain_id: "c", product_id: "p", period: "2026-07", format: "format", upc: "0001", purchase_type: "RS", quantity_text: "0.000" }];
+    const dashboard = periodsDashboard(s, data, emptyReportChoice, [null, null], stock);
+    expect(dashboard.cutoff).toBeNull();
+    expect(dashboard.available).toBe(0);
+    expect(dashboard.points).toHaveLength(12);
+    expect(dashboard.points.every(p => p.horizon === null)).toBe(true);
+    const july = dashboard.points.find(p => p.period === "2026-07")!;
+    expect(july.values).toMatchObject({ order: 13.75, actual: 81, inventory: 0, previous1: 11, delivery: null, ENSEMBLE: null });
+    expect(july.fillRate?.value).toBeNull();
+    const sheets = operationalPeriodsSheets(s, dashboard, data, stock, true);
+    expect(sheets[0].rows).toContainEqual(["Cierre de Pedido", "Sin acreditar"]);
+    const comparison = sheets.find(sheet => sheet.name === "Comparativa")!;
+    const row = comparison.rows.find(r => r[0] === july.period)!;
+    expect(row[comparison.headers.indexOf("Pedido histórico")]).toBe("13.75");
+    expect(row[comparison.headers.indexOf("Inventario en tienda")]).toBe("0.000");
+    const chart = render(<PeriodsInventoryChart points={dashboard.points} error={false}/>);
+    const table = screen.getByRole("table", { name: "Inventario en tienda por mes" });
+    expect(within(table).getByText("1/1")).toBeTruthy();
+    expect(within(table).getAllByText("Sin dato")).toHaveLength(11);
+    chart.rerender(<PeriodsInventoryChart points={dashboard.points} error/>);
+    expect(screen.getByRole("alert").textContent).toContain("Error de consulta");
+    expect(screen.queryByRole("table", { name: "Inventario en tienda por mes" })).toBeNull();
+  });
+  it("requires Pedido for a closed-source calculation even when a Venta row has the same product, month and hash", () => {
+    const s = snapshot();
+    const source = { ...orderContext, forecast_available: true, training_cutoff: "2026-07", forecast_block_code: null } as const;
+    const calc = { ...s.calculations[0], input_snapshot: { source_context: source } };
+    const closed = { ...s, sourceContext: source, calculations: [calc] };
+    expect(periodsDashboard(closed, [], emptyReportChoice, [null, null]).available).toBe(0);
+    const order = periodsDashboard({ ...closed, calculations: [{ ...calc, objective: "Pedido" }] }, [], emptyReportChoice, [null, null]);
+    expect(order.available).toBe(1);
+    expect(order.points[11]).toMatchObject({ period: "2026-10", horizon: 3 });
+  });
+});
 
 describe("Model comparison keys and dependent multiselection", () => {
   it("normalizes Unicode NFC, case and whitespace without stripping accents, words or punctuation", () => {

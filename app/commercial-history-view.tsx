@@ -5,7 +5,7 @@ import { chooseCalculations, commercialRows, emptyReportChoice, leafScopeIds, re
 import type { Cursor, Filters, ForecastReadRepository, HistoricalRow } from "@/lib/supabase/types";
 import { useForecastFilters, useOperationPin, useRead } from "./forecast-towell-app";
 import { CalculationFilters, ReportPaging, ReportSelect, ReportState, ReportTable, reportNumber, reportPercent } from "./report-controls";
-import { salesSourceAvailable, salesUnavailableMessage } from "@/lib/official-sales-source";
+import { forecastSourceAvailable, forecastUnavailableMessage } from "@/lib/official-sales-source";
 
 const noReport: ReportSnapshot = { products: [], chains: [], categories: [], calculations: [], horizons: [], decisions: [], live: [], customers: [], provisionals: [], capabilities: { vintage_persistence: false, official_publication: false, champion_publication: false } };
 export function CommercialHistoryView() {
@@ -43,7 +43,7 @@ function History({ snapshot, repository, filters }: { snapshot: ReportSnapshot; 
     return { ...filters, periodRange: [filters.periodRange[0] && filters.periodRange[0] > (periods[0] ?? "") ? filters.periodRange[0] : periods[0] ?? "2099-12", filters.periodRange[1] && filters.periodRange[1] < (periods.at(-1) ?? "9999") ? filters.periodRange[1] : periods.at(-1) ?? "2000-01"] as Filters["periodRange"] };
   }, [filters, choice, snapshot]);
   const key = `${choice.version}/${choice.issue}/${source}`;
-  return <>{!salesSourceAvailable(snapshot.sourceContext) && <p role="status" className="text-sm text-slate-600">{salesUnavailableMessage}</p>}<CalculationFilters snapshot={snapshot} choice={choice} onChange={setChoice}/><div className="grid gap-4 sm:grid-cols-2"><ReportSelect label="Periodos comerciales" value={source} onChange={setSource} options={[{ value: "history", label: "Histórico original" }, { value: "calculation", label: "Horizontes del cálculo" }]}/><ReportSelect label="Referencia de error y WAPE LIVE" value={metric} onChange={v => setMetric(v as typeof metric)} options={Object.entries(reportSeries).filter(([v]) => v !== "COLD_START").map(([value, label]) => ({ value, label }))}/></div>
+  return <>{!forecastSourceAvailable(snapshot.sourceContext) && <p role="status" className="text-sm text-slate-600">{forecastUnavailableMessage(snapshot.sourceContext)}</p>}<CalculationFilters snapshot={snapshot} choice={choice} onChange={setChoice}/><div className="grid gap-4 sm:grid-cols-2"><ReportSelect label="Periodos comerciales" value={source} onChange={setSource} options={[{ value: "history", label: "Histórico original" }, { value: "calculation", label: "Horizontes del cálculo" }]}/><ReportSelect label="Referencia de error y WAPE LIVE" value={metric} onChange={v => setMetric(v as typeof metric)} options={Object.entries(reportSeries).filter(([v]) => v !== "COLD_START").map(([value, label]) => ({ value, label }))}/></div>
     {source === "calculation" && <ReportState loading={stored.loading} error={stored.error}/>}
     {(source === "history" || stored.data) && <><CommercialPages key={key} snapshot={snapshot} repository={repository} filters={scopedFilters} choice={choice} metric={metric} stored={source === "calculation" ? stored.data : null}/><Performance snapshot={snapshot} repository={repository} filters={scopedFilters} choice={choice} metric={metric} stored={source === "calculation" ? stored.data : null}/></>}
   </>;

@@ -5,7 +5,7 @@ import re
 
 from .auth import READ
 from .commercial_catalog import key
-from .supabase_access import PreviewError, uuid_value
+from .supabase_access import PreviewError, uuid_value, forecast_objective, require_sales_context
 
 
 METRICS = ("SALES", "ORDER", "DELIVERY", "FCST_TOWELL_HISTORY", "FCST_CLIENTE_HISTORY")
@@ -148,6 +148,9 @@ def load_rs_scope(client, principal, *, chain_id, purchase_type, format, model, 
             or not isinstance(model, str) or not key(model)):
         raise PreviewError("RS_SCOPE_INVALID")
     context = client.operational_context()
+    require_sales_context(context, for_training=False)
+    objective = forecast_objective(context)
+    target_metric = "ORDER" if objective == "Pedido" else "SALES"
     first_period = context["first_period"]
     if not first_period <= period <= context["last_period"]:
         raise PreviewError("RS_SCOPE_INVALID")
@@ -158,7 +161,7 @@ def load_rs_scope(client, principal, *, chain_id, purchase_type, format, model, 
         records = []
         for month, rows in sorted(facts.items()):
             for (pid, metric), row in sorted(rows.items()):
-                if metric != "SALES":
+                if metric != target_metric:
                     continue
                 product = products[pid]
                 category = product.get("category_id")
@@ -167,7 +170,7 @@ def load_rs_scope(client, principal, *, chain_id, purchase_type, format, model, 
                     "description": product["description"], "variant": selected[pid].get("color") or "",
                     "category": selected[pid].get("product_type") or "UNCLASSIFIED", "category_id": category,
                     "category_name": selected[pid].get("product_type") or categories.get(category, "Sin categoría"), "period": month,
-                    "objective": "Venta", "value": row["source_value_literal"], "available_at": row["available_at"],
+                    "objective": objective, "target_metric": target_metric, "value": row["source_value_literal"], "available_at": row["available_at"],
                     "availability_source": row["availability_source"], "evidence_mode": "RETROSPECTIVE_TRAINING",
                     "source_id": uuid_value(row["id"]), "version_no": row["version_no"],
                     "source_batch_id": row["source_batch_id"],
@@ -181,12 +184,17 @@ def load_rs_scope(client, principal, *, chain_id, purchase_type, format, model, 
         "scope": {"chain_id": chain_id, "chain": chain, "purchase_type": "RS", "format": scope_format,
                   "model": key(representative["model"]), "presentation": representative["size"], "period": period,
                   "public_product_type": public_product_type,
+                  "objective": objective, "target_metric": target_metric,
                   "source_hash": context["source_hash"], "generation": context["generation"]},
+        "source_context": context,
         "eligible_variants": len(selected),
         "quality": {"products_classified": len(selected), "products_excluded_ambiguous": unresolved,
                     "products_approved": sum(row["status"] == "APPROVED" for row in selected.values()),
-                    "excluded_without_rs_lineage": dict(sorted(excluded.items())), "sales_records": len(records),
-                    "sales_products": len({row["product_id"] for row in records}),
+                    "excluded_without_rs_lineage": dict(sorted(excluded.items())),
+                    "sales_records": sum(metric == "SALES" for rows in facts.values() for _, metric in rows),
+                    "sales_products": len({pid for rows in facts.values() for pid, metric in rows if metric == "SALES"}),
+                    "target_metric": target_metric, "target_records": len(records),
+                    "target_products": len({row["product_id"] for row in records}),
                     "temporal_certification": False, "scope_basis": "CATALOG_MODEL_AND_OFFICIAL_RS_LINEAGE",
                     "coverage_basis": "RESOLVABLE_CATALOG_MODEL_ONLY", "model_total_certified": False},
         "metrics": metrics,

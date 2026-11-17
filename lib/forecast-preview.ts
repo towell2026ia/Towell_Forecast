@@ -2,7 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { assistantScopeIsValid, parseRsAssistantResponse, type RsAssistantClient } from "./rs-assistant";
 import type { OperationalReadContext } from "./supabase/types";
 import { matchesOfficialSource } from "./forecast-reporting";
-import { salesSourceAvailable, salesSourceState } from "./official-sales-source";
+import { forecastObjective, forecastSourceAvailable, forecastSourceState, forecastTrainingCutoff, isOrderSource, type ForecastObjective } from "./official-sales-source";
 export type PreviewHorizon = { horizon: number; target_period: string; statistical_value: number; ml_value: number | null; forecast_towell: number; p10: number | null; p50: number; p90: number | null; p95: number | null;
   statistical_model?: string; ml_model?: string | null; ensemble_ml_model?: string | null; ensemble_ml_component?: number | null; statistical_weight?: number | null; ml_weight?: number | null;
   model_strategy?: string; classification?: string; forecast_status?: string; certification_status?: string; confidence?: string; band_basis?: "PRODUCT" | "CATEGORY" | "CHAIN" | "INSUFFICIENT"; band_observations?: number; band_status?: "AVAILABLE" | "INSUFFICIENT_BAND_EVIDENCE" };
@@ -23,8 +23,8 @@ export type ProvisionalColdStart = { status: "PROVISIONAL_COLD_START"; observed_
   retrospective_peer_metrics: Record<string, { wape: number; bias: number; observations: number; products: number }>;
   horizons: { horizon: number; target_period: string; value: number }[];
   research?: { status: "DISABLED" | "PENDING" | "COMPLETED" | "UNAVAILABLE"; reason?: string; summary?: string; sources?: { title: string; url: string }[] } };
-export type PreviewScope = { chain_id: string; chain_name?: string; status: string; error_code?: string; issue_period?: string; latest_actual_period?: string; engine_version?: string; mode?: string; preview_id?: string;
-  commercial_projection?: { filter_key: string; products: number; statistical: number; ml: number; ensemble: number; ml_models: string[]; source: "STORED_CALCULATIONS" };
+export type PreviewScope = { chain_id: string; chain_name?: string; objective?: ForecastObjective; status: string; error_code?: string; issue_period?: string; latest_actual_period?: string; engine_version?: string; mode?: string; preview_id?: string;
+  commercial_projection?: { filter_key: string; chain_ids?: string[]; product_ids?: string[]; products: number; statistical: number; ml: number; ensemble: number; ml_models: string[]; source: "STORED_CALCULATIONS" | "EXACT_SELECTION" };
   stored_results?: { objective: string; issue_period: string; consolidated_metrics_status: "SINGLE_PRODUCT" | "NOT_ACCREDITED"; consolidated_reason: string;
     products: { product_id: string; chain_id: string; description: string; calculation_id: string | null; calculation_code: string | null;
       created_at: string | null; emitted_at: string | null; cutoff_at: string | null; engine_version: string | null; evidence_mode: string | null; status: string;
@@ -37,7 +37,8 @@ export type PreviewScope = { chain_id: string; chain_name?: string; status: stri
   eligibility?: Record<string, number>; evaluation_mode?: string; statistical?: { status: string; models: Record<string, number>; candidates: PreviewCandidate[]; scope_candidates?: PreviewCandidate[]; selected_metrics?: PreviewCandidate; available_candidates?: string[]; retrospective_wape: number | null; retrospective_bias: number | null };
   ml?: { status: string; training_samples: number | null; training_products?: number; features?: string[]; leader: string | null; candidates: PreviewCandidate[]; trained_candidates?: PreviewCandidate[]; available_candidates?: string[]; retrospective_wape: number | null; retrospective_bias: number | null };
   selection?: { published_champion: { version: string } | null; preview_leader: PreviewCandidate | null; preview_challenger: PreviewCandidate | null; scope_leader?: PreviewCandidate | null; product_ml_winners?: Record<string, string | null>; suggested_reference?: SuggestedReference | null; suggested_references?: Record<string, SuggestedReference>; product_candidates?: ProductCandidate[]; comparison_status?: string; comparison_reason?: string | null; selection_policy_version?: string; no_degradation: boolean | null; automatic_promotion: false }; products?: PreviewProduct[]; aggregates?: PreviewAggregate[]; certification_status?: string };
-export type PreviewJob = { job_id: string; status: string; mode: string; engine_version: string; created_at?: number; cuts_status?: string; scopes: PreviewScope[] };
+export type PreviewJob = { job_id: string; status: string; mode: string; engine_version: string; objective?: ForecastObjective; chain_ids?: string[]; requested_product_ids?: string[]; created_at?: number; cuts_status?: string; scopes: PreviewScope[] };
+export type ExactPreviewSelection = { objective: ForecastObjective; chain_ids: string[]; product_ids: string[]; issue_period?: string | null; source_context: OperationalReadContext };
 export type QualityGates = { chain_id: string; preview_id: string; dataset_hash: string; policy_version: string;
   data_quality: { status: string; history_months: number; missing_months: number; continuity_rate: number; products_total: number; products_with_history: number };
   forecast_quality: { status: string; stat_wape: number | null; ml_wape: number | null; candidate_wape: number | null; candidate_bias: number | null; no_degradation: boolean };
@@ -51,7 +52,7 @@ export type VintageDetail = { vintage: VintageSummary; run: { id: string; chain_
   inputs: { id: string; monthly_observation_id: string | null; evidence_mode: string }[];
   gates: { id: string; gate_type: string; status: string; policy_version: string; observed: number | null; target: number | null }[] };
 export type VintageCapabilities = { vintage_persistence: boolean; official_publication: boolean; champion_publication: boolean;
-  forecast_calculation_history?: boolean; forecast_selection?: boolean; capture_center?: boolean; live_learning?: boolean };
+  forecast_calculation_history?: boolean; forecast_selection?: boolean; capture_center?: boolean; live_learning?: boolean; local_bounded_preview?: boolean };
 export type CalculationSummary = { id: string; chain_id: string; product_id: string; calculation_no: number; calculation_code: string;
   issue_period: string; status: string; created_at: string; suggested_reference: SuggestedReference | null; recalculation_reason: string | null };
 export type CalculationHorizon = { horizon: number; target_period: string; statistical_value: number; ml_value: number | null;
@@ -70,6 +71,7 @@ export interface PreviewClient {
   rsAssistant?: RsAssistantClient;
   commercialCatalog?(context?: OperationalReadContext): Promise<import("./supabase/types").CommercialClassification[]>;
   create(chainId: string | null, productId: string | null, issuePeriod?: string | null): Promise<PreviewJob>;
+  createSelection?(selection: ExactPreviewSelection): Promise<PreviewJob>;
   status(jobId: string): Promise<PreviewJob>;
   result(jobId: string, productId?: string | null): Promise<PreviewJob>;
   research?(jobId: string): Promise<PreviewJob>;
@@ -97,7 +99,8 @@ export interface PreviewClient {
   dispose(): void;
 }
 export class PreviewReadError extends Error { constructor(public code: string) { super(code); } }
-const safeCodes = new Set(["AUTH_REQUIRED", "SCOPE_FORBIDDEN", "REQUEST_001", "PREVIEW_DISABLED", "SALES_PERIOD_NOT_CLOSED", "DUPLICATE_OBSERVATION_CONFLICT", "NO_ELIGIBLE_PRODUCTS", "INSUFFICIENT_HISTORY", "DATA_READ_FAILED", "TEMPORAL_METADATA_MISSING", "DATA_LEAKAGE_DETECTED", "STATISTICAL_FAILED", "ML_FAILED", "ENSEMBLE_FAILED", "PREVIEW_NOT_FOUND", "PREVIEW_NOT_READY", "RATE_001", "VINTAGE_PERSISTENCE_DISABLED", "OFFICIAL_PUBLICATION_DISABLED", "CHAMPION_PUBLICATION_DISABLED", "REQUIRED_SECRET_MISSING", "VINTAGE_WRITE_FAILED", "DATA_QUALITY_BLOCKED", "LINEAGE_MISMATCH", "HASH_MISMATCH"]);
+const safeCodes = new Set(["AUTH_REQUIRED", "SCOPE_FORBIDDEN", "REQUEST_001", "PREVIEW_DISABLED", "SALES_PERIOD_NOT_CLOSED", "FORECAST_PERIOD_NOT_CLOSED", "ORDER_PERIOD_NOT_CLOSED", "FORECAST_SOURCE_UNAVAILABLE", "ORDER_SOURCE_UNAVAILABLE", "OFFICIAL_SOURCE_MISMATCH", "EXACT_SELECTION_REQUIRED", "DUPLICATE_OBSERVATION_CONFLICT", "NO_ELIGIBLE_PRODUCTS", "INSUFFICIENT_HISTORY", "DATA_READ_FAILED", "TEMPORAL_METADATA_MISSING", "DATA_LEAKAGE_DETECTED", "STATISTICAL_FAILED", "ML_FAILED", "ENSEMBLE_FAILED", "PREVIEW_NOT_FOUND", "PREVIEW_NOT_READY", "RATE_001", "VINTAGE_PERSISTENCE_DISABLED", "OFFICIAL_PUBLICATION_DISABLED", "CHAMPION_PUBLICATION_DISABLED", "REQUIRED_SECRET_MISSING", "VINTAGE_WRITE_FAILED", "DATA_QUALITY_BLOCKED", "LINEAGE_MISMATCH", "HASH_MISMATCH"]);
+safeCodes.add("ORDER_CLOSURE_UNVERIFIED");
 export class RailwayPreviewClient implements PreviewClient {
   private controller = new AbortController();
   readonly rsAssistant?: RsAssistantClient;
@@ -129,9 +132,9 @@ export class RailwayPreviewClient implements PreviewClient {
   private async officialSource(context?: OperationalReadContext) {
     const { data, error } = await this.sourceClient.rpc("operational_read_context").abortSignal(this.controller.signal);
     const source = Array.isArray(data) && data.length === 1 ? data[0] as OperationalReadContext : null;
-    if (error && ["SALES_SOURCE_UNAVAILABLE", "OFFICIAL_SOURCE_MISMATCH"].includes(error.code)) throw new PreviewReadError(error.code);
+    if (error && ["SALES_SOURCE_UNAVAILABLE", "FORECAST_SOURCE_UNAVAILABLE", "ORDER_SOURCE_UNAVAILABLE", "OFFICIAL_SOURCE_MISMATCH"].includes(error.code)) throw new PreviewReadError(error.code);
     if (error || !source || !/^[0-9a-f]{64}$/.test(source.source_hash) || !Number.isSafeInteger(source.generation)) throw new PreviewReadError("DATA_READ_FAILED");
-    if (salesSourceState(source) === "INVALID") throw new PreviewReadError("OFFICIAL_SOURCE_MISMATCH");
+    if (forecastSourceState(source) === "INVALID") throw new PreviewReadError("OFFICIAL_SOURCE_MISMATCH");
     if (context && !matchesOfficialSource(source, context)) throw new PreviewReadError("DATA_READ_FAILED");
     return source;
   }
@@ -142,8 +145,9 @@ export class RailwayPreviewClient implements PreviewClient {
     await this.officialSource(source);
     return data.products;
   }
-  private async request(path: string, body?: unknown): Promise<PreviewJob> {
-    if (body !== undefined) this.requireWritable();
+  private async request(path: string, body?: unknown, boundedLocal = false): Promise<PreviewJob> {
+    if (body !== undefined && !boundedLocal) this.requireWritable();
+    if (boundedLocal && (!this.readOnly || this.apiOrigin() !== "http://127.0.0.1:8000")) throw new PreviewReadError("LOCAL_READ_ONLY");
     const origin = this.apiOrigin();
     if (this.controller.signal.aborted) throw new PreviewReadError("AUTH_REQUIRED");
     const { data } = await this.auth.auth.getSession();
@@ -165,13 +169,36 @@ export class RailwayPreviewClient implements PreviewClient {
     if (issuePeriod != null && !/^20\d{2}-(0[1-9]|1[0-2])$/.test(issuePeriod)) throw new PreviewReadError("REQUEST_001");
     return this.request("/api/forecast/preview-runs", { chain_id: chainId, product_id: productId, objective: "Venta", issue_period: issuePeriod ?? null, mode: "RETROSPECTIVE_TRAINING" });
   }
+  async createSelection(selection: ExactPreviewSelection) {
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (forecastSourceState(selection.source_context) === "INVALID") throw new PreviewReadError("OFFICIAL_SOURCE_MISMATCH");
+    if (!forecastSourceAvailable(selection.source_context)) throw new PreviewReadError(selection.source_context.forecast_block_code === "ORDER_CLOSURE_UNVERIFIED" ? "ORDER_CLOSURE_UNVERIFIED" : "ORDER_SOURCE_UNAVAILABLE");
+    if (!selection.chain_ids.length || !selection.product_ids.length || selection.chain_ids.length > 100 || selection.product_ids.length > 2000
+      || [...selection.chain_ids, ...selection.product_ids].some(id => !uuid.test(id))
+      || new Set(selection.chain_ids).size !== selection.chain_ids.length || new Set(selection.product_ids).size !== selection.product_ids.length
+      || forecastObjective(selection.source_context) !== selection.objective || !forecastSourceAvailable(selection.source_context)
+      || selection.issue_period != null && (!/^20\d{2}-(0[1-9]|1[0-2])$/.test(selection.issue_period) || selection.issue_period > (forecastTrainingCutoff(selection.source_context) ?? ""))) throw new PreviewReadError("REQUEST_001");
+    const source = await this.officialSource(selection.source_context);
+    let bounded = false;
+    if (this.readOnly) {
+      if (!isOrderSource(source) || !(await this.vintageCapabilities()).local_bounded_preview) throw new PreviewReadError("LOCAL_READ_ONLY");
+      bounded = true;
+    }
+    const job = await this.request("/api/forecast/preview-runs", { chain_ids: [...selection.chain_ids].sort(), product_ids: [...selection.product_ids].sort(),
+      objective: selection.objective, issue_period: selection.issue_period ?? null, mode: "RETROSPECTIVE_TRAINING", source_context: source }, bounded);
+    if (job.objective !== selection.objective || !Array.isArray(job.requested_product_ids) || new Set(job.requested_product_ids).size !== job.requested_product_ids.length
+      || JSON.stringify([...job.requested_product_ids].sort()) !== JSON.stringify([...selection.product_ids].sort())
+      || job.chain_ids && JSON.stringify([...job.chain_ids].sort()) !== JSON.stringify([...selection.chain_ids].sort())) throw new PreviewReadError("LINEAGE_MISMATCH");
+    return job;
+  }
   status(jobId: string) { return this.request(`/api/forecast/preview-runs/${encodeURIComponent(jobId)}`); }
   result(jobId: string, productId?: string | null) { return this.request(`/api/forecast/preview-runs/${encodeURIComponent(jobId)}/result${productId ? `?product_id=${encodeURIComponent(productId)}` : ""}`); }
   research(jobId: string) { return this.request(`/api/forecast/preview-runs/${encodeURIComponent(jobId)}/research`); }
   async latest(chainId: string | null, productId: string | null, context?: OperationalReadContext) {
     const source = await this.officialSource(context);
-    if (!salesSourceAvailable(source)) return null;
+    if (!forecastSourceAvailable(source)) return null;
     const params = new URLSearchParams(); if (chainId) params.set("chain_id", chainId); if (productId) params.set("product_id", productId);
+    if (isOrderSource(source)) params.set("objective", "Pedido");
     try {
       const result = await this.request(`/api/forecast/preview-latest?${params}`);
       await this.officialSource(source);
@@ -229,6 +256,7 @@ export class RailwayPreviewClient implements PreviewClient {
       official_publication: response.ok && result.official_publication === true,
       champion_publication: response.ok && result.champion_publication === true,
       forecast_calculation_history: response.ok && result.forecast_calculation_history === true,
+      local_bounded_preview: response.ok && result.local_bounded_preview === true,
       forecast_selection: response.ok && result.forecast_selection === true,
       capture_center: response.ok && result.capture_center === true,
       live_learning: response.ok && result.live_learning === true };
@@ -254,7 +282,7 @@ export class RailwayPreviewClient implements PreviewClient {
   }
   async provisionalForecasts(chainId: string | null, productId: string | null, context?: OperationalReadContext) {
     const source = await this.officialSource(context);
-    if (!salesSourceAvailable(source)) return [];
+    if (!forecastSourceAvailable(source)) return [];
     const rows: import("./forecast-reporting").ProvisionalForecast[] = [];
     for (let offset = 0; offset < 10000; offset += 100) {
       const params = new URLSearchParams({ offset: String(offset), limit: "100" });

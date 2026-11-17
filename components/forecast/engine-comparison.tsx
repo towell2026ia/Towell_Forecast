@@ -25,6 +25,7 @@ export function EngineComparison({ scope, horizons = [], productId }: { scope: P
   const suggestionLabel = suggestion?.model && suggestion.status.startsWith("SUGGESTED") ? `${suggestion.model} *` : "Sin sugerencia confiable";
   const first = horizons.find(row => row.horizon === 1);
   return <section className="space-y-5"><h2 className="font-semibold">Comparativa de motores</h2>
+    {scope.commercial_projection?.source === "EXACT_SELECTION" && <><p className="text-xs text-slate-600">Objetivo {scope.objective} · {scope.chain_name} · {scope.commercial_projection.products} variantes exactas. Las cantidades se suman por mes; WAPE y Bias no se promedian entre productos.</p><ForecastGrid headers={["Motor", "H1", "Cobertura", "WAPE consolidado", "Bias consolidado"]} rows={[["Estadístico", quantity(first?.statistical_value), `${scope.commercial_projection.statistical}/${scope.commercial_projection.products}`, "No acreditado", "No acreditado"], ["Machine Learning", quantity(first?.ml_value), `${scope.commercial_projection.ml}/${scope.commercial_projection.products}`, "No acreditado", "No acreditado"], ["Ensemble", quantity(first?.forecast_towell), `${scope.commercial_projection.ensemble}/${scope.commercial_projection.products}`, "No acreditado", "No acreditado"]]}/></>}
     <div className="grid gap-3 sm:grid-cols-2">
       <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm">
         <p className="text-xs font-medium text-blue-900">Champion / Referencia</p>

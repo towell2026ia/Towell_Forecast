@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { Bar, CartesianGrid, ComposedChart, Line, ReferenceArea, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { dashboardSeries, shortPeriod, type DashboardPoint, type DashboardSeries } from "@/lib/periods-dashboard";
+import { dashboardSeries, dashboardLabel, shortPeriod, type DashboardPoint, type DashboardSeries } from "@/lib/periods-dashboard";
 import { addReportMonth } from "@/lib/forecast-reporting";
 import { planningSourceLabels } from "@/lib/planning-source-audit";
 import { reportNumber, reportPercent } from "@/app/report-controls";
@@ -10,13 +10,14 @@ import { reportNumber, reportPercent } from "@/app/report-controls";
 const initial = new Set<DashboardSeries>(["previous2", "previous1", "actual", "inventory", "STATISTICAL", "ML", "ENSEMBLE", "TOWELL"]);
 type ChartSeries = DashboardSeries | "fillRate";
 const fillRateColor = "#c83824";
-export function PeriodsComparisonChart({ points, cutoff, planning, title = "Comparativo comercial 9+3", showFillRate = false }: { points: DashboardPoint[]; cutoff: string | null; planning?: { unit: string; provisional: boolean; source: "Towell" | "Cliente" | "Pedidos" }; title?: string; showFillRate?: boolean }) {
+export function PeriodsComparisonChart({ points, cutoff, planning, title = "Comparativo comercial 9+3", showFillRate = false, objective = "Venta" }: { points: DashboardPoint[]; cutoff: string | null; planning?: { unit: string; provisional: boolean; source: "Towell" | "Cliente" | "Pedidos" }; title?: string; showFillRate?: boolean; objective?: string }) {
   const monthlyEnabled = showFillRate && !planning;
-  const available: ChartSeries[] = planning ? ["previous2", "previous1", "actual", ...(planning.provisional ? ["STATISTICAL" as const] : [])] : [...Object.keys(dashboardSeries) as DashboardSeries[], ...(monthlyEnabled ? ["fillRate" as const] : [])];
-  const [shown, setShown] = useState<Set<ChartSeries>>(() => new Set([...initial, ...(monthlyEnabled ? ["fillRate" as const] : [])].filter(key => available.includes(key))));
+  const orders = !planning && objective === "Pedido";
+  const available: ChartSeries[] = planning ? ["previous2", "previous1", "actual", ...(planning.provisional ? ["STATISTICAL" as const] : [])] : [...(Object.keys(dashboardSeries) as DashboardSeries[]).filter(key => !orders || key !== "inventory"), ...(monthlyEnabled ? ["fillRate" as const] : [])];
+  const [shown, setShown] = useState<Set<ChartSeries>>(() => new Set<ChartSeries>(orders ? ["previous2", "previous1", "order", "STATISTICAL", "ML", "ENSEMBLE"] : [...initial, ...(monthlyEnabled ? ["fillRate" as const] : [])].filter(key => available.includes(key))));
   const sourceLabel = planning ? planningSourceLabels[planning.source] : "";
   const planningLabels: Partial<Record<DashboardSeries, string>> = { previous2: `${sourceLabel} año −2`, previous1: `${sourceLabel} año −1`, actual: sourceLabel, STATISTICAL: "Estadístico provisional" };
-  const label = (key: ChartSeries) => key === "fillRate" ? "Fill Rate (%)" : (planning && planningLabels[key]) || dashboardSeries[key].label;
+  const label = (key: ChartSeries) => key === "fillRate" ? "Fill Rate (%)" : (planning && planningLabels[key]) || dashboardLabel(key, objective);
   const color = (key: ChartSeries) => key === "fillRate" ? fillRateColor : dashboardSeries[key].color;
   const partialLabel = (key: ChartSeries) => {
     if (key === "fillRate") return null;
@@ -27,15 +28,15 @@ export function PeriodsComparisonChart({ points, cutoff, planning, title = "Comp
   const records = points.map(p => ({ ...p, ...p.values, fillRate: p.horizon ? null : p.fillRate?.value ?? null }));
   const maxFillRate = Math.max(100, ...records.flatMap(p => p.fillRate !== null && Number.isFinite(p.fillRate) ? [Math.ceil(p.fillRate / 10) * 10] : []));
   const tableSeries: ChartSeries[] = [...shown].filter(key => key !== "fillRate");
-  if (monthlyEnabled) tableSeries.push("fillRate");
+  if (monthlyEnabled && (!orders || shown.has("fillRate"))) tableSeries.push("fillRate");
   return <section aria-label="Gráfica comparativa comercial" className="min-w-0 border-y border-slate-200 bg-white py-5">
-    <div className="flex flex-wrap items-center justify-between gap-2 px-4"><h2 className="text-lg font-semibold text-slate-950">{title}</h2><span className="text-xs text-slate-500">{planning?.unit ?? "PIEZAS"} · Corte {cutoff ?? "Sin dato"} · {planning ? "9 meses históricos / 3 posteriores" : "9 meses históricos / H1–H3 almacenados"}</span></div>
+    <div className="flex flex-wrap items-center justify-between gap-2 px-4"><h2 className="text-lg font-semibold text-slate-950">{title}</h2><span className="text-xs text-slate-500">{planning?.unit ?? "PIEZAS"} · Corte {cutoff ?? "Sin dato"} · {planning ? "9 meses históricos / 3 posteriores" : orders && !cutoff ? "Histórico observado · cierre de Pedido pendiente" : "9 meses históricos / H1–H3 almacenados"}</span></div>
     <div className="mt-4 h-[360px] min-w-0 sm:h-[420px]" data-testid="periods-chart">
       <ResponsiveContainer width="100%" height="100%" minWidth={0} initialDimension={{ width: 900, height: 420 }}>
         <ComposedChart data={records} margin={{ top: 12, right: 18, bottom: 8, left: 4 }} accessibilityLayer>
           <CartesianGrid stroke="#e8edf2" vertical={false}/><XAxis dataKey="month" interval={0} angle={-50} height={70} textAnchor="end" tickLine={false} axisLine={false} tick={{ fontSize: 10 }} tickFormatter={(month: string) => { const p = points.find(p => p.month === month); return p?.horizon ? `${month} H${p.horizon}` : month; }}/><YAxis yAxisId="pieces" width={monthlyEnabled ? 56 : 45} label={monthlyEnabled ? { value: "Piezas", angle: -90, position: "insideLeft", fontSize: 11 } : undefined} tickLine={false} axisLine={false} tick={{ fontSize: 11 }} tickFormatter={v => Intl.NumberFormat("es-MX", { notation: "compact" }).format(v)}/>
           {monthlyEnabled && <YAxis yAxisId="fillRate" orientation="right" width={72} domain={[0, maxFillRate]} label={{ value: "Fill Rate (%)", angle: 90, position: "insideRight", fontSize: 11, fill: fillRateColor }} tickLine={false} axisLine={false} tick={{ fontSize: 11, fill: fillRateColor }} tickFormatter={v => `${v}%`}/>}
-          {points[9] && points[11] && <ReferenceArea yAxisId="pieces" x1={points[9].month} x2={points[11].month} fill="#e4f0e9" fillOpacity={0.55} label={{ value: planning ? (planning.provisional ? "Provisional" : "Sin Champion") : "H1–H3", position: "insideTop", fontSize: 11, fill: "#52665a" }}/>}
+          {points[9]?.horizon && points[11]?.horizon && <ReferenceArea yAxisId="pieces" x1={points[9].month} x2={points[11].month} fill="#e4f0e9" fillOpacity={0.55} label={{ value: planning ? (planning.provisional ? "Provisional" : "Sin Champion") : "H1–H3", position: "insideTop", fontSize: 11, fill: "#52665a" }}/>}
           <Tooltip content={({ active, label: month, payload }) => {
             if (!active || !monthlyEnabled && !payload?.length) return null;
             const point = points.find(p => p.month === month);
@@ -55,7 +56,34 @@ export function PeriodsComparisonChart({ points, cutoff, planning, title = "Comp
       </ResponsiveContainer>
     </div>
     <fieldset className="flex flex-wrap gap-x-5 gap-y-3 px-4 pt-3"><legend className="sr-only">Series de la gráfica</legend>{available.map(key => <label key={key} className="flex min-h-8 items-center gap-2 text-xs text-slate-700"><input type="checkbox" aria-label={label(key)} checked={shown.has(key)} onChange={() => setShown(previous => { const next = new Set(previous); if (next.has(key)) next.delete(key); else next.add(key); return next; })}/><span className="h-2 w-4 rounded-sm" style={{ background: color(key) }}/>{label(key)}{partialLabel(key) && <span className="text-amber-800">{partialLabel(key)}</span>}</label>)}</fieldset>
-    {!planning && <p className="mt-3 px-4 text-xs text-slate-500">Inventario reportado en piezas por cadena, formato, UPC y mes.</p>}
-    <details className="mt-4 px-4 text-xs text-slate-600"><summary className="cursor-pointer">Consultar las 12 posiciones y ausencias de dato</summary><div className="mt-3 overflow-x-auto"><table aria-label={monthlyEnabled ? "Datos de la gráfica Período" : "Datos de la gráfica 9+3"} className="w-full text-left"><thead><tr>{["Periodo", "H", ...tableSeries.map(label)].map(h => <th key={h} className="whitespace-nowrap p-2">{h}</th>)}</tr></thead><tbody>{points.map(p => <tr key={p.period}><th className="whitespace-nowrap p-2">{p.period}</th><td className="p-2">{p.horizon ? `H${p.horizon}` : "Real"}</td>{tableSeries.map(k => <td key={k} className="whitespace-nowrap p-2">{k === "fillRate" ? <><span>{reportPercent(p.horizon ? null : p.fillRate?.value)}</span><span className="mt-1 block text-slate-500">Cobertura {p.fillRate?.covered ?? 0}/{p.fillRate?.eligible ?? p.coverage.order.eligible} pares{p.fillRate?.covered && p.fillRate.covered < p.fillRate.eligible ? " · Parcial" : ""}</span></> : p.coverage[k].exact ?? reportNumber(p.values[k])}</td>)}</tr>)}</tbody></table></div></details>
+    {!planning && !orders && <p className="mt-3 px-4 text-xs text-slate-500">Inventario reportado en piezas por cadena, formato, UPC y mes.</p>}
+    <details className="mt-4 px-4 text-xs text-slate-600"><summary className="cursor-pointer">Consultar las 12 posiciones y ausencias de dato</summary><div className="mt-3 overflow-x-auto"><table aria-label={monthlyEnabled ? "Datos de la gráfica Período" : "Datos de la gráfica 9+3"} className="w-full text-left"><thead><tr>{["Periodo", "H", ...tableSeries.map(label)].map(h => <th key={h} className="whitespace-nowrap p-2">{h}</th>)}</tr></thead><tbody>{points.map(p => <tr key={p.period}><th className="whitespace-nowrap p-2">{p.period}</th><td className="p-2">{p.horizon ? `H${p.horizon}` : orders && !cutoff ? "Capturado" : "Real"}</td>{tableSeries.map(k => <td key={k} className="whitespace-nowrap p-2">{k === "fillRate" ? <><span>{reportPercent(p.horizon ? null : p.fillRate?.value)}</span><span className="mt-1 block text-slate-500">Cobertura {p.fillRate?.covered ?? 0}/{p.fillRate?.eligible ?? p.coverage.order.eligible} pares{p.fillRate?.covered && p.fillRate.covered < p.fillRate.eligible ? " · Parcial" : ""}</span></> : p.coverage[k].exact ?? reportNumber(p.values[k])}</td>)}</tr>)}</tbody></table></div></details>
+  </section>;
+}
+
+export function PeriodsInventoryChart({ points, error }: { points: DashboardPoint[]; error: boolean }) {
+  return <section aria-label="Inventario en tienda" className="min-w-0 space-y-3 border-y border-slate-200 bg-white px-4 py-5">
+    <h2 className="text-lg font-semibold text-slate-950">Inventario en tienda</h2>
+    {error ? <p role="alert" className="text-sm text-amber-800">Error de consulta de inventario. Actualiza la consulta para recuperar los saldos.</p> : <>
+      <p className="text-xs text-slate-600">Saldo por mes reportado · piezas · cobertura de productos</p>
+      <div className="h-48 min-w-0">
+        <ResponsiveContainer width="100%" height="100%" minWidth={0} initialDimension={{ width: 900, height: 192 }}>
+          <ComposedChart data={points} margin={{ top: 8, right: 18, bottom: 8, left: 4 }} accessibilityLayer>
+            <CartesianGrid stroke="#e8edf2" vertical={false}/>
+            <XAxis dataKey="month" interval={0} height={58} angle={-50} textAnchor="end" tick={{ fontSize: 10 }} tickLine={false} axisLine={false}/>
+            <YAxis width={56} tick={{ fontSize: 11 }} tickLine={false} axisLine={false} tickFormatter={v => Intl.NumberFormat("es-MX", { notation: "compact" }).format(v)}/>
+            <YAxis yAxisId="spacing" orientation="right" width={72} tick={false} axisLine={false}/>
+            <Tooltip content={({ active, label }) => {
+              const point = points.find(item => item.month === label);
+              return active && point ? <div className="rounded border bg-white p-3 text-xs"><b>{point.period}</b><p>{point.coverage.inventory.exact ?? "Sin dato"} · {point.coverage.inventory.covered}/{point.coverage.inventory.eligible} productos</p></div> : null;
+            }}/>
+            <Bar dataKey="values.inventory" name="Inventario en tienda" fill={dashboardSeries.inventory.color} maxBarSize={28} isAnimationActive={false}/>
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+      <details open><summary className="cursor-pointer text-sm">Saldos y cobertura mensual</summary>
+        <div className="mt-2 overflow-x-auto"><table aria-label="Inventario en tienda por mes" className="w-full text-left text-xs"><thead><tr><th>Mes de inventario</th><th>Piezas</th><th>Productos con saldo / seleccionados</th></tr></thead><tbody>{points.map(p => <tr key={p.period}><th className="py-1">{p.period}</th><td>{p.coverage.inventory.value === null ? "Sin dato" : reportNumber(p.coverage.inventory.value)}</td><td>{p.coverage.inventory.covered}/{p.coverage.inventory.eligible}</td></tr>)}</tbody></table></div>
+      </details>
+    </>}
   </section>;
 }

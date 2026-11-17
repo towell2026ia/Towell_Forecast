@@ -37,7 +37,7 @@ def _attribute_references(row):
     canonical = row.get("canonical_attribute_source")
     if canonical is not None:
         if (not isinstance(canonical, dict) or set(canonical) != {"contract", "master_sha256", "identity"}
-                or canonical["contract"] != "towell-sales-v1" or not isinstance(canonical["master_sha256"], str)
+                or canonical["contract"] not in {"towell-sales-v1", "pedido-towell-v1"} or not isinstance(canonical["master_sha256"], str)
                 or not SHA256.fullmatch(canonical["master_sha256"])
                 or not isinstance(canonical["identity"], list) or len(canonical["identity"]) != 3
                 or any(value is not None and not isinstance(value, str) for value in canonical["identity"])):

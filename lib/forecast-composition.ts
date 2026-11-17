@@ -1,6 +1,6 @@
 import { matchesOfficialSource } from "./forecast-reporting";
 import type { OperationalReadContext } from "./supabase/types";
-import { salesSourceAvailable } from "./official-sales-source";
+import { forecastSourceAvailable, forecastUnavailableMessage } from "./official-sales-source";
 
 type CompositionHorizon = {
   statistical_value: number | null; ensemble_value?: number | null; forecast_towell?: number | null;
@@ -21,8 +21,8 @@ export function forecastComposition(horizon: CompositionHorizon,
   const mlComponent = literal(horizon.ensemble_ml_component);
   const fields = { statistical, statisticalMethod, statisticalWeight, mlMethod, mlComponent, mlWeight, result,
     engineVersion: method(provenance.engine_version), sourceHash, generation };
-  if (!salesSourceAvailable(source) || expectedSource && !salesSourceAvailable(expectedSource))
-    return { ...fields, status: "SOURCE_MISMATCH", label: "Fuente de ventas no disponible", reason: "La composición no acredita una curva actual mientras las ventas autorizadas estén ausentes o sean inválidas." };
+  if (!forecastSourceAvailable(source) || expectedSource && !forecastSourceAvailable(expectedSource))
+    return { ...fields, status: "SOURCE_MISMATCH", label: expectedSource?.forecast_contract ? "Fuente de pedidos no disponible" : "Fuente de ventas no disponible", reason: forecastUnavailableMessage(expectedSource ?? source) };
   if (expectedSource && !matchesOfficialSource(provenance.source_context, expectedSource))
     return { ...fields, status: "SOURCE_MISMATCH", label: "Fuente incompatible", reason: "La composición pertenece a otra fuente; no se utiliza como respaldo de la consulta." };
   if (result === null) return { ...fields, status: "NO_RESULT", label: "Sin resultado Ensemble", reason: "No hay una cantidad Ensemble guardada para este horizonte." };

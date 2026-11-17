@@ -332,8 +332,17 @@ class GateBPostgres(unittest.TestCase):
         }
         # Local source guard and the read-only presentation of stored Ensemble components.
         approved_towell_sales={'lib/official-sales-source.ts', 'lib/forecast-composition.ts'}
+        # The local Pedido pilot authorizes a second target at the retrospective
+        # input boundary. Keep the rest of the engine under the frozen-code check.
+        engine_path = 'services/forecast_engine/engine.py'
+        previous_engine = subprocess.check_output(['git', 'show', f'{gateb}:{engine_path}'], cwd=REPO, text=True)
+        old_guard = '    if objective != "Venta":\n        raise ValueError("unsupported_forecast_objective")'
+        new_guard = '    if objective not in {"Venta", "Pedido"}:\n        raise ValueError("unsupported_forecast_objective")'
+        self.assertEqual(previous_engine.count(old_guard), 1)
+        self.assertEqual((REPO / engine_path).read_text(encoding='utf-8'), previous_engine.replace(old_guard, new_guard))
+        approved_pedido = {engine_path, 'lib/statistical-preview-data.ts'}
         after_gateb=subprocess.check_output(['git','diff','--name-only',gateb,'--',*prefixes],cwd=REPO,text=True)
-        self.assertEqual(set(after_gateb.splitlines()) - approved_prd3a9 - approved_portal_rs - approved_rs_assistant - approved_localhost - approved_hybrid_auth - approved_stored_scope_reads - approved_towell_sales,set())
+        self.assertEqual(set(after_gateb.splitlines()) - approved_prd3a9 - approved_portal_rs - approved_rs_assistant - approved_localhost - approved_hybrid_auth - approved_stored_scope_reads - approved_towell_sales - approved_pedido,set())
         private=os.environ.get('GATEB_PRIVATE_CANDIDATE')
         if private:
             identities=json.loads((Path(private)/'Identidades.json').read_text(encoding='utf-8'))

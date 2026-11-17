@@ -27,11 +27,49 @@ def uuid_value(value: str) -> str:
 
 SALES_SOURCE_FIELDS = ("source_hash", "generation", "first_period", "last_period", "sales_contract",
     "sales_source", "sales_sheet", "sales_file_sha256", "sales_training_cutoff", "authorized_source_hash", "inventory_source")
+ORDER_SOURCE_FIELDS = ("source_hash", "generation", "first_period", "last_period", "forecast_contract", "objective",
+    "target_metric", "target_sheet", "target_file_sha256", "training_cutoff", "authorized_source_hash", "inventory_source", "unit", "forecast_block_code")
 
 
-def require_sales_context(context, *, required=False):
+def forecast_objective(context):
+    return "Pedido" if isinstance(context, dict) and context.get("forecast_contract") == "pedido-towell-v1" else "Venta"
+
+
+def forecast_cutoff(context):
+    return context.get("training_cutoff") if forecast_objective(context) == "Pedido" else context.get("sales_training_cutoff")
+
+
+def accredited_context(context):
+    return isinstance(context, dict) and (context.get("sales_contract") == "towell-sales-v1" or context.get("forecast_contract") == "pedido-towell-v1")
+
+
+def require_sales_context(context, *, required=False, for_training=True):
     """The configured Towell path cannot degrade to an unpinned legacy input."""
-    if not required and not (isinstance(context, dict) and context.get("sales_contract") == "towell-sales-v1"):
+    if isinstance(context, dict) and context.get("forecast_contract") == "pedido-towell-v1":
+        if (context.get("objective") != "Pedido" or context.get("target_metric") != "ORDER"
+                or context.get("target_sheet") != "Pedidos" or context.get("unit") != "PIEZAS"
+                or context.get("inventory_source") != "ESTADISTICA" or type(context.get("generation")) is not int
+                or context["generation"] < 1 or type(context.get("forecast_available")) is not bool
+                or type(context.get("target_source_available")) is not bool
+                or any(not isinstance(context.get(key), str) or not re.fullmatch(r"[0-9a-f]{64}", context[key])
+                       for key in ("source_hash", "target_file_sha256", "authorized_source_hash"))
+                or context["source_hash"] != context["authorized_source_hash"]
+                or any(not isinstance(context.get(key), str) or not re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", context[key])
+                       for key in ("first_period", "last_period"))
+                or context["first_period"] > context["last_period"]):
+            raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 503)
+        cutoff = context.get("training_cutoff")
+        closed = isinstance(cutoff, str) and re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", cutoff) and context["first_period"] <= cutoff <= context["last_period"]
+        if ((context["forecast_available"] and (not closed or not context["target_source_available"] or context.get("forecast_block_code") is not None))
+                or cutoff is not None and not closed
+                or cutoff is None and context.get("forecast_block_code") != "ORDER_CLOSURE_UNVERIFIED"):
+            raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 503)
+        if for_training and not context["target_source_available"]:
+            raise PreviewError("ORDER_SOURCE_UNAVAILABLE", 503)
+        if for_training and not context["forecast_available"]:
+            raise PreviewError("ORDER_CLOSURE_UNVERIFIED", 409)
+        return context
+    if not required and not accredited_context(context):
         return context
     if (not isinstance(context, dict) or context.get("sales_contract") != "towell-sales-v1"
             or context.get("sales_source") != "TOWELL" or context.get("sales_sheet") != "Towell"
@@ -53,15 +91,16 @@ def require_sales_context(context, *, required=False):
 def matches_source(value, context):
     if not isinstance(value, dict) or not isinstance(context, dict):
         return False
-    if value.get("sales_contract") == "towell-sales-v1" or context.get("sales_contract") == "towell-sales-v1":
+    if accredited_context(value) or accredited_context(context):
         try:
-            require_sales_context(value, required=True)
-            require_sales_context(context, required=True)
+            require_sales_context(value, required=True, for_training=False)
+            require_sales_context(context, required=True, for_training=False)
         except PreviewError:
             return False
         # A transport may omit a null explanatory field. This does not change
         # source identity; every accredited source/cutoff field must still match.
-        return all(value.get(field) == context[field] for field in SALES_SOURCE_FIELDS)
+        fields = ORDER_SOURCE_FIELDS if forecast_objective(context) == "Pedido" else SALES_SOURCE_FIELDS
+        return all(value.get(field) == context.get(field) for field in fields)
     return (type(value.get("generation")) is int and type(context.get("generation")) is int
             and all(value.get(field) == context.get(field) for field in ("source_hash", "generation")))
 
@@ -94,7 +133,7 @@ class SupabaseReadClient:
                     code = response.json().get("code")
                 except (ValueError, AttributeError):
                     code = None
-                if code in {"SALES_SOURCE_UNAVAILABLE", "OFFICIAL_SOURCE_MISMATCH", "REPLACED_SOURCE_AUDIT_ONLY"}:
+                if code in {"SALES_SOURCE_UNAVAILABLE", "ORDER_SOURCE_UNAVAILABLE", "ORDER_CLOSURE_UNVERIFIED", "OFFICIAL_SOURCE_MISMATCH", "REPLACED_SOURCE_AUDIT_ONLY"}:
                     raise PreviewError(code, response.status_code)
                 if response.status_code == 403:
                     raise PreviewError("SCOPE_FORBIDDEN", 403)
@@ -127,6 +166,16 @@ class SupabaseReadClient:
                 raise PreviewError("DATA_READ_FAILED", 503) from None
             context = {"source_hash": source_hash, "generation": generation,
                        "first_period": first, "last_period": last}
+            if "forecast_contract" in row:
+                context.update({key: row[key] for key in ORDER_SOURCE_FIELDS if key in row})
+                context["forecast_available"] = row.get("forecast_available")
+                # Preserve unavailable metadata for inventory and UI reads; an
+                # operation that consumes ORDER must require availability.
+                context["target_source_available"] = row.get("target_source_available")
+                require_sales_context(context, required=True, for_training=False)
+                if type(context["forecast_available"]) is not bool:
+                    raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 503)
+                context["forecast_unavailable_reason"] = row.get("forecast_unavailable_reason")
             if "sales_contract" in row:
                 if (row.get("sales_contract") != "towell-sales-v1" or row.get("sales_source") != "TOWELL"
                         or row.get("sales_sheet") != "Towell" or row.get("inventory_source") != "ESTADISTICA"
@@ -156,6 +205,9 @@ class SupabaseReadClient:
                          available_through: str | None = None,
                          chain_id: str | None = None) -> list[dict[str, Any]]:
         context = self.operational_context()
+        require_sales_context(context, for_training=False)
+        if context.get("target_source_available") is False:
+            raise PreviewError("ORDER_SOURCE_UNAVAILABLE", 503)
         if context.get("sales_available") is False:
             raise PreviewError("SALES_SOURCE_UNAVAILABLE", 503)
         arguments = {**params, "p_source_hash": context["source_hash"],

@@ -1,4 +1,4 @@
-import { addMonth } from "./forecast-chart-data";
+import { addMonth, commercialScopeKey } from "./forecast-chart-data";
 import type { PreviewCandidate, PreviewProduct, PreviewScope } from "./forecast-preview";
 import type { Filters } from "./supabase/types";
 
@@ -40,7 +40,7 @@ export function statisticalCoverage(scope: PreviewScope | null) {
 }
 export const statisticalStatus = (status?: string) => ({ ACTIVE: "Activo", COLD_START: "Cold start", INACTIVE: "Inactivo", PRE_LAUNCH: "Pre-lanzamiento", "PRE-LAUNCH": "Pre-lanzamiento", INSUFFICIENT: "Historia insuficiente" }[status ?? ""] ?? status ?? "Sin estado disponible");
 export function statisticalRanking(scope: PreviewScope | null, filters: Filters) {
-  if (!scope || scope.chain_id !== filters.chainId) return [];
+  if (!scope || scope.chain_id !== filters.chainId && !(scope.commercial_projection?.filter_key === commercialScopeKey(filters) && scope.commercial_projection.chain_ids?.length)) return [];
   const search = filters.search.trim().toLocaleLowerCase("es-MX");
   return (scope.products ?? []).filter(p => (!filters.productId || p.product_id === filters.productId) &&
     (!filters.categoryId || p.category_id === filters.categoryId) && (!search || `${p.description} ${p.product_code}`.toLocaleLowerCase("es-MX").includes(search)))

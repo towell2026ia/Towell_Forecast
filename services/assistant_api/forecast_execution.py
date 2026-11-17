@@ -7,7 +7,7 @@ from services.forecast_engine.engine import (
 )
 
 
-def _unsupported_sample(error, rows, cutoff):
+def _unsupported_sample(error, rows, cutoff, objective="Venta"):
     selected, prediction = None, None
     trace = error.__traceback__
     while trace:
@@ -29,7 +29,7 @@ def _unsupported_sample(error, rows, cutoff):
             or prediction.get("horizon") not in range(1, 13)):
         return None
     own = [row for row in rows if row.get("chain_id") == product.chain_id and row.get("product_id") == product.product_id]
-    normalized = normalize_retrospective_dataset(own, cutoff)
+    normalized = normalize_retrospective_dataset(own, cutoff, objective=objective)
     if len(normalized) != 1 or normalized[0].history(cutoff) != history:
         return None
     periods = {add_month(cutoff, -offset) for offset in range(len(history))}
@@ -56,7 +56,7 @@ def execute_forecast(records, cutoff, *, compute=forecast_dataset, **kwargs):
         except ValueError as error:
             if kwargs.get("evidence_mode") != "RETROSPECTIVE_TRAINING":
                 raise
-            excluded = _unsupported_sample(error, remaining, cutoff)
+            excluded = _unsupported_sample(error, remaining, cutoff, kwargs.get("objective", "Venta"))
             if excluded is None:
                 raise
             exclusions.append(excluded)

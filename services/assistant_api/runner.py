@@ -34,7 +34,8 @@ def _require_legacy_input(provider, required=False):
     context_reader = getattr(provider, "source_context", None)
     if callable(context_reader):
         context = context_reader()
-        if isinstance(context, dict) and context.get("sales_contract") == "towell-sales-v1":
+        from .supabase_access import accredited_context
+        if accredited_context(context):
             raise ValueError("authorized_sales_requires_operational_preview")
 
 

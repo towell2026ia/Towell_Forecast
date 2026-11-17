@@ -1,6 +1,6 @@
 import type { CalculationDetail, CalculationHorizon, SelectionEvent, VintageCapabilities } from "./forecast-preview";
 import type { Category, Chain, HistoricalRow, OperationalInventory, OperationalReadContext, Product } from "./supabase/types";
-import { salesSourceAvailable, salesSourceIdentityFields, salesSourceState } from "./official-sales-source";
+import { forecastHistoryAvailable, forecastObjective, forecastTrainingCutoff, forecastSourceAvailable, forecastSourceIdentityFields, salesSourceIdentityFields, forecastSourceState } from "./official-sales-source";
 
 export type ReportSeries = "STATISTICAL" | "ML" | "ENSEMBLE" | "COLD_START" | "TOWELL";
 export const reportSeries: Record<ReportSeries, string> = { STATISTICAL: "Estadístico", ML: "ML", ENSEMBLE: "Ensemble", COLD_START: "Cold Start provisional", TOWELL: "Forecast Towell adoptado" };
@@ -19,7 +19,12 @@ export function matchesOfficialSource(value: unknown, context: Pick<OperationalR
   if (!value || typeof value !== "object") return false;
   const source = value as Partial<OperationalReadContext>;
   const target = context as Partial<OperationalReadContext>;
-  if (salesSourceState(source) === "INVALID" || salesSourceState(target) === "INVALID") return false;
+  if (forecastSourceState(source) === "INVALID" || forecastSourceState(target) === "INVALID") return false;
+  if (source.forecast_contract || target.forecast_contract) {
+    const fields = forecastSourceIdentityFields(target);
+    return source.forecast_contract === "pedido-towell-v1" && target.forecast_contract === source.forecast_contract && source.forecast_available === target.forecast_available
+      && fields.every(field => source[field] === target[field]);
+  }
   if (source.sales_contract === "towell-sales-v1" || target.sales_contract === "towell-sales-v1")
     return source.sales_contract === "towell-sales-v1" && target.sales_contract === "towell-sales-v1"
       && source.sales_available === target.sales_available
@@ -28,10 +33,10 @@ export function matchesOfficialSource(value: unknown, context: Pick<OperationalR
     source.source_hash === context.source_hash && source.generation === context.generation &&
     (source.sales_available === undefined || !("sales_available" in context) || source.sales_available === (context as OperationalReadContext).sales_available);
 }
-function compatibleSalesCut(issue: string, context?: OperationalReadContext, cutoffAt?: string) {
-  if (context?.sales_contract !== "towell-sales-v1") return true;
+function compatibleForecastCut(issue: string, context?: OperationalReadContext, cutoffAt?: string) {
+  if (!context?.forecast_contract && context?.sales_contract !== "towell-sales-v1") return true;
   const period = issue.slice(0, 7);
-  return /^20\d{2}-(0[1-9]|1[0-2])$/.test(period) && period >= context.first_period && period <= context.sales_training_cutoff!
+  return /^20\d{2}-(0[1-9]|1[0-2])$/.test(period) && period >= context.first_period && period <= (forecastTrainingCutoff(context) ?? "")
     && (!cutoffAt || cutoffAt.slice(0, 7) === period);
 }
 export type ForecastMatrixRow = { product: Product; chain: string; category: string; calculation: ReportCalculation | null; provisional: ProvisionalForecast | null; adopted: ReportDecision | null; values: Record<string, Record<ReportSeries, number | null>> };
@@ -73,11 +78,11 @@ export function leafScopeIds(chains: Chain[], selected?: Set<string>) {
 }
 export function chooseCalculations(snapshot: ReportSnapshot, choice: ReportChoice) {
   const grouped = new Map<string, ReportCalculation>();
-  if (!salesSourceAvailable(snapshot.sourceContext)) return grouped;
+  if (!forecastSourceAvailable(snapshot.sourceContext)) return grouped;
   for (const calculation of snapshot.calculations) {
     if (snapshot.sourceContext && !matchesOfficialSource(calculation.input_snapshot?.source_context, snapshot.sourceContext)) continue;
-    if (!compatibleSalesCut(calculation.issue_period, snapshot.sourceContext, calculation.cutoff_at)) continue;
-    if (calculation.objective !== "Venta" || !["READY_FOR_DECISION", "DECIDED", "SUPERSEDED"].includes(calculation.status) ||
+    if (!compatibleForecastCut(calculation.issue_period, snapshot.sourceContext, calculation.cutoff_at)) continue;
+    if (calculation.objective !== forecastObjective(snapshot.sourceContext) || !["READY_FOR_DECISION", "DECIDED", "SUPERSEDED"].includes(calculation.status) ||
       choice.calculationId && calculation.id !== choice.calculationId || choice.version && calculation.calculation_code !== choice.version || choice.issue && calculation.issue_period.slice(0, 7) !== choice.issue) continue;
     const key = `${calculation.chain_id}/${calculation.product_id}`;
     const prior = grouped.get(key);
@@ -98,10 +103,10 @@ export function validDecision(snapshot: ReportSnapshot, calculation: ReportCalcu
   return event;
 }
 export function buildForecastMatrix(snapshot: ReportSnapshot, choice: ReportChoice, periodRange: [string | null, string | null]) {
-  const provisionals = !salesSourceAvailable(snapshot.sourceContext) ? [] : snapshot.sourceContext ? snapshot.provisionals.filter(row => matchesOfficialSource(row.source_context, snapshot.sourceContext!) && compatibleSalesCut(row.issue_period, snapshot.sourceContext)) : snapshot.provisionals;
+  const provisionals = !forecastSourceAvailable(snapshot.sourceContext) ? [] : snapshot.sourceContext ? snapshot.provisionals.filter(row => matchesOfficialSource(row.source_context, snapshot.sourceContext!) && compatibleForecastCut(row.issue_period, snapshot.sourceContext)) : snapshot.provisionals;
   let selected = chooseCalculations(snapshot, choice);
   const anchor = [...selected.values()].sort((a, b) => a.issue_period.localeCompare(b.issue_period) || a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id)).at(-1);
-  const issue = anchor?.issue_period.slice(0, 7) ?? choice.issue ?? provisionals.map(p => p.issue_period).sort().at(-1) ?? null;
+  const issue = forecastSourceAvailable(snapshot.sourceContext) ? anchor?.issue_period.slice(0, 7) ?? choice.issue ?? provisionals.map(p => p.issue_period).sort().at(-1) ?? null : null;
   // Product datasets and winners stay separate. Only compatible frozen curves
   // with the same objective, cut, engine and evidence mode may be consolidated.
   if (anchor) selected = chooseCalculations({ ...snapshot, calculations: snapshot.calculations.filter(c => c.objective === anchor.objective && c.issue_period.slice(0, 7) === issue && c.engine_version === anchor.engine_version && c.evidence_mode === anchor.evidence_mode) }, choice);
@@ -152,9 +157,10 @@ export function comparableForecastRows(rows: ForecastMatrixRow[], periods: strin
 }
 export function confirmedMissingTowellHistory(row: ForecastMatrixRow, source: OperationalReadContext | undefined,
   history: HistoricalRow[], inventory: OperationalInventory[], historyComplete = false) {
-  return historyComplete && source?.sales_contract === "towell-sales-v1" && salesSourceAvailable(source)
+  const metric = source?.forecast_contract ? "ORDER" : "SALES";
+  return historyComplete && Boolean(source?.forecast_contract || source?.sales_contract === "towell-sales-v1") && forecastHistoryAvailable(source)
     && inventory.some(item => item.chain_id === row.product.chain_id && item.product_id === row.product.id)
-    && !history.some(item => item.chain_id === row.product.chain_id && item.product_id === row.product.id && item.SALES !== null);
+    && !history.some(item => item.chain_id === row.product.chain_id && item.product_id === row.product.id && item[metric] !== null);
 }
 export type CommercialRow = HistoricalRow & { calculation: ReportCalculation | null; customer: number | null; towellHistory: number | null; statistical: number | null; ml: number | null; ensemble: number | null; adopted: number | null; absoluteError: number | null; liveError: number | null; liveActual: number | null; wapeLive: number | null; fillRate: number | null; evidence: string };
 export function commercialRows(history: HistoricalRow[], snapshot: ReportSnapshot, choice: ReportChoice, metric: Exclude<ReportSeries, "COLD_START"> = "TOWELL", now = new Date()): CommercialRow[] {
@@ -168,16 +174,17 @@ export function commercialRows(history: HistoricalRow[], snapshot: ReportSnapsho
     const adopted = h ? amount(event?.selected_curve.find(r => r.horizon === h.horizon && r.target_period.slice(0, 7) === row.period.slice(0, 7))?.value) : null;
     const values = { STATISTICAL: amount(h?.statistical_value), ML: amount(h?.ml_value), ENSEMBLE: amount(h?.ensemble_value), TOWELL: adopted };
     const forecast = values[metric], sale = row.observations?.SALES;
-    const live = h && calculation ? snapshot.live.find(v => v.calculation_id === calculation.id && v.chain_id === row.chain_id && v.product_id === row.product_id && v.horizon === h.horizon && v.target_period === h.target_period && v.candidate === (metric === "TOWELL" ? "TOWELL_SELECTED" : metric) &&
+    const live = h && calculation?.objective === "Venta" ? snapshot.live.find(v => v.calculation_id === calculation.id && v.chain_id === row.chain_id && v.product_id === row.product_id && v.horizon === h.horizon && v.target_period === h.target_period && v.candidate === (metric === "TOWELL" ? "TOWELL_SELECTED" : metric) &&
       sale && v.sale_observation_id === sale.id && v.sale_version_no === sale.version && Number(v.actual_sale) === row.SALES && Number(v.forecast_value) === forecast && sale.availableAt &&
       Date.parse(calculation.created_at) < Date.parse(row.period.slice(0, 7) + "-01T00:00:00Z") && Date.parse(calculation.created_at) < Date.parse(sale.availableAt) &&
       Date.parse(sale.availableAt) <= now.getTime() && Date.parse(addReportMonth(row.period, 1) + "-01T00:00:00Z") <= now.getTime()) : null;
-    const absoluteError = forecast !== null && row.SALES !== null ? Math.abs(row.SALES - forecast) : null;
+    const observed = forecastObjective(snapshot.sourceContext) === "Pedido" ? row.ORDER : row.SALES;
+    const absoluteError = forecast !== null && observed !== null ? Math.abs(observed - forecast) : null;
     return { ...row, calculation: h ? calculation : null, customer: snapshot.sourceContext ? amount(row.exact?.FCST_CLIENTE_HISTORY) : amount(customer?.value), towellHistory: amount(row.exact?.FCST_TOWELL_HISTORY), statistical: values.STATISTICAL, ml: values.ML, ensemble: values.ENSEMBLE,
       adopted, absoluteError, liveError: live ? Math.abs(Number(live.actual_sale) - Number(live.forecast_value)) : null, liveActual: live ? Number(live.actual_sale) : null,
       wapeLive: live && Number(live.actual_sale) > 0 ? Math.abs(Number(live.actual_sale) - Number(live.forecast_value)) / Number(live.actual_sale) * 100 : null,
       fillRate: row.ORDER !== null && row.DELIVERY !== null && row.ORDER > 0 ? row.DELIVERY / row.ORDER * 100 : null,
-      evidence: live ? "LIVE temporal verificado" : h && calculation ? temporalLabel(row.period, calculation.created_at, now) + " · Sin evidencia LIVE" : row.SALES === null ? "Sin dato real" : "Histórico original · Sin forecast vinculado" };
+      evidence: live ? "LIVE temporal verificado" : h && calculation ? temporalLabel(row.period, calculation.created_at, now) + " · Sin evidencia LIVE" : observed === null ? "Sin dato real" : "Histórico original · Sin forecast vinculado" };
   });
 }
 export function commercialTotals(rows: CommercialRow[]) {

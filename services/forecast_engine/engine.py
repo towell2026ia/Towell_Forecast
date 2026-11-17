@@ -146,7 +146,7 @@ def normalize_retrospective_dataset(rows: Iterable[dict[str, Any]], cutoff: str,
                                     *, chain_id: str | None = None, product_id: str | None = None,
                                     objective: str = "Venta") -> list[ProductSeries]:
     """Separate boundary; never delegates to PIT by fabricating availability."""
-    if objective != "Venta":
+    if objective not in {"Venta", "Pedido"}:
         raise ValueError("unsupported_forecast_objective")
     date.fromisoformat(month_end(cutoff))
     grouped: dict[str, ProductSeries] = {}

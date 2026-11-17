@@ -89,20 +89,20 @@ def _identity_key(attributes):
                       ensure_ascii=False, separators=(",", ":"))
 
 
-def _historical_xml(source):
-    """Only Towell K:M raw literals/formula flags, never evaluate a formula."""
+def _historical_xml(source, *, sheet_name=SHEET):
+    """Only the explicit sheet's K:M raw literals, never evaluate a formula."""
     with zipfile.ZipFile(io.BytesIO(source)) as archive:
         workbook = ET.fromstring(archive.read("xl/workbook.xml"))
         relations = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
         targets = {node.attrib["Id"]: node.attrib["Target"] for node in relations}
         selected = next((node for node in workbook.findall("s:sheets/s:sheet", NS)
-                         if node.attrib["name"] == SHEET), None)
+                         if node.attrib["name"] == sheet_name), None)
         if selected is None:
-            raise TowellSourceError("TOWELL_SHEET_MISSING")
+            raise TowellSourceError(sheet_name.upper() + "_SHEET_MISSING")
         target = targets[selected.attrib["{" + NS["r"] + "}id"]]
         target = target.lstrip("/") if target.startswith("/") else posixpath.normpath("xl/" + target)
         if not target.startswith("xl/worksheets/"):
-            raise TowellSourceError("TOWELL_SHEET_RELATION_INVALID")
+            raise TowellSourceError(sheet_name.upper() + "_SHEET_RELATION_INVALID")
         output = {}
         with archive.open(target) as stream:
             for _, cell in ET.iterparse(stream, events=("end",)):
@@ -164,9 +164,24 @@ def read_towell_sales_source(workspace: Path | None = None, *, confirmed_closed_
     tests); callers cannot substitute another workbook or choose a fallback.
     Product UUID binding is deliberately left to the existing reconciliation.
     """
+    return _read_historical_sheet(workspace, confirmed_closed_period=confirmed_closed_period,
+        expected_sha256=expected_sha256, sheet_name=SHEET, metric_code="SALES", schema=SCHEMA,
+        contract=CONTRACT, interpretation="PROJECT_OWNER_AUTHORIZED_TOWELL_OBSERVED_SALES")
+
+
+def _read_historical_sheet(workspace, *, confirmed_closed_period, expected_sha256, sheet_name, metric_code, schema, contract, interpretation):
+    """One parser; its two public readers fix independent metric contracts."""
     from openpyxl import load_workbook
 
-    if not re.fullmatch(r"\d{4}-(?:0[1-9]|1[0-2])", confirmed_closed_period):
+    if (sheet_name, metric_code, schema, contract) not in {
+        (SHEET, "SALES", SCHEMA, CONTRACT),
+        ("Pedidos", "ORDER", "pedidos-order-source-1", "FT-FIX-PEDIDO-03"),
+    }:
+        raise TowellSourceError("HISTORICAL_SOURCE_CONTRACT_INVALID")
+
+    if not (confirmed_closed_period is None and sheet_name == "Pedidos") and not (
+            isinstance(confirmed_closed_period, str)
+            and re.fullmatch(r"\d{4}-(?:0[1-9]|1[0-2])", confirmed_closed_period)):
         raise TowellSourceError("TOWELL_CLOSURE_PERIOD_INVALID")
     root = DEFAULT_WORKSPACE if workspace is None else Path(workspace)
     path = root / "datos_privados" / MASTER_NAME
@@ -179,17 +194,17 @@ def read_towell_sales_source(workspace: Path | None = None, *, confirmed_closed_
     digest = hashlib.sha256(source).hexdigest()
     if expected_sha256 is not None and digest != expected_sha256:
         raise TowellSourceError("approved_towell_master_changed")
-    raw = _historical_xml(source)
+    raw = _historical_xml(source, sheet_name=sheet_name)
     book = load_workbook(io.BytesIO(source), read_only=True, data_only=True, keep_links=False)
     identities, records, exceptions = {}, [], []
     variants = defaultdict(set)
     seen = defaultdict(list)
     rows = 0
     try:
-        sheet = book[SHEET]
+        sheet = book[sheet_name]
         headers = next(sheet.iter_rows(min_row=5, max_row=5, min_col=11, max_col=13, values_only=True))
         if tuple(headers) != ("Venta 2024", "Venta 2025", "Venta 2026"):
-            raise TowellSourceError("TOWELL_HISTORY_HEADERS_MISMATCH")
+            raise TowellSourceError(sheet_name.upper() + "_HISTORY_HEADERS_MISMATCH")
         for row_number, row in enumerate(sheet.iter_rows(min_row=6, max_col=34, values_only=True), 6):
             if not any(row[index] is not None for index in (0, 4, 9, 10, 11, 12)):
                 continue
@@ -207,7 +222,7 @@ def read_towell_sales_source(workspace: Path | None = None, *, confirmed_closed_
                 variants[identity].add(json.dumps(attributes, sort_keys=True, ensure_ascii=False))
             if row_reason:
                 exceptions.append({"reason": row_reason, "row": row_number, "identity_key": identity,
-                    "source_reference": f"{SHEET}!A{row_number}:M{row_number}", "attributes": attributes,
+                    "source_reference": f"{sheet_name}!A{row_number}:M{row_number}", "attributes": attributes,
                     "month_original": _text(row[9])})
             for column, year in YEARS.items():
                 coordinate = column + str(row_number)
@@ -215,16 +230,19 @@ def read_towell_sales_source(workspace: Path | None = None, *, confirmed_closed_
                 trace = raw.get(coordinate, {})
                 amount, state = _quantity(original, trace)
                 period = f"{year}-{month:02d}" if month else None
-                record = {"identity_key": identity, "period": period, "metric_code": "SALES", "unit": "PIEZAS",
+                record = {"identity_key": identity, "period": period, "metric_code": metric_code, "unit": "PIEZAS",
                     "value": amount, "value_text": None if amount is None else format(amount, "f"),
                     "source_value_original": original, "source_value_literal": trace.get("source_value_literal"),
-                    "source_file": MASTER_NAME, "source_sha256": digest, "sheet": SHEET, "row": row_number,
-                    "column": column, "source_reference": f"{SHEET}!{coordinate}", "available_at": None,
+                    "source_file": MASTER_NAME, "source_sha256": digest, "sheet": sheet_name, "row": row_number,
+                    "column": column, "source_reference": f"{sheet_name}!{coordinate}", "available_at": None,
                     "has_formula": trace.get("has_formula", False), "formula_text": trace.get("formula_text"),
-                    "state": row_reason or state, "eligible": bool(identity and state == "OBSERVED" and period <= confirmed_closed_period)}
+                    "state": row_reason or state,
+                    "capture_eligible": bool(identity and state == "OBSERVED"),
+                    "eligible": bool(identity and state == "OBSERVED" and confirmed_closed_period is not None
+                                     and period <= confirmed_closed_period)}
                 record["quantity_state"] = ("EXPLICIT_ZERO" if amount == 0 else "POSITIVE_OBSERVED") if amount is not None else (
                     "EMPTY" if state == "EMPTY" else "UNUSABLE_SOURCE_VALUE")
-                if period and period > confirmed_closed_period and state == "OBSERVED":
+                if period and confirmed_closed_period is not None and period > confirmed_closed_period and state == "OBSERVED":
                     record.update(state="NOT_CLOSED", eligible=False)
                 records.append(record)
                 if identity and period:
@@ -236,14 +254,14 @@ def read_towell_sales_source(workspace: Path | None = None, *, confirmed_closed_
     for (identity, period), entries in seen.items():
         if len(entries) > 1:
             for record in entries:
-                record.update(state="DUPLICATE_SOURCE_KEY", eligible=False)
+                record.update(state="DUPLICATE_SOURCE_KEY", eligible=False, capture_eligible=False)
             exceptions.append({"reason": "DUPLICATE_SOURCE_KEY", "identity_key": identity, "period": period,
                 "source_references": [record["source_reference"] for record in entries]})
     for identity, attributes in variants.items():
         if len(attributes) > 1:
             for record in records:
                 if record["identity_key"] == identity:
-                    record.update(state="IDENTITY_ATTRIBUTES_CONFLICT", eligible=False)
+                    record.update(state="IDENTITY_ATTRIBUTES_CONFLICT", eligible=False, capture_eligible=False)
             exceptions.append({"reason": "IDENTITY_ATTRIBUTES_CONFLICT", "identity_key": identity,
                 "attributes": [json.loads(item) for item in sorted(attributes)]})
     activity = defaultdict(list)
@@ -251,15 +269,17 @@ def read_towell_sales_source(workspace: Path | None = None, *, confirmed_closed_
         if record["identity_key"]:
             activity[record["identity_key"]].append(record)
     for entries in activity.values():
-        observed = sorted(r["period"] for r in entries if r["eligible"])
-        positives = sorted(r["period"] for r in entries if r["eligible"] and r["value"] > 0)
+        activity_flag = "capture_eligible" if confirmed_closed_period is None else "eligible"
+        observed_rows = [r for r in entries if r[activity_flag]]
+        observed = sorted(r["period"] for r in observed_rows)
+        positives = sorted(r["period"] for r in observed_rows if r["value"] > 0)
         for record in entries:
             period = record["period"]
             if record["quantity_state"] in {"EXPLICIT_ZERO", "POSITIVE_OBSERVED"}:
                 evidence = "OBSERVED_QUANTITY_ONLY"
             elif record["quantity_state"] != "EMPTY" or not period:
                 evidence = "UNKNOWN_ACTIVITY"
-            elif period > confirmed_closed_period:
+            elif confirmed_closed_period is not None and period > confirmed_closed_period:
                 evidence = "FUTURE_NO_REAL"
             elif positives and period < positives[0]:
                 evidence = "BEFORE_FIRST_POSITIVE_OBSERVED"
@@ -274,9 +294,9 @@ def read_towell_sales_source(workspace: Path | None = None, *, confirmed_closed_
         raise TowellSourceError("TOWELL_MASTER_CHANGED_DURING_READ")
     known = [record["period"] for record in records if record["value"] is not None and record["period"]]
     eligible = [record["period"] for record in records if record["eligible"]]
-    return {"schema": SCHEMA, "contract": CONTRACT,
-        "source": {"path": str(path.resolve()), "name": MASTER_NAME, "sha256": digest, "sheet": SHEET,
-            "metric_code": "SALES", "unit": "PIEZAS", "interpretation": "PROJECT_OWNER_AUTHORIZED_TOWELL_OBSERVED_SALES",
+    return {"schema": schema, "contract": contract,
+        "source": {"path": str(path.resolve()), "name": MASTER_NAME, "sha256": digest, "sheet": sheet_name,
+            "metric_code": metric_code, "unit": "PIEZAS", "interpretation": interpretation,
             "historical_columns": dict(YEARS), "unchanged_after_read": True,
             "product_opening_dates": "NOT_ACCREDITED",
             "activity_evidence_limit": "Blank cells never establish a product opening date, PRE-LAUNCH or inactivity."},
