@@ -116,11 +116,43 @@ class OperationalMultiChainForecastRunner:
             raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 503)
 
     @staticmethod
-    def _cached_scope(preview, job, chain, issue, digest):
+    def _cached_scope(preview, job, chain, issue, digest, expected_product_ids=None):
         if (preview.get("chain_id") != chain or preview.get("objective") != job.get("objective", "Venta")
                 or preview.get("issue_period") != issue or preview.get("dataset_hash") != digest
                 or job.get("source_context") is not None and not matches_source(preview.get("source_context"), job["source_context"])):
             raise PreviewError("LINEAGE_MISMATCH", 409)
+        if job.get("objective") == "Pedido" and job.get("requested_product_ids") is not None:
+            products = [p.get("product_id") for p in preview.get("products", [])]
+            if (expected_product_ids is None or len(products) != len(set(products))
+                    or set(products) != set(expected_product_ids)):
+                raise PreviewError("LINEAGE_MISMATCH", 409)
+
+    def _preview_cache_key(self, job, chain, issue, digest, *, exact_selection=True):
+        key = {"dataset_hash": digest, "chain": chain,
+            "objective": job["objective"], "issue": issue, "mode": job["mode"],
+            "engine": PREVIEW_ENGINE_VERSION, "policy": asdict(self.policy), "environment": self.environment,
+            "source_context": job.get("source_context")}
+        if exact_selection and job.get("objective") == "Pedido" and job.get("requested_product_ids") is not None:
+            key["requested_product_ids"] = sorted(set(job["requested_product_ids"]))
+        return content_hash(key)
+
+    def _preview_cache_lookup(self, job, chain, issue, digest, expected_product_ids=None):
+        key = self._preview_cache_key(job, chain, issue, digest)
+        legacy = self._preview_cache_key(job, chain, issue, digest, exact_selection=False)
+        for lookup in dict.fromkeys((key, legacy)):
+            existing = self.persistence.get("forecast_previews", lookup)
+            if existing is None:
+                continue
+            try:
+                self._cached_scope(existing, job, chain, issue, digest, expected_product_ids)
+            except PreviewError:
+                if lookup == key:
+                    raise
+                # Preserve an incompatible old cache by ID; it is not reused
+                # for a different requested commercial membership.
+                continue
+            return lookup, existing
+        return key, None
 
     def _execute(self, provider, job, requested_issue, signature):
         try:
@@ -163,14 +195,15 @@ class OperationalMultiChainForecastRunner:
                             continue
                         raise PreviewError("INSUFFICIENT_HISTORY")
                     digest = snapshot_hash(rows)
-                    key = content_hash({"dataset_hash": digest, "chain": chain,
-                        "objective": job["objective"], "issue": issue, "mode": job["mode"],
-                        "engine": PREVIEW_ENGINE_VERSION, "policy": asdict(self.policy), "environment": self.environment,
-                        "source_context": job.get("source_context")})
+                    expected_products = None
+                    if job["objective"] == "Pedido" and selected_ids is not None:
+                        if hasattr(provider, "product_catalog"):
+                            expected_products = {p["id"] for p in provider.product_catalog(chain) if p["id"] in selected_ids}
+                        elif len(job["chain_ids"]) == 1:
+                            expected_products = set(selected_ids)
                     with self._lock:
-                        existing = self.persistence.get("forecast_previews", key)
+                        key, existing = self._preview_cache_lookup(job, chain, issue, digest, expected_products)
                     if existing:
-                        self._cached_scope(existing, job, chain, issue, digest)
                         job["scopes"].append({"chain_id": chain, "preview_id": key, "status": "READY_PREVIEW", "issue_period": issue, "reused": True})
                         continue
                     self._stage(job, "ELIGIBILITY")
@@ -227,9 +260,8 @@ class OperationalMultiChainForecastRunner:
                     with self._lock:
                         child_lock = self._child_locks.setdefault(key, threading.Lock())
                     with child_lock:
-                        existing = self.persistence.get("forecast_previews", key)
+                        key, existing = self._preview_cache_lookup(job, chain, issue, digest, expected_products)
                         if existing:
-                            self._cached_scope(existing, job, chain, issue, digest)
                             job["scopes"].append({"chain_id": chain, "preview_id": key, "status": "READY_PREVIEW", "issue_period": issue, "reused": True})
                             continue
                         self._stage(job, "STATISTICAL")

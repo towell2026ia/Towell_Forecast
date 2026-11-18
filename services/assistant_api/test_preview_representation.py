@@ -6,6 +6,7 @@ import unittest
 from services.forecast_engine.engine import ForecastPolicy, add_month
 from services.assistant_api.operational_preview import OperationalMultiChainForecastRunner
 from services.assistant_api.preview_representation import project_pedido_individual_ml
+from services.assistant_api.supabase_access import PreviewError
 
 
 def fixture():
@@ -32,6 +33,44 @@ def fixture():
 
 
 class PreviewRepresentationTests(unittest.TestCase):
+    def test_exact_order_cache_key_includes_stock_only_members_and_is_order_independent(self):
+        runner = OperationalMultiChainForecastRunner.__new__(OperationalMultiChainForecastRunner)
+        runner.policy = ForecastPolicy(); runner.environment = "test"
+        ten = {"objective": "Pedido", "mode": "RETROSPECTIVE_TRAINING", "requested_product_ids": [f"p{i}" for i in range(10)]}
+        eleven = {**ten, "requested_product_ids": [*ten["requested_product_ids"], "stock-only"]}
+        key_ten = runner._preview_cache_key(ten, "chain", "2026-09", "same-real-rows")
+        key_eleven = runner._preview_cache_key(eleven, "chain", "2026-09", "same-real-rows")
+        self.assertNotEqual(key_ten, key_eleven)
+        self.assertEqual(key_eleven, runner._preview_cache_key({**eleven, "requested_product_ids": list(reversed(eleven["requested_product_ids"]))}, "chain", "2026-09", "same-real-rows"))
+        self.assertEqual(runner._preview_cache_key({**ten, "objective": "Venta"}, "chain", "2026-09", "same-real-rows"),
+                         runner._preview_cache_key({**eleven, "objective": "Venta"}, "chain", "2026-09", "same-real-rows"))
+
+    def test_legacy_exact_cache_reused_only_for_identical_authorized_membership_without_overwrite(self):
+        runner = OperationalMultiChainForecastRunner.__new__(OperationalMultiChainForecastRunner)
+        runner.policy = ForecastPolicy(); runner.environment = "test"
+        job = {"objective": "Pedido", "mode": "RETROSPECTIVE_TRAINING", "requested_product_ids": [f"p{i}" for i in range(10)]}
+        old = {"chain_id": "chain", "objective": "Pedido", "issue_period": "2026-09", "dataset_hash": "same-real-rows",
+               "products": [{"product_id": pid} for pid in job["requested_product_ids"]]}
+        legacy = runner._preview_cache_key(job, "chain", "2026-09", "same-real-rows", exact_selection=False)
+        database = {legacy: old}; original = deepcopy(database)
+        class Store:
+            def get(self, entity, key):
+                self_entity = entity
+                if self_entity != "forecast_previews":raise AssertionError("unexpected entity")
+                return database.get(key)
+            def put(self, *args):raise AssertionError("cache lookup cannot rewrite history")
+        runner.persistence = Store()
+        key, found = runner._preview_cache_lookup(job, "chain", "2026-09", "same-real-rows", set(job["requested_product_ids"]))
+        self.assertEqual(key, legacy); self.assertIs(found, old)
+        eleven = {**job, "requested_product_ids": [*job["requested_product_ids"], "stock-only"]}
+        new_key, found = runner._preview_cache_lookup(eleven, "chain", "2026-09", "same-real-rows", set(eleven["requested_product_ids"]))
+        self.assertIsNone(found)
+        self.assertNotEqual(new_key, legacy)
+        self.assertEqual(database, original)
+        database[new_key] = deepcopy(old)
+        with self.assertRaisesRegex(PreviewError, "LINEAGE_MISMATCH"):
+            runner._preview_cache_lookup(eleven, "chain", "2026-09", "same-real-rows", set(eleven["requested_product_ids"]))
+
     def test_individual_candidate_only_and_ensemble_literal_are_separate_and_idempotent(self):
         saved = fixture(); original = deepcopy(saved)
         out = project_pedido_individual_ml(saved)
