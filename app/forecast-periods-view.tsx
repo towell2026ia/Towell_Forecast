@@ -2,7 +2,7 @@
 
 import { useCallback, useMemo, useState } from "react";
 import { addReportMonth, comparableForecastRows, confirmedMissingTowellHistory, emptyReportChoice, matchesOfficialSource, matrixTotal, reportSeries, temporalLabel, type ForecastMatrixRow, type ReportSnapshot } from "@/lib/forecast-reporting";
-import type { Filters, HistoricalRow, OperationalInventory } from "@/lib/supabase/types";
+import type { Filters, HistoricalRow, OperationalFulfillment, OperationalInventory } from "@/lib/supabase/types";
 import { detailMetrics, periodsDashboard, shortPeriod } from "@/lib/periods-dashboard";
 import { modelKey } from "@/lib/commercial-filters";
 import { PeriodsComparisonChart } from "@/components/forecast/periods-comparison-chart";
@@ -38,20 +38,22 @@ function StoredPeriods() {
     const historyFilters: Filters = { ...filters, periodRange: [null, null] };
     const inventoryRead = context && repository.getReportInventory ? repository.getReportInventory(filters, context)
       .then(rows => ({ rows, error: false }), () => ({ rows: [], error: true })) : Promise.resolve({ rows: [], error: Boolean(context) });
-    const [snapshot, history, stock] = await Promise.all([
+    const fulfillmentRead = context?.fulfillment_available === true ? repository.getReportFulfillment ? repository.getReportFulfillment(historyFilters, context)
+      .then(rows => ({ rows, error: false }), () => ({ rows: [], error: true })) : Promise.resolve({ rows: [], error: true }) : Promise.resolve({ rows: [], error: false });
+    const [snapshot, history, stock, fulfillment] = await Promise.all([
       context ? repository.getReportSnapshot(filters, context) : repository.getReportSnapshot(filters),
-      (context ? repository.getReportHistory?.(historyFilters, context) : repository.getReportHistory?.(historyFilters)) ?? Promise.resolve([]), inventoryRead,
+      (context ? repository.getReportHistory?.(historyFilters, context) : repository.getReportHistory?.(historyFilters)) ?? Promise.resolve([]), inventoryRead, fulfillmentRead,
     ]);
-    return { snapshot, history, inventory: stock.rows, inventoryError: stock.error, historyComplete: Boolean(repository.getReportHistory) };
+    return { snapshot, history, inventory: stock.rows, inventoryError: stock.error, fulfillment: fulfillment.rows, fulfillmentError: fulfillment.error, historyComplete: Boolean(repository.getReportHistory) };
   }, [repository, filters, pin]));
   return <section className="min-w-0 space-y-5"><div><h1 className="text-2xl font-semibold text-slate-950">Periodos</h1><p className="mt-1 text-sm text-slate-500">Desempeño comercial y forecast almacenado</p></div><ReportState loading={report.loading} error={report.error} errorCode={report.errorCode}/>{report.data && <Matrix key={JSON.stringify(filters)} {...report.data} periods={filters.periodRange}/>}</section>;
 }
-function Matrix({ snapshot, history, inventory, inventoryError, periods, historyComplete = false }: { snapshot: ReportSnapshot; history: HistoricalRow[]; inventory: OperationalInventory[]; periods: Filters["periodRange"]; inventoryError: boolean; historyComplete?: boolean }) {
+function Matrix({ snapshot, history, inventory, inventoryError, fulfillment, fulfillmentError, periods, historyComplete = false }: { snapshot: ReportSnapshot; history: HistoricalRow[]; inventory: OperationalInventory[]; fulfillment: OperationalFulfillment[]; fulfillmentError: boolean; periods: Filters["periodRange"]; inventoryError: boolean; historyComplete?: boolean }) {
   const [choice, setChoice] = useState({ ...emptyReportChoice });
   const matrix = useMemo(() => {
-    try { return { data: periodsDashboard(snapshot, history, choice, periods, inventory), error: false }; }
+    try { return { data: periodsDashboard(snapshot, history, choice, periods, inventory, fulfillment), error: false }; }
     catch { return { data: null, error: true }; }
-  }, [snapshot, history, choice, periods, inventory]);
+  }, [snapshot, history, choice, periods, inventory, fulfillment]);
   const dashboard = matrix.data, data = dashboard?.matrix;
   const ready = data?.rows.filter(r => r.calculation) ?? [];
   const pending = data?.rows.filter(r => !r.calculation) ?? [];
@@ -67,9 +69,11 @@ function Matrix({ snapshot, history, inventory, inventoryError, periods, history
     <ReportState loading={false} error={matrix.error}/>
     {dashboard && data && <>
       {!forecastSourceAvailable(snapshot.sourceContext) && <p role="status" className="text-sm text-slate-600">{forecastUnavailableMessage(snapshot.sourceContext)}</p>}
-      {snapshot.sourceContext && <OperationalDownload snapshot={snapshot} dashboard={dashboard} history={history} inventory={inventory} inventoryError={inventoryError} historyComplete={historyComplete}/>}
+      {snapshot.sourceContext && <OperationalDownload snapshot={snapshot} dashboard={dashboard} history={history} inventory={inventory} inventoryError={inventoryError} fulfillmentError={fulfillmentError} historyComplete={historyComplete}/>}
       <div aria-label="Alcance de Periodos" className="space-y-2"><p className="text-sm font-semibold text-slate-900">{[...new Set(data.rows.map(r => r.chain))].join(" · ") || "Sin productos coincidentes"}</p><p className="text-xs text-slate-600">{models.length <= 5 ? models.join(" + ") : `${models.length} modelos`} · {data.rows.length} productos · Corte {dashboard.cutoff ?? "sin acreditar"}{!data.issue ? " (histórico; sin cálculo)" : ""}</p><p className="text-xs text-slate-500">{data.excludedParentScopes} scopes padre superpuestos excluidos. Las curvas se consolidan por corte, objetivo, versión de motor y modo de evidencia compatibles.</p></div>
       <dl aria-label="Indicadores comerciales" className="grid grid-cols-2 gap-y-5 border-y border-slate-200 py-5 lg:grid-cols-6">{[[`Venta real · ${dashboard.historySlots} meses`, reportNumber(dashboard.kpis.sales)], [`Pedido · ${dashboard.historySlots} meses`, reportNumber(dashboard.kpis.orders)], [`Enviado · ${dashboard.historySlots} meses`, reportNumber(dashboard.kpis.delivery)], ["Fill Rate", reportPercent(dashboard.kpis.fillRate)], ["Productos con cálculo / Total", `${dashboard.available}/${data.rows.length}`], ["Con decisión / Total", `${dashboard.adopted}/${data.rows.length}`]].map(([label, value]) => <div key={label} className="min-w-0 border-l border-slate-200 px-3 first:border-l-0"><dt className="text-xs text-slate-500">{label}</dt><dd className="mt-2 break-words text-xl font-semibold tabular-nums text-slate-950">{value}</dd></div>)}</dl>
+      {snapshot.sourceContext?.forecast_contract && <p className="text-xs text-slate-600">Fill Rate: cumplimiento BAASE de {dashboard.fulfillmentPeriods[0] ?? "sin periodo"} a {dashboard.fulfillmentPeriods.at(-1) ?? "sin periodo"}{dashboard.kpis.fillRatePartialPeriod ? " · Incluye captura parcial posterior al cierre" : ""}. Entrega comparable {dashboard.kpis.fillRateDeliveredExact ?? "Sin dato"} / Pedido comparable {dashboard.kpis.fillRateOrderedExact ?? "Sin dato"} piezas. Estos pares se utilizan sólo para Fill Rate, no para entrenar el pronóstico de Pedidos.</p>}
+      {fulfillmentError && <p role="alert" className="text-sm text-amber-800">Error de consulta de cumplimiento BAASE. No se sustituyen sus pares por el histórico de Pedidos.</p>}
       {ready.length > 0 && ready.length < data.rows.length && <p role="status" className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"><strong>TOTAL PARCIAL</strong> · Forecast de {ready.length}/{data.rows.length} productos del alcance. No representa el total completo de los modelos seleccionados.</p>}
       {ready.some(r => r.calculation?.evidence_mode === "RETROSPECTIVE_TRAINING" || data.periods.some(p => temporalLabel(p, r.calculation?.created_at ?? null).includes("Emisión retrospectiva"))) && <p className="text-sm text-amber-800"><strong>Emisión retrospectiva.</strong> Candidatos congelados; referencia sugerida no implica adopción. Los meses emitidos retrospectivamente no generan WAPE LIVE.</p>}
       <PeriodsComparisonChart key={dashboard.objective} points={dashboard.points} cutoff={dashboard.cutoff} inventoryError={inventoryError} objective={dashboard.objective ?? undefined} title={dashboard.objective === "Pedido" ? "Pedido histórico y pronóstico" : "Período"} showFillRate/>
@@ -82,7 +86,7 @@ function Matrix({ snapshot, history, inventory, inventoryError, periods, history
     </>}
   </>;
 }
-function OperationalDownload({ snapshot, dashboard, history, inventory, inventoryError, historyComplete }: { snapshot: ReportSnapshot; dashboard: ReturnType<typeof periodsDashboard>; history: HistoricalRow[]; inventory: OperationalInventory[]; inventoryError?: boolean; historyComplete: boolean }) {
+function OperationalDownload({ snapshot, dashboard, history, inventory, inventoryError, fulfillmentError, historyComplete }: { snapshot: ReportSnapshot; dashboard: ReturnType<typeof periodsDashboard>; history: HistoricalRow[]; inventory: OperationalInventory[]; inventoryError?: boolean; fulfillmentError?: boolean; historyComplete: boolean }) {
   const { repository } = useForecastFilters();
   const [error, setError] = useState("");
   const context = snapshot.sourceContext!;
@@ -91,6 +95,7 @@ function OperationalDownload({ snapshot, dashboard, history, inventory, inventor
   async function download() {
     setError("");
     if (inventoryError) { setError("La consulta de inventario falló. Actualiza Períodos antes de exportar."); return; }
+    if (fulfillmentError) { setError("La consulta de cumplimiento BAASE falló. Actualiza Períodos antes de exportar."); return; }
     let stage: OperationalExportStage = "SOURCE_READ";
     try {
       const current = await repository.openOperationalRead?.();

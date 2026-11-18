@@ -77,15 +77,15 @@ def validate_package(payload):
         source_ids.add(sid)
         source_hashes.add(source["source_hash"])
     ids, periods = set(), []
-    for section in ("observations", "inventory"):
-        records = payload[section]
+    for section in ("observations", "inventory", "fulfillment"):
+        records = payload.get(section, []) if section == "fulfillment" else payload[section]
         if not isinstance(records, list):
             raise ValueError("official_records_invalid")
         keys = set()
         for row in records:
             identity = (_uuid(row["chain_id"]), _uuid(row["product_id"]), row["period"])
             oid, source = _uuid(row["id"]), _uuid(row["source_id"])
-            metric = row.get("metric_code") if section == "observations" else "INVENTORY"
+            metric = row.get("metric_code") if section == "observations" else section.upper()
             if (oid in ids or (*identity, metric) in keys or source not in source_ids
                     or not MONTH.fullmatch(row["period"]) or row["purchase_type"] != "RS"
                     or not isinstance(row["format"], str) or not row["format"].strip()
@@ -93,7 +93,18 @@ def validate_package(payload):
                     or not isinstance(row["source_reference"], str) or not row["source_reference"].strip()
                     or section == "observations" and metric not in METRICS):
                 raise ValueError("official_record_identity_invalid")
-            if not isinstance(row["value"], str) or quantity(row["value"]) is None:
+            if section == "fulfillment":
+                expected_source = next(s for s in sources if s["id"] == source)
+                cell = re.fullmatch(r"BAASE!W(\d+):X(\d+)", row["source_reference"])
+                if (row.get("source_sha256") != expected_source["source_hash"] or type(row.get("partial_period")) is not bool
+                        or cell is None or cell[1] != cell[2]
+                        or row.get("order_source_reference") != "BAASE!W" + cell[1]
+                        or row.get("delivery_source_reference") != "BAASE!X" + cell[1]):
+                    raise ValueError("official_fulfillment_lineage_invalid")
+                for field in ("order_value", "delivery_value"):
+                    if field not in row or row[field] is not None and (not isinstance(row[field], str) or quantity(row[field]) is None):
+                        raise ValueError("official_fulfillment_quantity_invalid")
+            elif not isinstance(row["value"], str) or quantity(row["value"]) is None:
                 raise ValueError("official_value_invalid")
             _attributes(row)
             ids.add(oid)
@@ -166,6 +177,9 @@ class OfficialSourceLab(LocalLab):
         self._official()
         payload = validate_package(payload)
         source_hash = payload["source_hash"]
+        fulfillment = payload.get("fulfillment", [])
+        if fulfillment and not (getattr(self, "local_rehearsal", False) or isinstance(self, OfficialSourceLab)):
+            raise ValueError("local_fulfillment_only")
         with c.transaction():
             self.maintenance(c, source_hash)
             c.execute("select pg_advisory_xact_lock(hashtextextended('official-current-source',0))")
@@ -177,7 +191,7 @@ class OfficialSourceLab(LocalLab):
                 return {"source_hash": source_hash, "generation": observed_generation, "unchanged": True}
             c.execute("lock table public.monthly_observations,public.products,public.import_batches,public.source_evidence in share row exclusive mode")
             c.execute("select set_config('towell.official_expected_generation',%s,true)", (str(expected_generation),))
-            records = [*payload["observations"], *payload["inventory"]]
+            records = [*payload["observations"], *payload["inventory"], *fulfillment]
             self._profiles(c, records, approved_profiles)
             actor = c.execute("select auth.uid() actor").fetchone()["actor"]
             if actor is None or not c.execute("select private.is_active_admin() allowed").fetchone()["allowed"]:
@@ -238,6 +252,16 @@ class OfficialSourceLab(LocalLab):
                       r["value"], r["value"], r["source_reference"], batches[r["source_id"], r["chain_id"], r["period"]],
                       json.dumps(_attributes(r)),json.dumps(_attribute_references(r)))
                      for r in payload["inventory"]])
+                if fulfillment:
+                    cursor.executemany("""insert into public.monthly_fulfillment
+                        (id,chain_id,product_id,period,format,upc,purchase_type,order_quantity,delivery_quantity,
+                         order_text,delivery_text,source_reference,order_source_reference,delivery_source_reference,
+                         source_sha256,partial_period,source_batch_id)
+                        values(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                        [(r["id"],r["chain_id"],r["product_id"],r["period"]+"-01",r["format"],r["upc"],r["purchase_type"],
+                          r.get("order_value"),r.get("delivery_value"),r.get("order_value"),r.get("delivery_value"),
+                          r["source_reference"],r["order_source_reference"],r["delivery_source_reference"],r["source_sha256"],
+                          r["partial_period"],batches[r["source_id"],r["chain_id"],r["period"]]) for r in fulfillment])
             generation = expected_generation + 1
             values = (source_hash, generation, payload["first_period"] + "-01", payload["last_period"] + "-01",
                       [s["id"] for s in payload["sources"]])

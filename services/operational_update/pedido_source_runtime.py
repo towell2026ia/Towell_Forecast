@@ -52,7 +52,7 @@ def sealed_g2(directory, manifest_sha256):
     return manifest, payload
 
 
-def prepare_packet(document, bindings, snapshot, g2_payload, *, rules):
+def prepare_packet(document, bindings, snapshot, g2_payload, *, rules, fulfillment_rows=None, fulfillment_source=None):
     """Prepare only captured ORDER, informative SALES and independent stock.
 
     `eligible` remains a training attribute. `capture_eligible` permits importing
@@ -62,18 +62,31 @@ def prepare_packet(document, bindings, snapshot, g2_payload, *, rules):
     if (document.get("schema") != "pedidos-order-source-1" or document.get("contract") != POLICY
             or source.get("sheet") != "Pedidos" or source.get("metric_code") != "ORDER"
             or source.get("unit") != "PIEZAS" or not source.get("unchanged_after_read")
-            or closure.get("last_closed_period") is not None
-            or closure.get("forecast_available") is not False
-            or closure.get("forecast_block_code") != BLOCK_CODE):
-        raise ValueError("unclosed_pedidos_consultation_contract_required")
+            or closure.get("forecast_available") is not bool(closure.get("last_closed_period"))
+            or closure.get("forecast_block_code") != (None if closure.get("last_closed_period") else BLOCK_CODE)):
+        raise ValueError("pedidos_capture_contract_required")
+    closed = closure.get("last_closed_period")
+    if closed and (not isinstance(closed, str) or not re.fullmatch(r"20\d\d-(?:0[1-9]|1[0-2])", closed)
+                   or not isinstance(closure.get("evidence"), dict)):
+        raise ValueError("pedidos_explicit_closure_required")
     prior_sources = g2_payload["sources"]
     master_sources = [s for s in prior_sources if s["source_hash"] == source["sha256"]]
     if len(prior_sources) != 2 or len(master_sources) != 1:
         raise ValueError("same_accredited_master_required_for_informative_sales")
-    master = {"id": str(uuid5(NAMESPACE_URL, "towell-source-contract:" + CONTRACT + ":" + source["sha256"])),
+    closure_seed = ":" + fingerprint(closure) if closed else ""
+    master = {"id": str(uuid5(NAMESPACE_URL, "towell-source-contract:" + CONTRACT + ":" + source["sha256"] + closure_seed)),
               "source_name": source["name"], "source_hash": source["sha256"],
-              "reference": "Pedidos!K:M ORDER captured, closure unknown; Towell!K:M SALES informative; " + POLICY}
-    stock = deepcopy(next(s for s in prior_sources if s["id"] != master_sources[0]["id"]))
+              "reference": "Pedidos!K:M ORDER captured, " + ("confirmed closed through " + closed if closed else "closure unknown")
+                  + "; Towell!K:M SALES informative; " + POLICY}
+    prior_stock = next(s for s in prior_sources if s["id"] != master_sources[0]["id"])
+    stock = deepcopy(prior_stock)
+    if (fulfillment_rows is None) != (fulfillment_source is None):
+        raise ValueError("independent_fulfillment_contract_incomplete")
+    if fulfillment_source is not None:
+        if (not closed or fulfillment_source.get("source_hash") != prior_stock["source_hash"]
+                or fulfillment_source.get("source_name") != prior_stock["source_name"]):
+            raise ValueError("independent_fulfillment_source_invalid")
+        stock = deepcopy(fulfillment_source)
     sources = [master, stock]
     bound, targets = defaultdict(list), defaultdict(list)
     for binding in bindings:
@@ -104,7 +117,7 @@ def prepare_packet(document, bindings, snapshot, g2_payload, *, rules):
         if (row["metric_code"] != "ORDER" or row["sheet"] != "Pedidos"
                 or not re.fullmatch(r"Pedidos![KLM]\d+", row["source_reference"])
                 or row.get("available_at") is not None or row.get("has_formula") or row["value_text"] is None
-                or row.get("eligible") is not False):
+                or row.get("eligible") is not bool(closed and row["period"] <= closed)):
             raise ValueError("captured_pedidos_provenance_invalid")
         try:
             amount = exact_quantity(row["value_text"])
@@ -144,7 +157,7 @@ def prepare_packet(document, bindings, snapshot, g2_payload, *, rules):
             if (row.get("metric_code") != metric or row.get("source_sheet") != sheet
                     or not re.fullmatch(ref, row.get("source_reference", ""))
                     or row.get("purchase_type") != "RS"
-                    or row.get("source_id") != (master_sources[0]["id"] if section == "observations" else stock["id"])):
+                    or row.get("source_id") != (master_sources[0]["id"] if section == "observations" else prior_stock["id"])):
                 raise ValueError("informative_g2_provenance_invalid")
             if set(identifiers.get((row["chain_id"], row["upc"]), {})) != {row["product_id"]}:
                 raise ValueError("informative_g2_identity_changed")
@@ -159,34 +172,59 @@ def prepare_packet(document, bindings, snapshot, g2_payload, *, rules):
                     "identity": [own.get(k) for k in ("account", "format", "upc")]}
             row["source_id"] = master["id"] if section == "observations" else stock["id"]
             dest.append(row)
+    fulfillment = deepcopy(fulfillment_rows or [])
+    for row in fulfillment:
+        if (row.get("source_id") != stock["id"] or row.get("source_sha256") != stock["source_hash"]
+                or row.get("purchase_type") != "RS"
+                or not re.fullmatch(r"BAASE!W\d+", row.get("order_source_reference", ""))
+                or not re.fullmatch(r"BAASE!X\d+", row.get("delivery_source_reference", ""))
+                or set(identifiers.get((row["chain_id"], row["upc"]), {})) != {row["product_id"]}):
+            raise ValueError("independent_fulfillment_row_invalid")
+        for name in ("order_value", "delivery_value"):
+            if row.get(name) is not None:
+                exact_quantity(row[name])
     policy = {"contract": POLICY, "target_source": "PEDIDOS_KLM_ONLY", "target_metric": "ORDER",
               "informative_sales_source": "ACCREDITED_G2_TOWELL_KLM", "inventory_source": "STATISTICA_BAASE_Y_ONLY",
-              "last_closed_period": None, "training_cutoff": None, "forecast_available": False,
-              "forecast_block_code": BLOCK_CODE, "forecast_unavailable_reason": BLOCK_REASON,
+              "last_closed_period": closed, "training_cutoff": closed, "forecast_available": bool(closed),
+              "forecast_block_code": None if closed else BLOCK_CODE, "forecast_unavailable_reason": None if closed else BLOCK_REASON,
               "unit": "PIEZAS", "no_old_forecast_reuse": True,
               "identity_criterion": "ACCREDITED_ACCOUNT_FORMAT_UPC_BINDING"}
+    if fulfillment_source is not None:
+        policy["fill_rate_source"] = "STATISTICA_BAASE_WX_INDEPENDENT_PAIR_ONLY"
+        policy["fill_rate_never_training_target"] = True
     source_hash = fingerprint({"contract": CONTRACT, "sources": sources, "policy": policy,
         "facts": facts, "informative_sales": informative, "inventory": inventory,
-        "identities": list(identities.values()), "g2_source_hash": g2_payload["source_hash"]})
+        "identities": list(identities.values()), "g2_source_hash": g2_payload["source_hash"],
+        **({"fulfillment": fulfillment} if fulfillment_source is not None else {})})
     for rows in (facts, informative, inventory):
         for row in rows:
             row["id"] = str(uuid5(NAMESPACE_URL, fingerprint([source_hash, row["source_reference"], row["chain_id"],
                 row["product_id"], row["period"], row.get("metric_code"), row["value"]])))
+    for row in fulfillment:
+        row["id"] = str(uuid5(NAMESPACE_URL, fingerprint([source_hash, "INDEPENDENT_FULFILLMENT", row["chain_id"],
+            row["product_id"], row["period"], row["source_reference"], row.get("order_value"), row.get("delivery_value")])))
     periods = [r["period"] for r in facts + informative + inventory]
     payload = {"schema": "official-source-1", "source_hash": source_hash, "sources": sources,
         "first_period": min(periods), "last_period": max(periods), "observations": facts + informative, "inventory": inventory}
+    if fulfillment_source is not None:
+        payload["fulfillment"] = fulfillment
     context = {"forecast_contract": CONTRACT, "objective": "Pedido", "target_metric": "ORDER", "target_sheet": "Pedidos",
-        "target_file_sha256": source["sha256"], "training_cutoff": None, "unit": "PIEZAS", "inventory_source": "ESTADISTICA",
-        "authorized_source_hash": source_hash, "forecast_available": False, "forecast_unavailable_reason": BLOCK_REASON,
-        "forecast_block_code": BLOCK_CODE, "target_source_available": True}
+        "target_file_sha256": source["sha256"], "training_cutoff": closed, "unit": "PIEZAS", "inventory_source": "ESTADISTICA",
+        "authorized_source_hash": source_hash, "forecast_available": bool(closed), "forecast_unavailable_reason": None if closed else BLOCK_REASON,
+        "forecast_block_code": None if closed else BLOCK_CODE, "target_source_available": True}
+    if fulfillment_source is not None:
+        context.update(fulfillment_source="ESTADISTICA_BAASE", fulfillment_file_sha256=stock["source_hash"], fulfillment_available=True)
     return {"import": payload, "catalog": list(identities.values()), "exceptions": exceptions,
         "references": references, "policy": policy, "forecast_source_context": context,
         "summary": {"reader_identities": len(identities), "binding_states": dict(Counter(r["state"] for r in identities.values())),
             "order_observations": len(facts), "order_products": len({(r["chain_id"], r["product_id"]) for r in facts}),
             "informative_sales_observations": len(informative), "inventory_observations": len(inventory),
             "inventory_products": len({(r["chain_id"], r["product_id"]) for r in inventory}),
-            "first_period": min(periods), "last_period_with_quantity": max(periods), "cutoff": None,
-            "forecast_available": False, "forecast_block_code": BLOCK_CODE}}
+            "first_period": min(periods), "last_period_with_quantity": max(periods), "cutoff": closed,
+            "order_training_observations": sum(r["period"] <= closed for r in facts) if closed else 0,
+            "order_partial_observations": sum(r["period"] > closed for r in facts) if closed else len(facts),
+            **({"independent_fulfillment_rows": len(fulfillment)} if fulfillment_source is not None else {}),
+            "forecast_available": bool(closed), "forecast_block_code": None if closed else BLOCK_CODE}}
 
 
 def _chain_key(value):
@@ -196,11 +234,15 @@ def _chain_key(value):
 
 
 def prepare_source(*, workspace, master_sha256, bindings_path, bindings_sha256,
-                   snapshot_path, snapshot_sha256, g2_directory, g2_manifest_sha256, output):
+                   snapshot_path, snapshot_sha256, g2_directory, g2_manifest_sha256, output,
+                   confirmed_closed_period=None, closure_evidence=None, generation=GENERATION, fulfillment_file=None):
     output = Path(output)
     if output.exists() or output.resolve().is_relative_to(REPO):
         raise ValueError("new_private_output_required")
-    document = read_pedidos_order_source(Path(workspace), expected_sha256=master_sha256)
+    if type(generation) is not int or generation < GENERATION:
+        raise ValueError("pedidos_generation_invalid")
+    document = read_pedidos_order_source(Path(workspace), expected_sha256=master_sha256,
+        confirmed_closed_period=confirmed_closed_period, closure_evidence=closure_evidence)
     if file_hash(snapshot_path) != snapshot_sha256:
         raise ValueError("catalog_snapshot_changed")
     if bindings_sha256 != IDENTITY_SHA:
@@ -208,19 +250,30 @@ def prepare_source(*, workspace, master_sha256, bindings_path, bindings_sha256,
     snapshot = json_read(snapshot_path)
     bindings = _master_bindings(Path(bindings_path), bindings_sha256, snapshot)
     g2_manifest, g2_payload = sealed_g2(g2_directory, g2_manifest_sha256)
+    fulfillment, fulfillment_source, fulfillment_exceptions = None, None, []
+    if fulfillment_file is not None:
+        from .fulfillment_source import read_fulfillment_source
+        stock_hash = next(s["source_hash"] for s in g2_payload["sources"] if s["source_hash"] != master_sha256)
+        from services.forecast_engine.engine import add_month
+        fulfillment, fulfillment_source, fulfillment_exceptions = read_fulfillment_source(fulfillment_file,
+            stock_hash, snapshot, partial_from=add_month(confirmed_closed_period, 1), observed_through=g2_payload["last_period"])
     prepared = prepare_packet(document, bindings, snapshot, g2_payload,
-        rules=json_read(REPO / "config/commercial_catalog_rules.json"))
+        rules=json_read(REPO / "config/commercial_catalog_rules.json"),
+        fulfillment_rows=fulfillment, fulfillment_source=fulfillment_source)
+    prepared["exceptions"].extend(fulfillment_exceptions)
     payload = prepared["import"]
     output.mkdir(parents=True, exist_ok=False)
     write_json(output / "Import.json", payload)
     columns = [*FACT_FIELDS, *EXTRA_FIELDS]
     write_csv(output / "Facts.csv", payload["observations"], columns)
     write_csv(output / "Inventory.csv", payload["inventory"], columns)
+    if "fulfillment" in payload:
+        write_csv(output / "Fulfillment.csv", payload["fulfillment"], list(payload["fulfillment"][0]) if payload["fulfillment"] else [])
     for name, value in (("Catalog.json", prepared["catalog"]), ("Exceptions.json", prepared["exceptions"]),
                         ("References.json", serializable(prepared["references"])), ("Reader_Audit_Pedidos.json", serializable(document)),
                         ("Summary.json", prepared["summary"])):
         write_json(output / name, value)
-    write_json(output / "Closure_Evidence.json", {
+    write_json(output / "Closure_Evidence.json", closure_evidence if confirmed_closed_period else {
         "sheet": "Pedidos", "metric_code": "ORDER", "last_closed_period": None, "confirmed_at": None,
         "state": "UNVERIFIED", "available_at": None,
         "statement": "El cierre de Pedidos aún no está acreditado",
@@ -231,12 +284,17 @@ def prepare_source(*, workspace, master_sha256, bindings_path, bindings_sha256,
         "import_sha256": g2_manifest["outputs_sha256"]["Import.json"],
         "sales_observations": prepared["summary"]["informative_sales_observations"],
         "policy": "Exact quantities and source cells preserved; never a training target or fallback for Pedido."})
-    write_json(output / "Authorized_Sales_Policy.json", {"contract": CONTRACT, "master_path": document["source"]["path"],
-        "master_sha256": master_sha256, "source_hash": payload["source_hash"], "generation": GENERATION,
-        "sheet": "Pedidos", "unit": "PIEZAS", "last_closed_period": None})
-    manifest = {"schema": "official-source-1", "source_hash": payload["source_hash"], "generation": GENERATION,
+    authorized_policy = {"contract": CONTRACT, "master_path": document["source"]["path"],
+        "master_sha256": master_sha256, "source_hash": payload["source_hash"], "generation": generation,
+        "sheet": "Pedidos", "unit": "PIEZAS", "last_closed_period": confirmed_closed_period}
+    if fulfillment_source is not None:
+        authorized_policy.update(fulfillment_source="ESTADISTICA_BAASE",
+            fulfillment_file_sha256=fulfillment_source["source_hash"], fulfillment_available=True)
+    write_json(output / "Authorized_Sales_Policy.json", authorized_policy)
+    manifest = {"schema": "official-source-1", "source_hash": payload["source_hash"], "generation": generation,
         "created_at": datetime.now(timezone.utc).isoformat(), "first_period": payload["first_period"],
-        "source_last_period": payload["last_period"], "cutoff": None, "training_cutoff": None, "unit": "PIEZAS",
+        "source_last_period": payload["last_period"], "cutoff": confirmed_closed_period,
+        "training_cutoff": confirmed_closed_period, "unit": "PIEZAS",
         "sources": payload["sources"], "policy": prepared["policy"], "forecast_source_context": prepared["forecast_source_context"],
         "input_hashes": {"master": master_sha256, "bindings": bindings_sha256, "catalog": snapshot_sha256,
             "g2_manifest": g2_manifest_sha256, "g2_import": g2_manifest["outputs_sha256"]["Import.json"],

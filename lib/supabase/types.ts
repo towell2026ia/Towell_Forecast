@@ -10,12 +10,16 @@ export const emptyFilters: Filters = { chainId: null, productId: null, categoryI
 export type OperationalReadContext = { source_hash: string; generation: number; first_period: string; last_period: string;
   forecast_contract?: "pedido-towell-v1"; objective?: "Pedido"; target_metric?: "ORDER"; target_sheet?: "Pedidos"; target_file_sha256?: string;
   training_cutoff?: string | null; forecast_available?: boolean; target_source_available?: boolean; forecast_block_code?: string | null; forecast_unavailable_reason?: string | null; unit?: "PIEZAS";
+  fulfillment_source?: "ESTADISTICA_BAASE"; fulfillment_file_sha256?: string; fulfillment_available?: boolean;
   sales_source?: "TOWELL"; inventory_source?: "ESTADISTICA"; sales_available?: boolean;
   sales_unavailable_reason?: "Sin cálculo: fuente de ventas no disponible";
   sales_training_cutoff?: string;
   sales_contract?: "towell-sales-v1"; sales_file_sha256?: string; sales_sheet?: "Towell"; authorized_source_hash?: string };
 export type OperationalMetric = "SALES" | "ORDER" | "DELIVERY" | "FCST_TOWELL_HISTORY" | "FCST_CLIENTE_HISTORY";
 export type OperationalInventory = { chain_id: string; product_id: string; period: string; format: string; upc: string; purchase_type: string; quantity_text: string };
+export type OperationalFulfillment = { chain_id: string; product_id: string; period: string; format: string; upc: string; purchase_type: string;
+  order_text: string | null; delivery_text: string | null; source_reference: string; order_source_reference: string | null; delivery_source_reference: string | null;
+  source_sha256: string; partial_period: boolean };
 export type Cursor = { chain_id: string; product_id: string; period: string; context?: OperationalReadContext };
 export type HistoricalRow = Cursor & { product: Product; chain: string; SALES: number | null; ORDER: number | null; DELIVERY: number | null; availability: string;
   exact?: Partial<Record<OperationalMetric, string>>;
@@ -27,6 +31,7 @@ export interface ForecastReadRepository {
   getCommercialCatalog?(context?: OperationalReadContext): Promise<CommercialClassification[]>;
   getReportHistory?(filters: Filters, context?: OperationalReadContext): Promise<HistoricalRow[]>;
   getReportInventory?(filters: Filters, context: OperationalReadContext): Promise<OperationalInventory[]>;
+  getReportFulfillment?(filters: Filters, context: OperationalReadContext): Promise<OperationalFulfillment[]>;
   getReportSnapshot?(filters: Filters, context?: OperationalReadContext): Promise<import("../forecast-reporting").ReportSnapshot>;
   getReportPeriods?(chainId?: string | null, context?: OperationalReadContext): Promise<string[]>;
   getDatabasePage?(section: import("../forecast-reporting").DatabaseSection, filters: Filters, page: number, size: 50 | 100 | 250, context?: OperationalReadContext): Promise<import("../forecast-reporting").DatabasePage>;

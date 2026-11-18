@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { Filters, ForecastReadRepository, OperationalInventory, OperationalReadContext, Product } from "./supabase/types";
+import type { Filters, ForecastReadRepository, OperationalFulfillment, OperationalInventory, OperationalReadContext, Product } from "./supabase/types";
 import { emptyFilters } from "./supabase/types";
 import type { CustomerForecast, DatabasePage, DatabaseSection, ReportCalculation, ReportDecision, ReportHorizon, ReportLive, ReportSnapshot } from "./forecast-reporting";
 import { addReportMonth, amount, matchesOfficialSource } from "./forecast-reporting";
@@ -124,6 +124,48 @@ export class SupabaseReportReader {
         if (data.length < 500) break;
         if (offset >= 99500) throw new Error("report_read_limit");
       }
+    }
+    return output;
+  }
+  async fulfillment(filters: Filters, context: OperationalReadContext) {
+    this.ensureOpen();
+    if (context.fulfillment_available !== true) return [];
+    if (context.fulfillment_source !== "ESTADISTICA_BAASE" || !/^[0-9a-f]{64}$/.test(context.fulfillment_file_sha256 ?? "")) throw new Error("fulfillment_source_invalid");
+    const products = await filteredProducts(this.repository, filters);
+    const byId = new Map(products.map(product => [product.id, product.chain_id]));
+    const output: OperationalFulfillment[] = [], seen = new Set<string>();
+    const decimal = (value: string | null) => value === null || typeof value === "string" && /^\d+(?:\.\d+)?$/.test(value) && Number.isFinite(Number(value));
+    const reference = (value: unknown) => typeof value === "string" && value.trim().length > 0;
+    for (let start = 0; start < products.length; start += 80) {
+      const ids = products.slice(start, start + 80).map(product => product.id);
+      for (let offset = 0; ; offset += 500) {
+        let query = this.client.rpc("operational_read_fulfillment", { ...operationalArguments(context), ...observationScope(filters, ids), p_purchase_type: filters.purchaseType ?? "RS" })
+          .select("chain_id,product_id,period,format,upc,purchase_type,order_text,delivery_text,source_reference,order_source_reference,delivery_source_reference,source_sha256,partial_period")
+          .in("product_id", ids).order("chain_id").order("product_id").order("period").range(offset, offset + 499);
+        if (filters.periodRange[0]) query = query.gte("period", `${filters.periodRange[0]}-01`);
+        if (filters.periodRange[1]) query = query.lte("period", `${filters.periodRange[1]}-01`);
+        const { data, error } = await query.abortSignal(this.signal);
+        this.ensureOpen();
+        if (error && sourceReadMessage(error.code)) throw new Error(error.code);
+        if (error || !Array.isArray(data)) throw new Error("fulfillment_read_failed");
+        for (const row of data as OperationalFulfillment[]) {
+          const period = typeof row.period === "string" ? row.period.slice(0, 7) : "", key = `${row.chain_id}/${row.product_id}/${period}`;
+          if (seen.has(key) || !ids.includes(row.product_id) || byId.get(row.product_id) !== row.chain_id
+            || !/^20\d{2}-(0[1-9]|1[0-2])$/.test(period) || period < context.first_period || period > context.last_period
+            || row.purchase_type !== (filters.purchaseType ?? "RS") || row.source_sha256 !== context.fulfillment_file_sha256
+            || !decimal(row.order_text) || !decimal(row.delivery_text) || typeof row.partial_period !== "boolean" || typeof row.format !== "string" || !reference(row.upc)
+            || !reference(row.source_reference) || row.order_text !== null && !reference(row.order_source_reference) || row.delivery_text !== null && !reference(row.delivery_source_reference))
+            throw new Error("fulfillment_lineage_invalid");
+          seen.add(key); output.push(row);
+        }
+        if (data.length < 500) break;
+        if (offset >= 99500) throw new Error("report_read_limit");
+      }
+    }
+    if (this.repository.openOperationalRead) {
+      const current = await this.repository.openOperationalRead();
+      if (!matchesOfficialSource(current, context) || current.fulfillment_source !== context.fulfillment_source
+        || current.fulfillment_file_sha256 !== context.fulfillment_file_sha256 || current.fulfillment_available !== context.fulfillment_available) throw new Error("official_source_changed");
     }
     return output;
   }

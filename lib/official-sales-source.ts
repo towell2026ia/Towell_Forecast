@@ -7,11 +7,13 @@ const fields = ["sales_source", "inventory_source", "sales_available", "sales_co
 export const salesSourceIdentityFields = ["source_hash", "generation", "first_period", "last_period", "sales_contract", "sales_source", "sales_sheet", "sales_file_sha256", "sales_training_cutoff", "authorized_source_hash", "inventory_source"] as const;
 const month = /^20\d{2}-(0[1-9]|1[0-2])$/;
 const orderFields = ["forecast_contract", "objective", "target_metric", "target_sheet", "target_file_sha256", "training_cutoff", "forecast_available", "target_source_available", "forecast_block_code", "forecast_unavailable_reason", "unit"] as const;
-export const orderSourceIdentityFields = ["source_hash", "generation", "first_period", "last_period", "forecast_contract", "objective", "target_metric", "target_sheet", "target_file_sha256", "training_cutoff", "unit", "authorized_source_hash", "inventory_source", "target_source_available", "forecast_block_code"] as const;
+export const orderSourceIdentityFields = ["source_hash", "generation", "first_period", "last_period", "forecast_contract", "objective", "target_metric", "target_sheet", "target_file_sha256", "training_cutoff", "unit", "authorized_source_hash", "inventory_source", "target_source_available", "forecast_block_code", "fulfillment_source", "fulfillment_file_sha256", "fulfillment_available"] as const;
 export type ForecastObjective = "Venta" | "Pedido";
 export function isOrderSource(context?: Partial<OperationalReadContext> | null) { return Boolean(context && orderFields.some(field => field in context)); }
 export function forecastSourceState(context?: Partial<OperationalReadContext> | null): "AVAILABLE" | "UNAVAILABLE" | "INVALID" {
   if (!isOrderSource(context)) return salesSourceState(context);
+  if (context && ["fulfillment_source", "fulfillment_file_sha256", "fulfillment_available"].some(field => field in context)
+    && (context.fulfillment_source !== "ESTADISTICA_BAASE" || !/^[0-9a-f]{64}$/.test(context.fulfillment_file_sha256 ?? "") || context.fulfillment_available !== true)) return "INVALID";
   const unclosed = context?.training_cutoff === null && context.forecast_available === false && context.target_source_available === true && context.forecast_block_code === "ORDER_CLOSURE_UNVERIFIED";
   const missing = context?.target_source_available === false && context.forecast_available === false && context.training_cutoff === null;
   if (!context || context.forecast_contract !== "pedido-towell-v1" || context.objective !== "Pedido" || context.target_metric !== "ORDER"

@@ -28,7 +28,8 @@ def uuid_value(value: str) -> str:
 SALES_SOURCE_FIELDS = ("source_hash", "generation", "first_period", "last_period", "sales_contract",
     "sales_source", "sales_sheet", "sales_file_sha256", "sales_training_cutoff", "authorized_source_hash", "inventory_source")
 ORDER_SOURCE_FIELDS = ("source_hash", "generation", "first_period", "last_period", "forecast_contract", "objective",
-    "target_metric", "target_sheet", "target_file_sha256", "training_cutoff", "authorized_source_hash", "inventory_source", "unit", "forecast_block_code")
+    "target_metric", "target_sheet", "target_file_sha256", "training_cutoff", "authorized_source_hash", "inventory_source", "unit", "forecast_block_code",
+    "fulfillment_source", "fulfillment_file_sha256")
 
 
 def forecast_objective(context):
@@ -46,6 +47,11 @@ def accredited_context(context):
 def require_sales_context(context, *, required=False, for_training=True):
     """The configured Towell path cannot degrade to an unpinned legacy input."""
     if isinstance(context, dict) and context.get("forecast_contract") == "pedido-towell-v1":
+        if any(key in context for key in ("fulfillment_source", "fulfillment_file_sha256", "fulfillment_available")) and (
+                context.get("fulfillment_source") != "ESTADISTICA_BAASE"
+                or not re.fullmatch(r"[0-9a-f]{64}", str(context.get("fulfillment_file_sha256", "")))
+                or context.get("fulfillment_available") is not True):
+            raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 503)
         if (context.get("objective") != "Pedido" or context.get("target_metric") != "ORDER"
                 or context.get("target_sheet") != "Pedidos" or context.get("unit") != "PIEZAS"
                 or context.get("inventory_source") != "ESTADISTICA" or type(context.get("generation")) is not int
@@ -172,6 +178,8 @@ class SupabaseReadClient:
                 # Preserve unavailable metadata for inventory and UI reads; an
                 # operation that consumes ORDER must require availability.
                 context["target_source_available"] = row.get("target_source_available")
+                if "fulfillment_available" in row:
+                    context["fulfillment_available"] = row["fulfillment_available"]
                 require_sales_context(context, required=True, for_training=False)
                 if type(context["forecast_available"]) is not bool:
                     raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 503)

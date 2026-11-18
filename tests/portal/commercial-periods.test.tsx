@@ -38,6 +38,8 @@ describe("Pedido and inventory at a pinned local source", () => {
     expect(dashboard.cutoff).toBeNull();
     expect(dashboard.available).toBe(0);
     expect(dashboard.points).toHaveLength(12);
+    expect(dashboard.historySlots).toBe(9);
+    expect(dashboard.points.slice(9).map(point => [point.period, point.outlook])).toEqual([["2026-11", true], ["2026-12", true], ["2027-01", true]]);
     expect(dashboard.points.every(p => p.horizon === null)).toBe(true);
     const july = dashboard.points.find(p => p.period === "2026-07")!;
     expect(july.values).toMatchObject({ order: 13.75, actual: 81, inventory: 0, previous1: 11, delivery: null, ENSEMBLE: null });

@@ -21,6 +21,7 @@ from services.forecast_engine.engine import (
 from .preparation import REPO, file_hash, fingerprint
 from .unification import csv_rows, json_read, write_csv, write_json
 from .towell_sales_source import read_towell_sales_source
+from .pedidos_order_source import read_pedidos_order_source
 
 
 GROUP_FIELDS = ("chain_id", "account", "format", "model", "presentation", "commercial_code")
@@ -28,6 +29,10 @@ METADATA_FIELDS = (*GROUP_FIELDS, "product_id", "upc", "color", "product_type")
 FAMILIES = ("statistical", "ml", "ensemble")
 PERIOD = re.compile(r"20\d\d-(0[1-9]|1[0-2])\Z")
 SALES_CONTEXT_FIELDS = {"sales_contract", "sales_file_sha256", "sheet", "inventory_source", "authorized_source_hash"}
+ORDER_CONTEXT_FIELDS = {"forecast_contract", "objective", "target_metric", "target_sheet", "target_file_sha256",
+    "training_cutoff", "unit", "inventory_source", "authorized_source_hash", "forecast_available",
+    "forecast_unavailable_reason", "forecast_block_code", "target_source_available"}
+FULFILLMENT_CONTEXT_FIELDS = {"fulfillment_source", "fulfillment_file_sha256", "fulfillment_available"}
 
 
 def _scope_emissions(directory, expected=None, visited=None):
@@ -73,16 +78,27 @@ def source_inputs(directory, manifest_sha, *, first_period="2025-01"):
                 for row in packet["observations"]}
     if values != expected or len(values) != len(packet["observations"]):
         raise ValueError("official_csv_import_mismatch")
+    if not isinstance(manifest.get("cutoff"), str) or not PERIOD.fullmatch(manifest["cutoff"]):
+        raise ValueError("official_forecast_training_cutoff_unverified")
     if (not isinstance(first_period, str) or not PERIOD.fullmatch(first_period)
             or first_period > manifest["cutoff"]):
         raise ValueError("official_forecast_first_period_invalid")
-    if any(row["purchase_type"] != "RS" or row["period"] < first_period or row["period"] > manifest["cutoff"] for row in facts):
+    source_last = manifest["cutoff"]
+    if manifest.get("forecast_source_context", {}).get("forecast_contract") == "pedido-towell-v1":
+        source_last = manifest.get("source_last_period")
+        if (not isinstance(source_last, str) or not PERIOD.fullmatch(source_last)
+                or source_last != packet.get("last_period") or source_last < manifest["cutoff"]):
+            raise ValueError("official_forecast_captured_period_invalid")
+    if any(row["purchase_type"] != "RS" or row["period"] < first_period or row["period"] > source_last for row in facts):
         raise ValueError("official_forecast_source_out_of_scope")
     return manifest, facts
 
 
-def engine_records(facts, cutoff):
-    sales = [row for row in facts if row["metric_code"] == "SALES"]
+def engine_records(facts, cutoff, *, objective="Venta", target_metric="SALES"):
+    if (objective, target_metric) not in {("Venta", "SALES"), ("Pedido", "ORDER")}:
+        raise ValueError("official_forecast_target_metric_mismatch")
+    sales = [row for row in facts if row["metric_code"] == target_metric
+             and (objective != "Pedido" or row["period"] <= cutoff)]
     grouped = defaultdict(list)
     for row in sales:
         grouped[row["chain_id"], row["product_id"]].append(row)
@@ -101,7 +117,7 @@ def engine_records(facts, cutoff):
         records.append({
             "chain_id": row["chain_id"], "product_id": row["product_id"], "product_code": row["upc"],
             "description": row["model"], "category": current["product_type"] or "UNCLASSIFIED", "variant": row["color"],
-            "period": row["period"], "objective": "Venta", "value": row["value"], "source_id": row["id"],
+            "period": row["period"], "objective": objective, "value": row["value"], "source_id": row["id"],
             "available_at": None, "availability_source": "UNKNOWN", "evidence_mode": "RETROSPECTIVE_TRAINING",
         })
     return records, metadata
@@ -146,9 +162,53 @@ def verify_towell_inputs(directory, manifest, facts, installed_policy=None):
     return policy
 
 
-def eligibility(records, cutoff, policy):
+def verify_pedido_inputs(directory, manifest, facts, installed_policy=None):
+    """Check ORDER against original cells, including partial capture excluded from training."""
+    for name in ("Authorized_Sales_Policy.json", "Closure_Evidence.json"):
+        if name not in manifest["outputs_sha256"]:
+            raise ValueError("official_forecast_order_policy_missing")
+    policy = LocalSalesPolicy(json_read(directory / "Authorized_Sales_Policy.json"))
+    if installed_policy is not None and policy.config != installed_policy.config:
+        raise ValueError("official_forecast_order_context_invalid")
+    context = manifest["forecast_source_context"]
+    if (policy.config["contract"] != "pedido-towell-v1" or policy.config["sheet"] != "Pedidos"
+            or policy.config["master_sha256"] != context["target_file_sha256"]
+            or policy.config["source_hash"] != manifest["source_hash"]
+            or policy.config["generation"] != manifest["generation"]
+            or policy.config["last_closed_period"] != manifest["cutoff"]):
+        raise ValueError("official_forecast_order_context_invalid")
+    try:
+        document = read_pedidos_order_source(policy.path.parent.parent,
+            confirmed_closed_period=manifest["cutoff"], closure_evidence=json_read(directory / "Closure_Evidence.json"),
+            expected_sha256=policy.config["master_sha256"])
+    except (OSError, ValueError) as error:
+        raise ValueError("Sin cálculo: fuente de pedidos no disponible") from error
+    cells = {r["source_reference"]: r for r in document["records"] if r["capture_eligible"]}
+    identities = {r["identity_key"]: r for r in document["identities"]}
+    seen = set()
+    for fact in facts:
+        if fact.get("metric_code") != "ORDER":
+            continue  # Informative SALES is sealed separately, never a training fallback.
+        reference = fact.get("source_reference")
+        cell = cells.get(reference)
+        if not cell or reference in seen:
+            raise ValueError("official_forecast_order_cell_invalid")
+        identity = identities[cell["identity_key"]]
+        if (fact.get("source_sheet") != "Pedidos" or fact.get("source_sha256") != document["source"]["sha256"]
+                or fact.get("source_file") != document["source"]["name"]
+                or fact.get("source_raw_value_literal") != cell["source_value_literal"]
+                or fact["period"] != cell["period"] or Decimal(fact["value"]) != cell["value"]
+                or any(fact.get(field) != identity[field] for field in ("account", "format", "upc"))):
+            raise ValueError("official_forecast_order_cell_mismatch")
+        seen.add(reference)
+    if not seen:
+        raise ValueError("official_forecast_order_cells_missing")
+    return policy
+
+
+def eligibility(records, cutoff, policy, *, objective="Venta"):
     states, selected = [], set()
-    for product in normalize_retrospective_dataset(records, cutoff):
+    for product in normalize_retrospective_dataset(records, cutoff, objective=objective):
         history = product.history(cutoff)
         state = product.lifecycle(cutoff, policy)
         if state == "COLD_START" and len(history) < policy.min_product_observations:
@@ -248,7 +308,27 @@ def run(directory, manifest_sha, output, *, compute=forecast_dataset, reuse_from
     if extra_source_context is not None and extra_source_context != declared_provenance:
         raise ValueError("official_forecast_sales_context_invalid")
     provenance = dict(extra_source_context or declared_provenance)
-    if provenance and (set(provenance) != SALES_CONTEXT_FIELDS
+    order = provenance.get("forecast_contract") == "pedido-towell-v1"
+    fulfillment = bool(FULFILLMENT_CONTEXT_FIELDS.intersection(provenance))
+    if fulfillment and (not order or not FULFILLMENT_CONTEXT_FIELDS.issubset(provenance)
+            or provenance.get("fulfillment_source") != "ESTADISTICA_BAASE"
+            or provenance.get("fulfillment_available") is not True
+            or not isinstance(provenance.get("fulfillment_file_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", provenance["fulfillment_file_sha256"])
+            or not any(s["source_hash"] == provenance["fulfillment_file_sha256"] for s in manifest["sources"])):
+        raise ValueError("official_forecast_fulfillment_context_invalid")
+    if order and (set(provenance) != ORDER_CONTEXT_FIELDS | (FULFILLMENT_CONTEXT_FIELDS if fulfillment else set())
+            or provenance.get("objective") != "Pedido" or provenance.get("target_metric") != "ORDER"
+            or provenance.get("target_sheet") != "Pedidos" or provenance.get("unit") != "PIEZAS"
+            or provenance.get("inventory_source") != "ESTADISTICA"
+            or provenance.get("authorized_source_hash") != manifest["source_hash"]
+            or provenance.get("training_cutoff") != manifest["cutoff"]
+            or provenance.get("forecast_available") is not True or provenance.get("target_source_available") is not True
+            or provenance.get("forecast_block_code") is not None or provenance.get("forecast_unavailable_reason") is not None
+            or not isinstance(provenance.get("target_file_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", provenance["target_file_sha256"])):
+        raise ValueError("official_forecast_order_context_invalid")
+    if provenance and not order and (set(provenance) != SALES_CONTEXT_FIELDS
             or provenance.get("sales_contract") != "towell-sales-v1"
             or provenance.get("sheet") != "Towell"
             or provenance.get("inventory_source") != "ESTADISTICA"
@@ -261,9 +341,11 @@ def run(directory, manifest_sha, output, *, compute=forecast_dataset, reuse_from
     if provenance and reuse_from is not None:
         raise ValueError("towell_forecast_reuse_forbidden")
     configured = LocalSalesPolicy(json_read(Path(local_config)).get("authorized_sales_policy")) if local_config else None
-    live_policy = verify_towell_inputs(directory, manifest, facts, configured) if provenance else None
+    verifier = verify_pedido_inputs if order else verify_towell_inputs
+    live_policy = verifier(directory, manifest, facts, configured) if provenance else None
     cutoff = manifest["cutoff"]
-    records, metadata = engine_records(facts, cutoff)
+    objective, target_metric = ("Pedido", "ORDER") if order else ("Venta", "SALES")
+    records, metadata = engine_records(facts, cutoff, objective=objective, target_metric=target_metric)
     policy = ForecastPolicy()
     context = {"source_hash": manifest["source_hash"], "generation": context_generation,
                "emitted_at": datetime.now(timezone.utc).isoformat(), "engine_version": ENGINE_VERSION,
@@ -271,7 +353,7 @@ def run(directory, manifest_sha, output, *, compute=forecast_dataset, reuse_from
     changes = []
     first, latest = {}, {}
     for row in facts:
-        if row["metric_code"] == "SALES":
+        if row["metric_code"] == target_metric and row["period"] <= cutoff:
             identity = row["chain_id"], row["product_id"]
             if identity not in first or row["period"] < first[identity]["period"]:
                 first[identity] = row
@@ -311,7 +393,7 @@ def run(directory, manifest_sha, output, *, compute=forecast_dataset, reuse_from
     chains = sorted({row["chain_id"] for row in records})
     for index, chain in enumerate(chains, 1):
         selected_rows = [row for row in records if row["chain_id"] == chain]
-        states, eligible = eligibility(selected_rows, cutoff, policy)
+        states, eligible = eligibility(selected_rows, cutoff, policy, objective=objective)
         result, failure, exclusions = None, None, []
         previous = json_read(reuse_from / ("Outcome_" + chain + ".json")) if reuse else None
         reused = (reuse is not None and previous["status"] != "FAILED"
@@ -328,7 +410,7 @@ def run(directory, manifest_sha, output, *, compute=forecast_dataset, reuse_from
             try:
                 computed, exclusions = execute_forecast(
                     [row for row in selected_rows if row["product_id"] in eligible], cutoff, compute=compute,
-                    chain_id=chain, objective="Venta", policy=policy, evidence_mode="RETROSPECTIVE_TRAINING",
+                    chain_id=chain, objective=objective, policy=policy, evidence_mode="RETROSPECTIVE_TRAINING",
                     on_stage=lambda stage: print(f"chain {index}/{len(chains)} {stage}", flush=True))
                 if computed["chains"]:
                     result = computed["chains"][0]
@@ -370,7 +452,7 @@ def run(directory, manifest_sha, output, *, compute=forecast_dataset, reuse_from
     if source_inputs(directory, manifest_sha, first_period=first_period)[0] != manifest:
         raise ValueError("official_source_changed_during_forecast")
     if live_policy and not live_policy.available():
-        raise ValueError(SALES_UNAVAILABLE)
+        raise ValueError("Sin cálculo: fuente de pedidos no disponible" if order else SALES_UNAVAILABLE)
     stats["outputs_sha256"] = {path.name: file_hash(path) for path in sorted(output.iterdir())}
     write_json(output / "Summary.json", stats)
     print("forecast complete " + str(stats["families"]), flush=True)

@@ -1,8 +1,25 @@
 # Consulta de la fuente oficial en desarrollo local
 
-## Fuente de ventas del piloto FT-FIX-FUENTES-01
+## Pedido, inventario y cumplimiento en Períodos
 
-La decisión vigente para este piloto interpreta exclusivamente **Towell K:M**
+En el piloto local, el objetivo vigente es **Pedido**, en piezas. El histórico
+para entrenamiento y evaluación procede de la hoja `Pedidos`, columnas K:M,
+del maestro autorizado. El cierre se registra por fuente. Con cierre en
+septiembre de 2026, H1 corresponde a octubre de 2026 y H12 a septiembre de
+2027. La captura parcial de octubre puede consultarse junto al pronóstico.
+Entrenamiento, WAPE y Bias utilizan únicamente pedidos hasta el cierre.
+
+La gráfica 9+3 y su XLSX conservan la misma selección de productos y versión.
+La serie de inventario muestra las existencias de BAASE Y. El Fill Rate
+mensual divide la suma de las entregas BAASE X entre la suma de los pedidos
+BAASE W de los mismos productos con ambas cantidades. Los saldos, los pares
+de cumplimiento y las ventas informativas quedan fuera del entrenamiento.
+Un pedido positivo con entrega explícita cero aporta un cumplimiento de 0 %.
+Un denominador consolidado cero o la ausencia de pares se muestra como «Sin dato».
+
+## Fuente de ventas del piloto anterior FT-FIX-FUENTES-01
+
+El piloto anterior interpretaba exclusivamente **Towell K:M**
 del maestro `datos_privados/Copia de Pronostico RS Dic Def V1.xlsx` como Venta
 observada en piezas. El contrato anterior que obtenía ventas de Estadística
 queda sustituido en la operación local. Estadística sólo aporta inventario de

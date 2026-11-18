@@ -297,6 +297,50 @@ class OfficialSourcePostgres(unittest.TestCase):
             self.assertEqual(c.execute("select count(*) n from forecast_calculation_horizons where calculation_id=%s", (created,)).fetchone()["n"], 12)
             self.assertEqual(c.execute("select id from current_forecast_selection where calculation_id=%s",(created,)).fetchone()["id"],chosen)
 
+    def test_local_order_results_use_only_the_accredited_order_rows_through_closure(self):
+        data = package("order-closure")
+        master = data["sources"][1]
+        master["reference"] = "Pedidos!K:M ORDER captured, confirmed closed through 2026-09; synthetic evidence"
+        for index, row in enumerate(data["observations"], 1):
+            if row["metric_code"] == "ORDER":
+                row["source_reference"] = f"Pedidos!K{index}"
+        product = next(iter(PRODUCTS))
+        inputs = {(r["metric_code"], r["period"]): r["id"] for r in data["observations"] if r["product_id"] == product}
+        with self.lab.connect() as c, c.transaction(force_rollback=True):
+            actor(c)
+            self.lab.maintenance(c, data["source_hash"])
+            ddl = (REPO / "lab/official_source/local_only/pedido_calculations.sql").read_text()
+            c.execute(ddl)
+            c.execute(ddl)
+            self.lab.load(c, data, PROFILES, expected_generation=context(c)["generation"], request_id="synthetic-orders")
+            ctx = {**context(c), "forecast_contract": "pedido-towell-v1", "objective": "Pedido", "target_metric": "ORDER",
+                   "target_sheet": "Pedidos", "unit": "PIEZAS", "target_source_available": True, "forecast_available": True,
+                   "training_cutoff": "2026-09", "target_file_sha256": master["source_hash"], "authorized_source_hash": data["source_hash"]}
+            calc = {"actor_id": ADMIN, "chain_id": CHAINS[0], "product_id": product, "objective": "Pedido",
+                    "issue_period": "2026-09-01", "cutoff_at": "2026-09-30T23:59:59Z",
+                    "source_context": ctx, "content_hash": "4"*64, "data_snapshot_hash": "5"*64,
+                    "preview_id": "SYNTHETIC_ORDER", "idempotency_key": "order-only", "candidates": {},
+                    "product_snapshot": {}, "evidence_mode": "RETROSPECTIVE_TRAINING",
+                    "engine_version": "synthetic", "git_sha": "synthetic", "horizons": []}
+            for h in range(1, 13):
+                year, month = divmod(2026*12 + 8 + h, 12)
+                calc["horizons"].append({"horizon": h, "target_period": f"{year:04}-{month+1:02}-01", "statistical_value": 9,
+                                         "statistical_model": "synthetic", "p50": 9, "band_basis": "INSUFFICIENT",
+                                         "band_observations": 0, "band_status": "INSUFFICIENT_BAND_EVIDENCE"})
+            def create(ids):
+                return c.execute("select public.e4_create_calculation(%s::jsonb) id",
+                                 (json.dumps({**calc, "input_observation_ids": ids}),)).fetchone()["id"]
+            valid = inputs["ORDER", "2025-01"]
+            for invalid in ([inputs["ORDER", "2026-10"]], [inputs["SALES", "2025-01"]], [valid, valid], []):
+                with self.subTest(invalid=invalid), self.assertRaisesRegex(psycopg.Error, "LOCAL_PEDIDO_INPUT_LINEAGE_INVALID"):
+                    with c.transaction():
+                        create(invalid)
+            created = create([valid])
+            self.assertEqual(create([valid]), created)
+            stored = c.execute("select objective,calculation_code from forecast_calculations where id=%s", (created,)).fetchone()
+            self.assertEqual(stored, {"objective": "Pedido", "calculation_code": "C1"})
+            self.assertEqual(c.execute("select count(*) n from forecast_calculation_horizons where calculation_id=%s", (created,)).fetchone()["n"], 12)
+
     def test_OS10_existing_vintage_rpc_saves_source_tag_and_readable_model(self):
         with self.lab.connect() as c:
             actor(c)

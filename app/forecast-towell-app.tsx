@@ -347,8 +347,9 @@ function StoredScopeChart() {
   const report = useRead(useCallback(async () => {
     if (!repository.getReportSnapshot || !repository.getReportHistory) throw new Error("report_unavailable");
     const context = await pin();
-    const [snapshot, history, inventory] = await Promise.all([repository.getReportSnapshot(filters, context), repository.getReportHistory({ ...filters, periodRange: [null, null] }, context), context ? repository.getReportInventory?.(filters, context) ?? Promise.resolve([]) : Promise.resolve([])]);
-    return periodsDashboard(snapshot, history, emptyReportChoice, filters.periodRange, inventory);
+    const [snapshot, history, inventory, fulfillment] = await Promise.all([repository.getReportSnapshot(filters, context), repository.getReportHistory({ ...filters, periodRange: [null, null] }, context), context ? repository.getReportInventory?.(filters, context) ?? Promise.resolve([]) : Promise.resolve([]),
+      context?.fulfillment_available === true ? repository.getReportFulfillment ? repository.getReportFulfillment({ ...filters, periodRange: [null, null] }, context) : Promise.reject(new Error("fulfillment_read_unavailable")) : Promise.resolve([])]);
+    return periodsDashboard(snapshot, history, emptyReportChoice, filters.periodRange, inventory, fulfillment);
   }, [repository, filters, pin]));
   return <><ReadState loading={report.loading} error={report.error}/>{report.data && <><p className="text-xs text-slate-600">Forecast almacenado: {report.data.available}/{report.data.matrix.rows.length} productos · Con decisión: {report.data.adopted}{report.data.available > 0 && report.data.available < report.data.matrix.rows.length ? " · TOTAL PARCIAL" : ""}</p><PeriodsComparisonChart points={report.data.points} cutoff={report.data.cutoff}/></>}</>;
 }

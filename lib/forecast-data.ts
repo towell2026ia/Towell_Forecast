@@ -103,6 +103,7 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
   async getReportSnapshot(filters: Filters, context?: OperationalReadContext) { return this.reports.snapshot(filters, await this.currentContext(context)); }
   async getReportHistory(filters: Filters, context?: OperationalReadContext) { return this.reports.history(filters, await this.currentContext(context), true); }
   async getReportInventory(filters: Filters, context: OperationalReadContext) { return this.reports.inventory(filters, await this.currentContext(context)); }
+  async getReportFulfillment(filters: Filters, context: OperationalReadContext) { return this.reports.fulfillment(filters, await this.currentContext(context)); }
   async getCommercialCatalog(context?: OperationalReadContext) {
     const current = await this.currentContext(context);
     if (this.commercialTask && sameContext(this.commercialTask.context, current)) return this.commercialTask.task;

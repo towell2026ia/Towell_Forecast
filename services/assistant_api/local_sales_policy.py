@@ -42,6 +42,11 @@ class LocalSalesPolicy:
                 or self.path.parent.name != "datos_privados"):
             raise ValueError("local_authorized_sales_master_required")
         self.config = dict(config)
+        fulfillment = {"fulfillment_source", "fulfillment_file_sha256", "fulfillment_available"}
+        if fulfillment.intersection(config) and (config.get("fulfillment_source") != "ESTADISTICA_BAASE"
+                or not re.fullmatch(r"[0-9a-f]{64}", str(config.get("fulfillment_file_sha256", "")))
+                or config.get("fulfillment_available") is not True):
+            raise ValueError("local_fulfillment_policy_invalid")
 
     def available(self):
         # Check the real file on every operation, including after service restart.
@@ -62,7 +67,8 @@ class LocalSalesPolicy:
         available = self.available()
         if self.config["contract"] == "pedido-towell-v1":
             closed = self.config["last_closed_period"] is not None
-            return {**actual, "forecast_contract": "pedido-towell-v1", "objective": "Pedido", "target_metric": "ORDER",
+            return {**actual, **{key: self.config[key] for key in ("fulfillment_source", "fulfillment_file_sha256", "fulfillment_available") if key in self.config},
+                "forecast_contract": "pedido-towell-v1", "objective": "Pedido", "target_metric": "ORDER",
                 "target_sheet": "Pedidos", "target_file_sha256": self.config["master_sha256"], "training_cutoff": self.config["last_closed_period"],
                 "authorized_source_hash": self.config["source_hash"], "target_source_available": available, "forecast_available": available and closed,
                 "forecast_block_code": None if closed else "ORDER_CLOSURE_UNVERIFIED",
