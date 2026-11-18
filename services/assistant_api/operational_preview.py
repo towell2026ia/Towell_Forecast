@@ -123,8 +123,11 @@ class OperationalMultiChainForecastRunner:
             raise PreviewError("LINEAGE_MISMATCH", 409)
         if job.get("objective") == "Pedido" and job.get("requested_product_ids") is not None:
             products = [p.get("product_id") for p in preview.get("products", [])]
+            declared = preview.get("requested_product_ids")
             if (expected_product_ids is None or len(products) != len(set(products))
-                    or set(products) != set(expected_product_ids)):
+                    or set(products) != set(expected_product_ids)
+                    or declared is not None and (not isinstance(declared, list)
+                        or len(declared) != len(set(declared)) or set(declared) != set(job["requested_product_ids"]))):
                 raise PreviewError("LINEAGE_MISMATCH", 409)
 
     def _preview_cache_key(self, job, chain, issue, digest, *, exact_selection=True):

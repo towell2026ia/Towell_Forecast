@@ -67,6 +67,11 @@ class PreviewRepresentationTests(unittest.TestCase):
         self.assertIsNone(found)
         self.assertNotEqual(new_key, legacy)
         self.assertEqual(database, original)
+        # Even identical per-chain products must not expose a former multi-chain
+        # request's extra identifiers through the reused scope metadata.
+        database[legacy] = {**old, "requested_product_ids": [*job["requested_product_ids"], "other-chain-product"]}
+        _, found = runner._preview_cache_lookup(job, "chain", "2026-09", "same-real-rows", set(job["requested_product_ids"]))
+        self.assertIsNone(found)
         database[new_key] = deepcopy(old)
         with self.assertRaisesRegex(PreviewError, "LINEAGE_MISMATCH"):
             runner._preview_cache_lookup(eleven, "chain", "2026-09", "same-real-rows", set(eleven["requested_product_ids"]))
