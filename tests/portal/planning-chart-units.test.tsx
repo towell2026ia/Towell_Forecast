@@ -6,7 +6,7 @@ import { PeriodsComparisonChart } from "../../components/forecast/periods-compar
 import { dashboardSeries, type DashboardPoint, type DashboardSeries } from "../../lib/periods-dashboard";
 vi.mock("recharts",()=>{
   const Box=({children}:{children?:ReactNode})=><div>{children}</div>;
-  return {ResponsiveContainer:Box,ComposedChart:Box,Bar:({dataKey}:{dataKey:string})=><div data-testid={`bar-${dataKey}`}/>,Line:({dataKey}:{dataKey:string})=><div data-testid={`line-${dataKey}`}/>,CartesianGrid:()=>null,XAxis:()=>null,YAxis:()=>null,
+  return {ResponsiveContainer:Box,ComposedChart:({children}:{children?:ReactNode})=><div data-testid="composed-chart">{children}</div>,Bar:({dataKey}:{dataKey:string})=><div data-testid={`bar-${dataKey}`}/>,Line:({dataKey}:{dataKey:string})=><div data-testid={`line-${dataKey}`}/>,CartesianGrid:()=>null,XAxis:()=>null,YAxis:()=>null,
     ReferenceArea:({label}:{label:{value:string}})=><div data-testid="forecast-area">{label.value}</div>,
     Tooltip:({content}:{content:(props:unknown)=>ReactNode})=><div data-testid="tooltip">{content({active:true,label:"2027-01",payload:[{}]})}</div>};
 });
@@ -37,5 +37,35 @@ describe("planning chart year boundary",()=>{
     expect(screen.getByTestId("line-actual")).toBeTruthy();
     await userEvent.click(screen.getByRole("checkbox",{name:"Inventario reportado"}));
     expect(screen.queryByTestId("bar-inventory")).toBeNull();
+  });
+  it("overlays Pedido inventory as a default visible reversible bar in the same chart",async()=>{
+    render(<PeriodsComparisonChart points={points} cutoff={null} objective="Pedido"/>);
+    const checkbox=screen.getByRole("checkbox",{name:"Inventario en tienda"}) as HTMLInputElement;
+    expect(checkbox.checked).toBe(true);
+    expect(screen.getAllByTestId("composed-chart")).toHaveLength(1);
+    expect(screen.getByTestId("bar-inventory")).toBeTruthy();
+    expect(screen.queryByTestId("line-inventory")).toBeNull();
+    expect(screen.getByTestId("line-order")).toBeTruthy();
+    expect(screen.queryByRole("heading",{name:"Inventario en tienda"})).toBeNull();
+    expect(screen.queryByRole("table",{name:"Inventario en tienda por mes"})).toBeNull();
+    expect(screen.queryByText("Saldos y cobertura mensual")).toBeNull();
+    await userEvent.click(checkbox);
+    expect(checkbox.checked).toBe(false);
+    expect(screen.queryByTestId("bar-inventory")).toBeNull();
+    expect(screen.getByTestId("line-order")).toBeTruthy();
+    await userEvent.click(checkbox);
+    expect(checkbox.checked).toBe(true);
+    expect(screen.getByTestId("bar-inventory")).toBeTruthy();
+    expect(screen.getAllByTestId("composed-chart")).toHaveLength(1);
+  });
+  it("reports an inventory query error without drawing stock while retaining the original Pedido chart",()=>{
+    render(<PeriodsComparisonChart points={points} cutoff={null} objective="Pedido" inventoryError/>);
+    const checkbox=screen.getByRole("checkbox",{name:"Inventario en tienda"}) as HTMLInputElement;
+    expect(checkbox.checked).toBe(false); expect(checkbox.disabled).toBe(true);
+    expect(screen.getByRole("alert").textContent).toContain("Error de consulta de inventario");
+    expect(screen.getAllByTestId("composed-chart")).toHaveLength(1);
+    expect(screen.queryByTestId("bar-inventory")).toBeNull();
+    expect(screen.getByTestId("line-order")).toBeTruthy();
+    expect(screen.queryByText("Saldos y cobertura mensual")).toBeNull();
   });
 });

@@ -11,7 +11,7 @@ import { planningXlsx } from "../../lib/planning-xlsx";
 import { emptyFilters, type CommercialClassification, type Filters, type ForecastReadRepository, type HistoricalRow, type Product } from "../../lib/supabase/types";
 import { ForecastFiltersContext, GlobalFilters } from "../../app/forecast-towell-app";
 import { ForecastPeriodsView } from "../../app/forecast-periods-view";
-import { PeriodsComparisonChart, PeriodsInventoryChart } from "../../components/forecast/periods-comparison-chart";
+import { PeriodsComparisonChart } from "../../components/forecast/periods-comparison-chart";
 import { RailwayPreviewClient } from "../../lib/forecast-preview";
 import { SupabaseReportReader } from "../../lib/forecast-report-repository";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -48,13 +48,43 @@ describe("Pedido and inventory at a pinned local source", () => {
     const row = comparison.rows.find(r => r[0] === july.period)!;
     expect(row[comparison.headers.indexOf("Pedido histórico")]).toBe("13.75");
     expect(row[comparison.headers.indexOf("Inventario en tienda")]).toBe("0.000");
-    const chart = render(<PeriodsInventoryChart points={dashboard.points} error={false}/>);
-    const table = screen.getByRole("table", { name: "Inventario en tienda por mes" });
-    expect(within(table).getByText("1/1")).toBeTruthy();
-    expect(within(table).getAllByText("Sin dato")).toHaveLength(11);
-    chart.rerender(<PeriodsInventoryChart points={dashboard.points} error/>);
-    expect(screen.getByRole("alert").textContent).toContain("Error de consulta");
+    const chart = render(<PeriodsComparisonChart points={dashboard.points} cutoff={dashboard.cutoff} objective="Pedido" showFillRate/>);
+    expect(screen.getAllByTestId("periods-chart")).toHaveLength(1);
+    expect((screen.getByRole("checkbox", { name: "Inventario en tienda" }) as HTMLInputElement).checked).toBe(true);
+    const table = screen.getByRole("table", { name: "Datos de la gráfica Período" });
+    const inventoryColumn = within(table).getAllByRole("columnheader").findIndex(header => header.textContent === "Inventario en tienda");
+    expect(inventoryColumn).toBeGreaterThan(0);
+    const julyRow = within(table).getByText("2026-07").closest("tr")!;
+    expect(julyRow.children[inventoryColumn].textContent).toBe("0.000");
+    for (const point of dashboard.points.filter(point => point.period !== "2026-07")) {
+      const missing = within(table).getByText(point.period).closest("tr")!;
+      expect(missing.children[inventoryColumn].textContent).toBe("Sin dato");
+    }
+    expect(screen.queryByRole("heading", { name: "Inventario en tienda" })).toBeNull();
+    expect(screen.queryByText("Saldos y cobertura mensual")).toBeNull();
     expect(screen.queryByRole("table", { name: "Inventario en tienda por mes" })).toBeNull();
+    chart.rerender(<PeriodsComparisonChart points={dashboard.points} cutoff={dashboard.cutoff} objective="Pedido" showFillRate inventoryError/>);
+    expect(screen.getByRole("alert").textContent).toContain("Error de consulta de inventario");
+    expect(screen.getAllByTestId("periods-chart")).toHaveLength(1);
+    expect((screen.getByRole("checkbox", { name: "Inventario en tienda" }) as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByRole("checkbox", { name: "Inventario en tienda" }) as HTMLInputElement).checked).toBe(false);
+    expect(screen.queryByRole("table", { name: "Inventario en tienda por mes" })).toBeNull();
+  });
+  it("keeps the existing chart when inventory fails instead of adding a separate panel or filling the failure with zeros", async () => {
+    const s = { ...snapshot(), sourceContext: orderContext };
+    const repository = { openOperationalRead: vi.fn(async () => orderContext), getReportSnapshot: vi.fn(async () => s),
+      getReportHistory: vi.fn(async () => [history("2026-07", 17, { ORDER: 31, DELIVERY: 29 })]),
+      getReportInventory: vi.fn(async () => { throw new Error("synthetic inventory read failure"); }) };
+    render(<ForecastFiltersContext.Provider value={{ repository: repository as unknown as ForecastReadRepository, filters: emptyFilters,
+      setFilters: vi.fn(), profile: { id: "actor", full_name: "Test", global_role: "VIEWER", status: "ACTIVE" } }}><ForecastPeriodsView/></ForecastFiltersContext.Provider>);
+    expect((await screen.findByRole("alert")).textContent).toContain("Error de consulta de inventario");
+    expect(screen.getAllByTestId("periods-chart")).toHaveLength(1);
+    const inventoryToggle = screen.getByRole("checkbox", { name: "Inventario en tienda" }) as HTMLInputElement;
+    expect(inventoryToggle.disabled).toBe(true); expect(inventoryToggle.checked).toBe(false);
+    expect(screen.queryByRole("heading", { name: "Inventario en tienda" })).toBeNull();
+    expect(screen.queryByText("Saldos y cobertura mensual")).toBeNull();
+    expect(screen.queryByRole("table", { name: "Inventario en tienda por mes" })).toBeNull();
+    expect(repository.getReportInventory).toHaveBeenCalledWith(emptyFilters, orderContext);
   });
   it("requires Pedido for a closed-source calculation even when a Venta row has the same product, month and hash", () => {
     const s = snapshot();
