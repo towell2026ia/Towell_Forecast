@@ -107,7 +107,7 @@ describe("E5 read-only interactive views", () => {
   });
   it("navigation order and production browser graph contain no demo, secrets or report writes", () => {
     const app = readFileSync("app/forecast-towell-app.tsx", "utf8"); expect(app).not.toContain('"auditoria"'); expect(app.indexOf('["base-datos"')).toBeLessThan(app.indexOf('["usuarios"'));
-    for (const path of ["app/database-view.tsx", "app/forecast-periods-view.tsx", "app/commercial-history-view.tsx", "lib/forecast-report-repository.ts"]) expect(readFileSync(path, "utf8")).not.toMatch(/service_role|SERVICE_ROLE|\.insert\(|\.update\(|\.delete\(|\.rpc\((?!"operational_read_(?:observations|inventory)")|\.create\(|selectCalculation\(|forecast-demo|reporting\.test/);
+    for (const path of ["app/database-view.tsx", "app/forecast-periods-view.tsx", "app/commercial-history-view.tsx", "lib/forecast-report-repository.ts"]) expect(readFileSync(path, "utf8")).not.toMatch(/service_role|SERVICE_ROLE|\.insert\(|\.update\(|\.delete\(|\.rpc\((?!"operational_read_(?:observations|inventory|fulfillment)")|\.create\(|selectCalculation\(|forecast-demo|reporting\.test/);
     expect(readFileSync("app/operational-engines-view.tsx", "utf8")).not.toContain("client.research!");
   });
 });
