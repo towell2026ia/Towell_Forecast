@@ -213,7 +213,7 @@ class OperationalMultiChainForecastRunner:
                             counts[state] += 1
                             states.append({"product_id": product["id"], "product_code": product["product_code"],
                                 "variant_code": product.get("variant_code") or "",
-                                "description": product["description"], "category_id": product.get("category_id"),
+                                "description": product["description"], "category_id": product.get("engine_category") or product.get("category_id"),
                                 "forecast_status": state, "history_months": 0,
                                 "minimum_history_months": self.policy.min_product_observations})
                     if not eligible:
@@ -314,6 +314,7 @@ class OperationalMultiChainForecastRunner:
                 "provisional_cold_start": proposal, "source_context": job.get("source_context")}
 
     def _result(self, chain, issue, latest, digest, job, states, counts, result):
+        from .preview_representation import project_pedido_individual_ml
         audit = result["model_audit"] if result else {}
         candidates = audit.get("candidate_models", [])
         horizons = result["forecast_towell"] if result else []
@@ -333,7 +334,7 @@ class OperationalMultiChainForecastRunner:
             first = next((row for row in product["horizons"] if row["horizon"] == 1), {})
             product.update(statistical_model=first.get("statistical_model"), classification=first.get("classification"))
         ml_eligible = sum(any(row["ml_value"] is not None for row in item["horizons"]) for item in products)
-        return {"chain_id": chain, "objective": job.get("objective", "Venta"), "issue_period": issue, "latest_actual_period": latest,
+        return project_pedido_individual_ml({"chain_id": chain, "objective": job.get("objective", "Venta"), "issue_period": issue, "latest_actual_period": latest,
             "requested_product_ids": job.get("requested_product_ids"),
             "source_context": job.get("source_context"),
             "cutoff": month_end(issue), "evidence_mode": job["mode"], "mode": job["mode"], "status": "PREVIEW",
@@ -373,7 +374,7 @@ class OperationalMultiChainForecastRunner:
                 "automatic_promotion": False, "promotion_allowed": False,
                 "failures": audit.get("ensemble_failures", [])},
             "evaluation_mode": audit.get("evaluation_mode"),
-            "products": products, "aggregates": result["aggregates"] if result else []}
+            "products": products, "aggregates": result["aggregates"] if result else []})
 
     @staticmethod
     def _applied_composition(row, applied):
@@ -508,12 +509,14 @@ class OperationalMultiChainForecastRunner:
         return self._render_result(job, job["scopes"], product_id)
 
     def _render_result(self, job, references, product_id):
+        from .preview_representation import project_pedido_individual_ml
         selected_ids = set(job.get("requested_product_ids") or [])
         if selected_ids and product_id and product_id not in selected_ids:
             raise PreviewError("SCOPE_FORBIDDEN", 403)
         scopes = [{**self.persistence.get("forecast_previews", scope["preview_id"]), "preview_id": scope["preview_id"]}
                   if scope.get("preview_id") else dict(scope) for scope in references]
-        for scope in scopes:
+        scopes = [project_pedido_individual_ml(scope) for scope in scopes]
+        for index, scope in enumerate(scopes):
             if scope.get("objective", job.get("objective", "Venta")) != job.get("objective", "Venta"):
                 raise PreviewError("LINEAGE_MISMATCH", 409)
             if job.get("source_context") is not None and (scope.get("preview_id") or scope.get("source_context") is not None) \
@@ -542,6 +545,8 @@ class OperationalMultiChainForecastRunner:
                 if visible:
                     selection["product_ml_winners"] = {pid: value for pid, value in (selection.get("product_ml_winners") or {}).items() if pid in visible}
                 scope["selection"] = selection
+            if product_id or selected_ids:
+                scopes[index] = project_pedido_individual_ml(scope, project_aggregates=False)
         return {**job, "chain_ids": [scope["chain_id"] for scope in scopes], "dataset_hash": content_hash({"scopes": sorted(
             (scope["chain_id"], scope.get("dataset_hash")) for scope in scopes)}), "scopes": scopes}
 

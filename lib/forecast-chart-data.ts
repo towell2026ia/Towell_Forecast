@@ -209,6 +209,7 @@ export function exactSelectionScope(job: PreviewJob, snapshot: ReportSnapshot, f
       products.set(product.product_id, product);
     }
     for (const candidate of scope.selection?.product_candidates ?? []) {
+      if (job.objective === "Pedido" && (!candidate || typeof candidate.product_id !== "string")) continue;
       if (expected.get(candidate.product_id)?.chain_id !== scope.chain_id) throw new Error("exact_preview_scope_mismatch");
       candidates.push(candidate);
     }
@@ -220,6 +221,31 @@ export function exactSelectionScope(job: PreviewJob, snapshot: ReportSnapshot, f
   if (cuts.size !== 1 || seenChains.size !== chainIds.length) throw new Error("exact_preview_cuts_not_aligned");
   const issue = [...cuts][0];
   if (issue > (forecastTrainingCutoff(context) ?? "")) throw new Error("exact_preview_cut_not_closed");
+  // A cached preview may expose the scope component used by the Ensemble in
+  // ml_value. The independent ML alternative must come from its own selected
+  // product candidate. Do not alter the Ensemble or its literal composition.
+  const projectIndividualMl = job.objective === "Pedido";
+  const individualMl = new Map<string, ProductCandidate>();
+  const mlGroups = new Map<string, ProductCandidate[]>();
+  for (const candidate of candidates.filter(row => row.family === "ml")) mlGroups.set(candidate.product_id, [...mlGroups.get(candidate.product_id) ?? [], candidate]);
+  for (const options of mlGroups.values()) {
+    const candidate = options[0];
+    if (options.length !== 1 || typeof candidate.model !== "string" || !candidate.model.trim() || candidate.evidence_mode !== job.mode
+      || !Array.isArray(candidate.horizons) || candidate.horizons.length !== 12 || candidate.horizons.some(row => !row)
+      || new Set(candidate.horizons.map(row => row.horizon)).size !== 12
+      || candidate.horizons.some(row => !Number.isSafeInteger(row.horizon) || row.horizon < 1 || row.horizon > 12 || typeof row.target_period !== "string"
+        || row.target_period.slice(0, 7) !== addMonth(issue, row.horizon) || !Number.isFinite(row.value) || row.value < 0)
+      || products.get(candidate.product_id)?.horizons?.length !== 12) continue;
+    individualMl.set(candidate.product_id, candidate);
+  }
+  for (const [id, product] of projectIndividualMl ? products : []) {
+    const candidate = individualMl.get(id);
+    products.set(id, { ...product, ml_unavailable_reason: candidate ? null : "NO_VALIDATED_PRODUCT_ML_CANDIDATE", horizons: product.horizons?.map(row => ({ ...row,
+      ml_value: candidate?.horizons.find(horizon => horizon.horizon === row.horizon)?.value ?? null,
+      ml_model: candidate?.model ?? null })) });
+  }
+  const accreditedCandidates = candidates.filter(candidate => !projectIndividualMl || candidate.family !== "ml" || individualMl.get(candidate.product_id) === candidate);
+  for (const [id, suggestion] of Object.entries(suggestions)) if (projectIndividualMl && suggestion.family === "ml" && !individualMl.has(id)) delete suggestions[id];
   const members = snapshot.products.map(product => products.get(product.id) ?? { product_id: product.id, product_code: product.product_code,
     description: product.description, category_id: product.category_id, forecast_status: "SIN_PRONOSTICO", horizons: [] });
   const rows = snapshot.products.map(product => ({ product, chain: snapshot.chains.find(chain => chain.id === product.chain_id)?.name ?? product.chain_id,
@@ -237,8 +263,11 @@ export function exactSelectionScope(job: PreviewJob, snapshot: ReportSnapshot, f
   const ml = members.filter(product => product.horizons?.length === 12 && product.horizons.every(h => h.ml_value !== null)).length;
   const methods: Record<string, number> = {};
   for (const product of members) if (product.horizons?.[0]?.statistical_model) methods[product.horizons[0].statistical_model] = (methods[product.horizons[0].statistical_model] ?? 0) + 1;
-  const mlCandidates = [...new Set(candidates.filter(c => c.family === "ml").map(c => c.model))].map(model => ({ model, family: "ml" as const, available: true,
-    by_product: candidates.filter(c => c.family === "ml" && c.model === model).map(savedMetric) }));
+  const mlCandidates = [...new Set(accreditedCandidates.filter(c => c.family === "ml").map(c => c.model))].map(model => ({ model, family: "ml" as const, available: true,
+    by_product: accreditedCandidates.filter(c => c.family === "ml" && c.model === model).map(savedMetric) }));
+  const trainingCounts = job.scopes.map(scope => scope.ml?.training_products);
+  const trainingProducts = trainingCounts.every((count, index) => Number.isSafeInteger(count) && count! >= 0 && count! <= snapshot.products.filter(product => product.chain_id === job.scopes[index].chain_id).length)
+    ? trainingCounts.reduce<number>((sum, count) => sum + count!, 0) : undefined;
   return { chain_id: presentationChain, chain_name: filters.chainId ? snapshot.chains.find(chain => chain.id === filters.chainId)?.name : `${chainIds.length} cadenas autorizadas`,
     objective: job.objective, status: "PREVIEW", issue_period: issue, latest_actual_period: context.last_period, mode: job.mode, evaluation_mode: "RETROSPECTIVE_EVALUATION",
     engine_version: job.engine_version, source_context: context, products: members, aggregates,
@@ -246,9 +275,10 @@ export function exactSelectionScope(job: PreviewJob, snapshot: ReportSnapshot, f
       statistical: stat, ml, ensemble: stat, ml_models: mlCandidates.map(c => c.model), source: "EXACT_SELECTION" },
     eligibility: { visible_products: expected.size, evaluated: expected.size, stat_eligible: stat, ml_eligible: ml },
     statistical: { status: stat ? "COMPLETED" : "NOT_ELIGIBLE", models: methods, candidates: candidates.filter(c => c.family === "statistical").map(savedMetric), scope_candidates: [], retrospective_wape: null, retrospective_bias: null },
-    ml: { status: ml ? "COMPLETED" : "NOT_ELIGIBLE", training_samples: null, leader: null, candidates: mlCandidates, retrospective_wape: null, retrospective_bias: null },
-    selection: { published_champion: null, preview_leader: null, preview_challenger: null, suggested_references: suggestions, product_candidates: candidates,
-      product_ml_winners: Object.fromEntries(candidates.filter(c => c.family === "ml").map(c => [c.product_id, c.model])), no_degradation: null, automatic_promotion: false } };
+    ml: { status: ml ? "COMPLETED" : "NOT_ELIGIBLE", training_samples: null, ...(trainingProducts !== undefined && trainingProducts <= expected.size ? { training_products: trainingProducts } : {}),
+      leader: null, candidates: mlCandidates, retrospective_wape: null, retrospective_bias: null },
+    selection: { published_champion: null, preview_leader: null, preview_challenger: null, suggested_references: suggestions, product_candidates: accreditedCandidates,
+      product_ml_winners: Object.fromEntries(accreditedCandidates.filter(c => c.family === "ml").map(c => [c.product_id, c.model])), no_degradation: null, automatic_promotion: false } };
 }
 export function scopeHorizons(scope: PreviewScope | null, filters: Filters): Horizon[] {
   const projected = scope?.commercial_projection?.filter_key === commercialScopeKey(filters) && Boolean(scope.commercial_projection.chain_ids?.length);

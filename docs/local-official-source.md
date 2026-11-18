@@ -9,6 +9,13 @@ septiembre de 2026, H1 corresponde a octubre de 2026 y H12 a septiembre de
 2027. La captura parcial de octubre puede consultarse junto al pronóstico.
 Entrenamiento, WAPE y Bias utilizan únicamente pedidos hasta el cierre.
 
+Los resultados guardados conservan el conjunto de entrenamiento de su corrida.
+Al calcular una vista previa por modelo, ML global se ajusta a las variantes
+elegibles de la selección. La cobertura de ML individual cuenta productos con
+un candidato validado y doce cantidades propias. Cada Ensemble conserva el
+componente y los pesos que utilizó. Consultar la vista previa mantiene disponible
+la corrida guardada en Períodos y en su descarga.
+
 La gráfica 9+3 y su XLSX conservan la misma selección de productos y versión.
 La serie de inventario muestra las existencias de BAASE Y. El Fill Rate
 mensual divide la suma de las entregas BAASE X entre la suma de los pedidos
