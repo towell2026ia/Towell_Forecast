@@ -33,6 +33,9 @@ def _candidate(candidate, issue, mode):
 
 
 def project_pedido_individual_ml(preview, *, project_aggregates=True):
+    if preview.get("planning_run_id") and (preview.get("source_context") or {}).get("forecast_contract") == "pedido-unificado-v1":
+        # Annual projections already contain the independently selected ML curve.
+        return preview
     if preview.get("objective") != "Pedido":
         return preview
     output = deepcopy(preview)

@@ -1,7 +1,7 @@
 import type { Filters } from "./supabase/types";
 import type { PreviewAggregate, PreviewCandidate, PreviewHorizon, PreviewJob, PreviewScope, ProductCandidate, SuggestedReference } from "./forecast-preview";
 import { hasCommercialFilters, matchesCommercial, matchesChainScope, modelKey, selectedScopeIds } from "./commercial-filters";
-import { buildForecastMatrix, emptyReportChoice, matchesOfficialSource, matrixTotal, validDecision, type ReportSnapshot } from "./forecast-reporting";
+import { buildForecastMatrix, emptyReportChoice, forecastTargetMonth, matchesOfficialSource, matrixTotal, validDecision, type ReportSnapshot } from "./forecast-reporting";
 import { forecastObjective, forecastSourceAvailable, forecastTrainingCutoff } from "./official-sales-source";
 
 export type HistoricalMonth = { period: string; sale: number | null; order: number | null; delivery: number | null };
@@ -69,13 +69,14 @@ export function storedCommercialScope(snapshot: ReportSnapshot, filters: Filters
     const previous = source?.products?.find(product => product.product_id === row.product.id);
     const frozenProduct = row.calculation?.input_snapshot?.product as { forecast_status?: string; history_months?: number; classification?: string } | undefined;
     const stored = row.calculation ? snapshot.horizons.filter(h => h.calculation_id === row.calculation!.id) : [];
-    const horizons: PreviewHorizon[] = stored.map(h => {
-      if ([h.statistical_value, h.ensemble_value, h.p50].some(value => value === null || value === undefined || !Number.isFinite(Number(value)) || Number(value) < 0)
+    const planning = snapshot.sourceContext?.forecast_contract === "pedido-unificado-v1";
+    const horizons: PreviewHorizon[] = stored.filter(h => !planning || h.statistical_value != null && h.ensemble_value != null).map(h => {
+      if ((planning ? [h.statistical_value, h.ensemble_value] : [h.statistical_value, h.ensemble_value, h.p50]).some(value => value === null || value === undefined || !Number.isFinite(Number(value)) || Number(value) < 0)
           || h.ml_value !== null && (!Number.isFinite(Number(h.ml_value)) || Number(h.ml_value) < 0)
-          || [h.p10, h.p90, h.p95].some(value => value !== null && (!Number.isFinite(Number(value)) || Number(value) < 0))) throw new Error("stored_scope_horizon_incomplete");
+          || [h.p10, h.p50, h.p90, h.p95].some(value => value !== null && (!Number.isFinite(Number(value)) || Number(value) < 0))) throw new Error("stored_scope_horizon_incomplete");
       return { horizon: h.horizon, target_period: h.target_period.slice(0, 7), statistical_value: Number(h.statistical_value),
         ml_value: h.ml_value === null ? null : Number(h.ml_value), forecast_towell: Number(h.ensemble_value),
-        p10: h.p10 === null ? null : Number(h.p10), p50: Number(h.p50),
+        p10: h.p10 === null ? null : Number(h.p10), p50: h.p50 === null ? null : Number(h.p50),
         p90: h.p90 === null ? null : Number(h.p90), p95: h.p95 === null ? null : Number(h.p95),
         statistical_model: h.statistical_model ?? undefined, ml_model: h.ml_model, classification: previous?.classification ?? undefined,
         statistical_weight: h.statistical_weight, ml_weight: h.ml_weight,
@@ -97,7 +98,7 @@ export function storedCommercialScope(snapshot: ReportSnapshot, filters: Filters
         || !Number.isSafeInteger(candidate.windows) || candidate.windows < 0
         || [candidate.wape, candidate.bias, candidate.mae, candidate.rmse, candidate.stability].some(value => value != null && !Number.isFinite(value))
         || candidate.horizons.length !== 12 || new Set(candidate.horizons.map(h => h.horizon)).size !== 12
-        || candidate.horizons.some(h => h.target_period.slice(0, 7) !== addMonth(issue, h.horizon)
+        || candidate.horizons.some(h => h.target_period.slice(0, 7) !== forecastTargetMonth(issue, h.horizon, snapshot.sourceContext)
           || !horizons.some(stored => stored.horizon === h.horizon && stored[field] !== null && stored[field] === h.value))) throw new Error("stored_candidate_lineage_invalid");
       candidates.push(candidate);
     }
@@ -203,7 +204,7 @@ export function exactSelectionScope(job: PreviewJob, snapshot: ReportSnapshot, f
       if (expected.get(product.product_id)?.chain_id !== scope.chain_id || products.has(product.product_id)) throw new Error("exact_preview_scope_mismatch");
       const curve = product.horizons ?? [];
       if (curve.length && (curve.length !== 12 || new Set(curve.map(h => h.horizon)).size !== 12 || curve.some(h => !Number.isSafeInteger(h.horizon) || h.horizon < 1 || h.horizon > 12
-        || h.target_period.slice(0, 7) !== addMonth(scope.issue_period!, h.horizon)
+        || h.target_period.slice(0, 7) !== forecastTargetMonth(scope.issue_period!, h.horizon, scope.source_context)
         || !Number.isFinite(h.statistical_value) || h.statistical_value! < 0 || !Number.isFinite(h.forecast_towell) || h.forecast_towell < 0
         || h.ml_value !== null && (!Number.isFinite(h.ml_value) || h.ml_value < 0)))) throw new Error("exact_preview_horizon_invalid");
       products.set(product.product_id, product);
@@ -234,7 +235,7 @@ export function exactSelectionScope(job: PreviewJob, snapshot: ReportSnapshot, f
       || !Array.isArray(candidate.horizons) || candidate.horizons.length !== 12 || candidate.horizons.some(row => !row)
       || new Set(candidate.horizons.map(row => row.horizon)).size !== 12
       || candidate.horizons.some(row => !Number.isSafeInteger(row.horizon) || row.horizon < 1 || row.horizon > 12 || typeof row.target_period !== "string"
-        || row.target_period.slice(0, 7) !== addMonth(issue, row.horizon) || !Number.isFinite(row.value) || row.value < 0)
+        || row.target_period.slice(0, 7) !== forecastTargetMonth(issue, row.horizon, context) || !Number.isFinite(row.value) || row.value < 0)
       || products.get(candidate.product_id)?.horizons?.length !== 12) continue;
     individualMl.set(candidate.product_id, candidate);
   }
@@ -250,11 +251,11 @@ export function exactSelectionScope(job: PreviewJob, snapshot: ReportSnapshot, f
     description: product.description, category_id: product.category_id, forecast_status: "SIN_PRONOSTICO", horizons: [] });
   const rows = snapshot.products.map(product => ({ product, chain: snapshot.chains.find(chain => chain.id === product.chain_id)?.name ?? product.chain_id,
     category: "", calculation: null, provisional: null, adopted: null, values: Object.fromEntries(Array.from({ length: 12 }, (_, i) => {
-      const period = addMonth(issue, i + 1), horizon = products.get(product.id)?.horizons?.find(h => h.target_period.slice(0, 7) === period);
+      const period = forecastTargetMonth(issue, i + 1, context), horizon = products.get(product.id)?.horizons?.find(h => h.target_period.slice(0, 7) === period);
       return [period, { STATISTICAL: horizon?.statistical_value ?? null, ML: horizon?.ml_value ?? null, ENSEMBLE: horizon?.forecast_towell ?? null, TOWELL: null, COLD_START: null }];
     })) }));
   const presentationChain = filters.chainId ?? chainIds[0], aggregates = Array.from({ length: 12 }, (_, i) => {
-    const period = addMonth(issue, i + 1);
+    const period = forecastTargetMonth(issue, i + 1, context);
     return { level: "chain" as const, key: presentationChain, horizon: i + 1, target_period: period,
       statistical_value: matrixTotal(rows, period, "STATISTICAL").value ?? undefined, ml_value: matrixTotal(rows, period, "ML").value,
       forecast_towell: matrixTotal(rows, period, "ENSEMBLE").value! };
@@ -289,7 +290,7 @@ export function scopeHorizons(scope: PreviewScope | null, filters: Filters): Hor
   else if ((filters.search.trim() || hasCommercialFilters(filters)) && scope.commercial_projection?.filter_key !== commercialScopeKey(filters)) rows = [];
   else rows = scope.aggregates?.filter(r => r.level === (filters.categoryId && !projected ? "category" : "chain") && r.key === (filters.categoryId && !projected ? filters.categoryId : filters.chainId ?? scope.chain_id)) ?? [];
   // Dates and numbers remain backend values; malformed/partial results are not repaired.
-  if (rows.length !== 12 || new Set(rows.map(r => r.horizon)).size !== 12 || rows.some(r => r.horizon < 1 || r.horizon > 12 || r.target_period !== addMonth(scope.issue_period!, r.horizon) || !Number.isFinite(r.forecast_towell))) return [];
+  if (rows.length !== 12 || new Set(rows.map(r => r.horizon)).size !== 12 || rows.some(r => r.horizon < 1 || r.horizon > 12 || r.target_period !== forecastTargetMonth(scope.issue_period!, r.horizon, scope.source_context) || !Number.isFinite(r.forecast_towell))) return [];
   return [...rows].sort((a, b) => a.horizon - b.horizon);
 }
 export type ProvisionalHorizon = { horizon: number; target_period: string; value: number };
@@ -298,7 +299,7 @@ export function scopeProvisionalHorizons(scope: PreviewScope | null, filters: Fi
       !scope.products?.some(product => product.product_id === filters.productId && (!filters.categoryId || product.category_id === filters.categoryId))) return [];
   const rows = scope.provisional_cold_start?.horizons ?? [];
   if (rows.length !== 12 || new Set(rows.map(row => row.horizon)).size !== 12 || rows.some(row =>
-    row.horizon < 1 || row.horizon > 12 || row.target_period !== addMonth(scope.issue_period!, row.horizon) ||
+    row.horizon < 1 || row.horizon > 12 || row.target_period !== forecastTargetMonth(scope.issue_period!, row.horizon, scope.source_context) ||
     !Number.isFinite(row.value) || row.value < 0)) return [];
   return [...rows].sort((a, b) => a.horizon - b.horizon);
 }
@@ -320,7 +321,7 @@ export function traderPoints(history: HistoricalMonth[], customer: CustomerMonth
     const alignedCentre = product && product.p50 === product.forecast_towell;
     const bands = alignedCentre
       && [product.p10, product.p50, product.p90, product.p95].every(v => v !== null && Number.isFinite(v))
-      && product.p10! <= product.p50 && product.p50 <= product.p90! && product.p90! <= product.p95!;
+      && product.p10! <= product.p50! && product.p50! <= product.p90! && product.p90! <= product.p95!;
     points.push({ period, sale: actual?.sale ?? null, order: actual?.order ?? null, delivery: actual?.delivery ?? null,
       client: client.get(period) ?? null, towell: future?.forecast_towell ?? null, statistical: future && "statistical_value" in future ? future.statistical_value ?? null : null, ml: future && "ml_value" in future ? future.ml_value ?? null : null,
       provisional: provisionalByPeriod.get(period) ?? null,

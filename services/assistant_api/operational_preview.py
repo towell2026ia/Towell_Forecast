@@ -36,13 +36,14 @@ def snapshot_hash(rows: list[dict[str, Any]]) -> str:
 class OperationalMultiChainForecastRunner:
     def __init__(self, persistence, *, concurrency: int = 2, environment: str = "production",
                  policy: ForecastPolicy | None = None, compute=forecast_dataset, researcher=None,
-                 require_authorized_sales: bool = False):
+                 require_authorized_sales: bool = False, planning_reference=None):
         if not 1 <= concurrency <= 2:
             raise ValueError("operational_concurrency_maximum_two")
         self.persistence, self.environment = persistence, environment
         self.policy, self.compute = policy or ForecastPolicy(), compute
         self.researcher = researcher
         self.require_authorized_sales = require_authorized_sales
+        self.planning_reference = planning_reference
         self.champions = ChampionRegistry(persistence)
         self._executor = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="preview")
         self._lock = threading.Lock()
@@ -82,6 +83,29 @@ class OperationalMultiChainForecastRunner:
         signature = content_hash({"creator": principal.user_id, "scopes": sorted(chain_ids),
             "product": product_id, "mode": mode, "issue": issue_period, "all_scopes": all_scopes,
             "source_context": source_context, "objective": objective, "product_ids": sorted(product_ids or [])})
+        if (source_context or {}).get("forecast_contract") == "pedido-unificado-v1":
+            from .unified_plan_reader import annual_preview, pinned_run
+            run = pinned_run(self.planning_reference, source_context)
+            if mode != run["evaluation_mode"] or issue_period and issue_period != run["cutoff"]:
+                raise PreviewError("PLANNING_CUTOFF_INCOMPATIBLE", 409)
+            requested = set(product_ids)
+            catalog = [row for row in provider.client.catalog_rows() if row["product_id"] in requested]
+            if (len(catalog) != len(requested) or {p["product_id"] for p in catalog} != requested
+                    or {p["chain_id"] for p in catalog} != set(chain_ids) or any(p.get("purchase_type") != "RS" for p in catalog)):
+                raise PreviewError("SCOPE_FORBIDDEN", 403)
+            job_id = "OPJ-" + content_hash({"request": signature, "frozen_run": run["content_digest"]})[:32]
+            existing = self.persistence.get("forecast_jobs", job_id)
+            if existing:
+                return existing
+            scopes = annual_preview(run, catalog)
+            job = {"job_id": job_id, "kind": "OPERATIONAL_PREVIEW", "status": "READY_PREVIEW",
+                "creator_id": principal.user_id, "requested_product_ids": sorted(requested), "all_scopes": False,
+                "chain_ids": sorted(chain_ids), "product_id": None, "objective": objective, "mode": mode,
+                "created_at": time.time(), "engine_version": run["engine_version"], "source_context": source_context,
+                "planning_run_id": run["run_id"], "planning_digest": run["content_digest"], "scopes": scopes}
+            self._current_sales(provider, job)
+            self.persistence.put("forecast_jobs", job_id, job)
+            return job
         with self._lock:
             if signature in self._active:
                 return self.persistence.get("forecast_jobs", self._active[signature])
@@ -473,6 +497,11 @@ class OperationalMultiChainForecastRunner:
             raise PreviewError("SCOPE_FORBIDDEN", 403)
         if source_context is not None and not matches_source(job.get("source_context"), source_context):
             raise PreviewError("PREVIEW_NOT_FOUND", 404)
+        if (source_context or {}).get("forecast_contract") == "pedido-unificado-v1":
+            from .unified_plan_reader import pinned_run
+            plan = pinned_run(self.planning_reference, source_context)
+            if job.get("planning_digest") != plan["content_digest"] or job.get("planning_run_id") != plan["run_id"]:
+                raise PreviewError("PREVIEW_NOT_FOUND", 404)
         return job
 
     def poll_research(self, job_id, principal, *, source_context=None):
@@ -587,10 +616,15 @@ class OperationalMultiChainForecastRunner:
 
     def latest(self, principal, chain_id=None, product_id=None, mode="RETROSPECTIVE_TRAINING", *, source_context=None):
         require_sales_context(source_context, required=self.require_authorized_sales)
+        planning_digest = None
+        if (source_context or {}).get("forecast_contract") == "pedido-unificado-v1":
+            from .unified_plan_reader import pinned_run
+            planning_digest = pinned_run(self.planning_reference, source_context)["content_digest"]
         if chain_id and chain_id not in principal.chain_ids:
             raise PreviewError("SCOPE_FORBIDDEN", 403)
         jobs = [job for job in self.persistence.list("forecast_jobs") if job.get("kind") == "OPERATIONAL_PREVIEW"
                 and (source_context is None or matches_source(job.get("source_context"), source_context))
+                and (planning_digest is None or job.get("planning_digest") == planning_digest)
                 and job["mode"] == mode
                 and (job.get("creator_id") == principal.user_id or job["status"] in {"READY_PREVIEW", "READY_PROVISIONAL"})
                 and job.get("product_id") in {None, product_id}

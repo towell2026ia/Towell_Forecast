@@ -3,7 +3,7 @@ import { assistantScopeIsValid, parseRsAssistantResponse, type RsAssistantClient
 import type { OperationalReadContext } from "./supabase/types";
 import { matchesOfficialSource } from "./forecast-reporting";
 import { forecastObjective, forecastSourceAvailable, forecastSourceState, forecastTrainingCutoff, isOrderSource, type ForecastObjective } from "./official-sales-source";
-export type PreviewHorizon = { horizon: number; target_period: string; statistical_value: number; ml_value: number | null; forecast_towell: number; p10: number | null; p50: number; p90: number | null; p95: number | null;
+export type PreviewHorizon = { horizon: number; target_period: string; statistical_value: number; ml_value: number | null; forecast_towell: number; p10: number | null; p50: number | null; p90: number | null; p95: number | null;
   statistical_model?: string; ml_model?: string | null; ensemble_ml_model?: string | null; ensemble_ml_component?: number | null; statistical_weight?: number | null; ml_weight?: number | null;
   model_strategy?: string; classification?: string; forecast_status?: string; certification_status?: string; confidence?: string; band_basis?: "PRODUCT" | "CATEGORY" | "CHAIN" | "INSUFFICIENT"; band_observations?: number; band_status?: "AVAILABLE" | "INSUFFICIENT_BAND_EVIDENCE" };
 export type PreviewProduct = { product_id: string; product_code: string; description: string; category_id: string | null; forecast_status: string; history_months?: number; minimum_history_months?: number; horizons?: PreviewHorizon[]; statistical_model?: string | null; classification?: string | null; ml_unavailable_reason?: string | null };
@@ -52,11 +52,20 @@ export type VintageDetail = { vintage: VintageSummary; run: { id: string; chain_
   inputs: { id: string; monthly_observation_id: string | null; evidence_mode: string }[];
   gates: { id: string; gate_type: string; status: string; policy_version: string; observed: number | null; target: number | null }[] };
 export type VintageCapabilities = { vintage_persistence: boolean; official_publication: boolean; champion_publication: boolean;
-  forecast_calculation_history?: boolean; forecast_selection?: boolean; capture_center?: boolean; live_learning?: boolean; local_bounded_preview?: boolean };
+  forecast_calculation_history?: boolean; forecast_selection?: boolean; capture_center?: boolean; live_learning?: boolean; local_bounded_preview?: boolean; local_champion_publication?: boolean };
+export type ChampionFamily = "STATISTICAL" | "ML" | "ENSEMBLE" | "COMMERCIAL_PLAN";
+export type LocalChampionQuery = { source_context: OperationalReadContext; planning_year: number; chain_ids: string[]; product_ids: string[] };
+export type LocalChampionRequest = LocalChampionQuery & { run_id: string; candidate_family: ChampionFamily; confirm: true; comment: string };
+export type LocalChampionRecord = { id: string; run_id: string; candidate_family: ChampionFamily; source_context: OperationalReadContext;
+  planning_year: number; selected_by: string; selected_at: string; objective: "Pedido"; environment: "localhost"; status: "ACTIVE";
+  run_content_digest: string; run_file_sha256: string; run_emitted_at: string; cutoff: string; unit: "PIEZAS";
+  product: { product_id: string; chain_id: string; candidate_family: ChampionFamily; model: string; origin: string;
+    horizons: { planning_horizon: number; horizon: number; target_period: string; forecast_distance: number; value: string }[] } };
+export type LocalChampions = { source_context: OperationalReadContext; planning_year: number; products: LocalChampionRecord[]; covered: number; eligible: number };
 export type CalculationSummary = { id: string; chain_id: string; product_id: string; calculation_no: number; calculation_code: string;
   issue_period: string; status: string; created_at: string; suggested_reference: SuggestedReference | null; recalculation_reason: string | null };
 export type CalculationHorizon = { horizon: number; target_period: string; statistical_value: number; ml_value: number | null;
-  ensemble_value: number | null; p10: number | null; p50: number; p90: number | null; p95: number | null;
+  ensemble_value: number | null; p10: number | null; p50: number | null; p90: number | null; p95: number | null;
   band_basis: string; band_observations: number; band_status?: string; statistical_model: string | null; ml_model: string | null;
   ensemble_ml_model?: string | null; ensemble_ml_component?: number | null; statistical_weight?: number | null; ml_weight?: number | null };
 export type SelectionEvent = { id: string; calculation_id: string; selected_candidate: "STATISTICAL" | "ML" | "ENSEMBLE";
@@ -84,6 +93,8 @@ export interface PreviewClient {
   createCandidate?(chainId: string, previewId: string): Promise<string>;
   freezeVintage?(vintageId: string): Promise<string>;
   publishVintage?(vintageId: string, comment: string): Promise<string>;
+  currentChampion?(query: LocalChampionQuery): Promise<LocalChampions>;
+  promoteChampion?(request: LocalChampionRequest, idempotencyKey: string): Promise<string>;
   calculations?(chainId: string, productId: string): Promise<CalculationSummary[]>;
   calculationDetail?(calculationId: string): Promise<CalculationDetail>;
   createCalculation?(chainId: string, productId: string, previewId: string, reason?: string, idempotencyKey?: string): Promise<string>;
@@ -257,6 +268,7 @@ export class RailwayPreviewClient implements PreviewClient {
       champion_publication: response.ok && result.champion_publication === true,
       forecast_calculation_history: response.ok && result.forecast_calculation_history === true,
       local_bounded_preview: response.ok && result.local_bounded_preview === true,
+      local_champion_publication: response.ok && result.local_champion_publication === true,
       forecast_selection: response.ok && result.forecast_selection === true,
       capture_center: response.ok && result.capture_center === true,
       live_learning: response.ok && result.live_learning === true };
@@ -356,5 +368,54 @@ export class RailwayPreviewClient implements PreviewClient {
   createCandidate(chainId: string, previewId: string) { return this.writeVintage("/api/forecast/vintages/candidates", { chain_id: chainId, preview_id: previewId }); }
   freezeVintage(vintageId: string) { return this.writeVintage(`/api/forecast/vintages/${encodeURIComponent(vintageId)}/freeze`, {}); }
   publishVintage(vintageId: string, comment: string) { return this.writeVintage(`/api/forecast/vintages/${encodeURIComponent(vintageId)}/publish`, { confirm: true, comment }); }
+  private localChampionScope(query: LocalChampionQuery) {
+    if (!this.readOnly || this.apiOrigin() !== "http://127.0.0.1:8000") throw new PreviewReadError("LOCAL_CHAMPION_DISABLED");
+    if (query.source_context.forecast_contract !== "pedido-unificado-v1" || !forecastSourceAvailable(query.source_context)
+      || forecastSourceState(query.source_context) !== "AVAILABLE") throw new PreviewReadError("CHAMPION_SOURCE_INELIGIBLE");
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!Number.isSafeInteger(query.planning_year) || query.source_context.planning_start !== `${query.planning_year}-01`
+      || query.source_context.planning_end !== `${query.planning_year}-12` || !query.chain_ids.length || !query.product_ids.length
+      || query.chain_ids.length > 100 || query.product_ids.length > 2000
+      || [...query.chain_ids, ...query.product_ids].some(id => !uuid.test(id))
+      || new Set(query.chain_ids).size !== query.chain_ids.length || new Set(query.product_ids).size !== query.product_ids.length)
+      throw new PreviewReadError("REQUEST_001");
+  }
+  async currentChampion(query: LocalChampionQuery): Promise<LocalChampions> {
+    this.localChampionScope(query);
+    const source = await this.officialSource(query.source_context);
+    const params = new URLSearchParams({ planning_year: String(query.planning_year) });
+    query.chain_ids.forEach(id => params.append("chain_ids", id));
+    const result = await this.e4<LocalChampions>(`/api/forecast/champion?${params}`);
+    if (!matchesOfficialSource(result.source_context, source) || result.planning_year !== query.planning_year
+      || !Array.isArray(result.products) || result.covered !== result.products.length || !Number.isSafeInteger(result.eligible) || result.eligible < query.product_ids.length
+      || new Set(result.products.map(row => row.product?.product_id)).size !== result.products.length
+      || result.products.some(row => !row.id || !row.run_id || row.objective !== "Pedido" || row.environment !== "localhost"
+        || row.status !== "ACTIVE" || row.planning_year !== query.planning_year || !matchesOfficialSource(row.source_context, source)
+        || !query.chain_ids.includes(row.product?.chain_id)
+        || !Array.isArray(row.product.horizons) || row.product.horizons.length !== 12
+        || row.product.horizons.some((h, i) => h.horizon !== i + 1 || h.planning_horizon !== i + 1
+          || h.target_period !== `${query.planning_year}-${String(i + 1).padStart(2, "0")}`
+          || typeof h.value !== "string" || !h.value.trim() || !Number.isFinite(Number(h.value)) || Number(h.value) < 0)))
+      throw new PreviewReadError("DATA_READ_FAILED");
+    await this.officialSource(source);
+    const products = result.products.filter(row => query.product_ids.includes(row.product.product_id));
+    return { ...result, products, covered: products.length, eligible: query.product_ids.length };
+  }
+  async promoteChampion(request: LocalChampionRequest, idempotencyKey: string) {
+    this.localChampionScope(request);
+    if (request.confirm !== true || !["STATISTICAL", "ML", "ENSEMBLE", "COMMERCIAL_PLAN"].includes(request.candidate_family)
+      || !request.run_id || !request.comment.trim() || !idempotencyKey) throw new PreviewReadError("REQUEST_001");
+    const source = await this.officialSource(request.source_context);
+    if (!(await this.vintageCapabilities()).local_champion_publication) throw new PreviewReadError("LOCAL_CHAMPION_DISABLED");
+    const payload: LocalChampionRequest = { source_context: source, planning_year: request.planning_year, run_id: request.run_id,
+      candidate_family: request.candidate_family, chain_ids: request.chain_ids, product_ids: request.product_ids,
+      confirm: true, comment: request.comment };
+    const result = await this.e4<{ champion_id: string; status: string; planning_year: number; source_context: OperationalReadContext }>(
+      "/api/forecast/champion/promote", payload, idempotencyKey);
+    if (!result.champion_id || result.status !== "ACTIVE" || result.planning_year !== request.planning_year
+      || !matchesOfficialSource(result.source_context, source)) throw new PreviewReadError("DATA_READ_FAILED");
+    await this.officialSource(source);
+    return result.champion_id;
+  }
   dispose() { this.controller.abort(); }
 }

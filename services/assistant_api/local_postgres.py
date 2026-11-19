@@ -21,7 +21,8 @@ import httpx
 from .auth import AuthFailure
 from .local_hosted_auth import HostedAuthVerifier
 from .local_sales_policy import LocalSalesPolicy
-from .supabase_access import PreviewError
+from .supabase_access import PreviewError, UNIFIED_CONTRACT
+from .unified_plan_reader import pinned_run, report_records
 
 NAME = re.compile(r"[a-z][a-z0-9_]*\Z")
 TABLES = frozenset({"profiles", "chains", "categories", "products", "user_chain_access",
@@ -207,7 +208,26 @@ class LocalPostgresGateway:
                 raise ValueError("Unsupported projection")
             projection = sql.SQL("*") if fields == ["*"] else sql.SQL(",").join(map(sql.Identifier, fields))
             conditions = []
-            if sales_context and resource in {"forecast_calculations", "forecast_calculation_horizons"}:
+            result_table = resource in {"forecast_calculations", "forecast_calculation_horizons"}
+            if result_table and sales_context and sales_context.get("forecast_contract") == UNIFIED_CONTRACT:
+                # This read is inside the same read-only, authenticated RLS
+                # transaction. A browser filter can narrow, never grant, access.
+                requested = params.get("product_id", "")
+                allowed_query = "select product_id as id,chain_id from public.operational_read_catalog(%s,%s)"
+                bindings = ()
+                if requested.startswith("in.(") and requested.endswith(")"):
+                    bindings = ([uuid.UUID(v) for v in requested[4:-1].split(",")],)
+                elif requested.startswith("eq."):
+                    bindings = ([uuid.UUID(requested[3:])],)
+                if bindings:
+                    allowed_query += " where product_id=any(%s::uuid[])"
+                visible = {(str(row["id"]), str(row["chain_id"])) for row in c.execute(allowed_query, (sales_context["source_hash"], sales_context["generation"], *bindings))}
+                run = pinned_run(self.config.get("local_champion_planning_run"), sales_context)
+                records = report_records(run, resource, visible)
+                # Keep the existing projections, sorting, pagination and filters.
+                origin = sql.SQL("jsonb_populate_recordset(null::public.{}, %s::jsonb)").format(sql.Identifier(resource))
+                values.append(json.dumps(records, allow_nan=False))
+            elif sales_context and result_table:
                 # RLS still governs every row. This additional provenance filter
                 # keeps replaced calculations in storage, outside active reads.
                 predicate = sql.SQL("input_snapshot->'source_context'->>'source_hash'=%s and "

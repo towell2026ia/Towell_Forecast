@@ -7,7 +7,9 @@ const fields = ["sales_source", "inventory_source", "sales_available", "sales_co
 export const salesSourceIdentityFields = ["source_hash", "generation", "first_period", "last_period", "sales_contract", "sales_source", "sales_sheet", "sales_file_sha256", "sales_training_cutoff", "authorized_source_hash", "inventory_source"] as const;
 const month = /^20\d{2}-(0[1-9]|1[0-2])$/;
 const orderFields = ["forecast_contract", "objective", "target_metric", "target_sheet", "target_file_sha256", "training_cutoff", "forecast_available", "target_source_available", "forecast_block_code", "forecast_unavailable_reason", "unit"] as const;
-export const orderSourceIdentityFields = ["source_hash", "generation", "first_period", "last_period", "forecast_contract", "objective", "target_metric", "target_sheet", "target_file_sha256", "training_cutoff", "unit", "authorized_source_hash", "inventory_source", "target_source_available", "forecast_block_code", "fulfillment_source", "fulfillment_file_sha256", "fulfillment_available"] as const;
+export const orderSourceIdentityFields = ["source_hash", "generation", "first_period", "last_period", "forecast_contract", "objective", "target_metric", "target_sheet", "target_file_sha256", "training_cutoff", "unit", "authorized_source_hash", "inventory_source", "target_source_available", "forecast_block_code", "fulfillment_source", "fulfillment_file_sha256", "fulfillment_available", "planning_start", "planning_end"] as const;
+export const unifiedOrderContract = "pedido-unificado-v1";
+export const unifiedMasterSha = "29cac8aebab869e1ded099fa93382046bdbafbaaf4c0156664d52c9488a47c5d";
 export type ForecastObjective = "Venta" | "Pedido";
 export function isOrderSource(context?: Partial<OperationalReadContext> | null) { return Boolean(context && orderFields.some(field => field in context)); }
 export function forecastSourceState(context?: Partial<OperationalReadContext> | null): "AVAILABLE" | "UNAVAILABLE" | "INVALID" {
@@ -16,8 +18,11 @@ export function forecastSourceState(context?: Partial<OperationalReadContext> | 
     && (context.fulfillment_source !== "ESTADISTICA_BAASE" || !/^[0-9a-f]{64}$/.test(context.fulfillment_file_sha256 ?? "") || context.fulfillment_available !== true)) return "INVALID";
   const unclosed = context?.training_cutoff === null && context.forecast_available === false && context.target_source_available === true && context.forecast_block_code === "ORDER_CLOSURE_UNVERIFIED";
   const missing = context?.target_source_available === false && context.forecast_available === false && context.training_cutoff === null;
-  if (!context || context.forecast_contract !== "pedido-towell-v1" || context.objective !== "Pedido" || context.target_metric !== "ORDER"
-    || context.target_sheet !== "Pedidos" || context.unit !== "PIEZAS" || context.inventory_source !== "ESTADISTICA" || typeof context.forecast_available !== "boolean" || typeof context.target_source_available !== "boolean"
+  const unified = context?.forecast_contract === unifiedOrderContract;
+  if (unified && (context.target_file_sha256 !== unifiedMasterSha || context.training_cutoff !== "2026-09"
+    || context.planning_start !== "2027-01" || context.planning_end !== "2027-12")) return "INVALID";
+  if (!context || (!unified && context.forecast_contract !== "pedido-towell-v1") || context.objective !== "Pedido" || context.target_metric !== "ORDER"
+    || context.target_sheet !== (unified ? "Base_2024_2026" : "Pedidos") || context.unit !== "PIEZAS" || context.inventory_source !== "ESTADISTICA" || typeof context.forecast_available !== "boolean" || typeof context.target_source_available !== "boolean"
     || context.forecast_available && (!context.target_source_available || context.forecast_block_code != null)
     || !Number.isSafeInteger(context.generation) || context.generation! < 1 || !/^[0-9a-f]{64}$/.test(context.source_hash ?? "")
     || !/^[0-9a-f]{64}$/.test(context.target_file_sha256 ?? "") || context.authorized_source_hash !== context.source_hash

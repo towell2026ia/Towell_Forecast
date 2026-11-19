@@ -29,11 +29,15 @@ SALES_SOURCE_FIELDS = ("source_hash", "generation", "first_period", "last_period
     "sales_source", "sales_sheet", "sales_file_sha256", "sales_training_cutoff", "authorized_source_hash", "inventory_source")
 ORDER_SOURCE_FIELDS = ("source_hash", "generation", "first_period", "last_period", "forecast_contract", "objective",
     "target_metric", "target_sheet", "target_file_sha256", "training_cutoff", "authorized_source_hash", "inventory_source", "unit", "forecast_block_code",
-    "fulfillment_source", "fulfillment_file_sha256")
+    "fulfillment_source", "fulfillment_file_sha256", "planning_start", "planning_end")
+
+UNIFIED_CONTRACT = "pedido-unificado-v1"
+UNIFIED_MASTER_SHA256 = "29cac8aebab869e1ded099fa93382046bdbafbaaf4c0156664d52c9488a47c5d"
+ORDER_SHEETS = {"pedido-towell-v1": "Pedidos", UNIFIED_CONTRACT: "Base_2024_2026"}
 
 
 def forecast_objective(context):
-    return "Pedido" if isinstance(context, dict) and context.get("forecast_contract") == "pedido-towell-v1" else "Venta"
+    return "Pedido" if isinstance(context, dict) and context.get("forecast_contract") in ORDER_SHEETS else "Venta"
 
 
 def forecast_cutoff(context):
@@ -41,19 +45,27 @@ def forecast_cutoff(context):
 
 
 def accredited_context(context):
-    return isinstance(context, dict) and (context.get("sales_contract") == "towell-sales-v1" or context.get("forecast_contract") == "pedido-towell-v1")
+    return isinstance(context, dict) and (context.get("sales_contract") == "towell-sales-v1" or "forecast_contract" in context)
 
 
 def require_sales_context(context, *, required=False, for_training=True):
     """The configured Towell path cannot degrade to an unpinned legacy input."""
-    if isinstance(context, dict) and context.get("forecast_contract") == "pedido-towell-v1":
+    if isinstance(context, dict) and "forecast_contract" in context:
+        contract = context["forecast_contract"]
+        if not isinstance(contract, str) or contract not in ORDER_SHEETS:
+            raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 503)
+        if contract == UNIFIED_CONTRACT and (
+                context.get("target_file_sha256") != UNIFIED_MASTER_SHA256
+                or context.get("training_cutoff") != "2026-09"
+                or (context.get("planning_start"), context.get("planning_end")) != ("2027-01", "2027-12")):
+            raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 503)
         if any(key in context for key in ("fulfillment_source", "fulfillment_file_sha256", "fulfillment_available")) and (
                 context.get("fulfillment_source") != "ESTADISTICA_BAASE"
                 or not re.fullmatch(r"[0-9a-f]{64}", str(context.get("fulfillment_file_sha256", "")))
                 or context.get("fulfillment_available") is not True):
             raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 503)
         if (context.get("objective") != "Pedido" or context.get("target_metric") != "ORDER"
-                or context.get("target_sheet") != "Pedidos" or context.get("unit") != "PIEZAS"
+                or context.get("target_sheet") != ORDER_SHEETS[contract] or context.get("unit") != "PIEZAS"
                 or context.get("inventory_source") != "ESTADISTICA" or type(context.get("generation")) is not int
                 or context["generation"] < 1 or type(context.get("forecast_available")) is not bool
                 or type(context.get("target_source_available")) is not bool

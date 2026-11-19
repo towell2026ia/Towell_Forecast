@@ -79,7 +79,7 @@ export function periodsDashboard(snapshot: ReportSnapshot, history: HistoricalRo
     stockKeys.add(key);
   }
   const source = snapshot.sourceContext;
-  const separateFulfillment = source?.forecast_contract === "pedido-towell-v1";
+  const separateFulfillment = (source?.forecast_contract === "pedido-towell-v1" || source?.forecast_contract === "pedido-unificado-v1");
   const fulfillmentAuthorized = separateFulfillment && source.fulfillment_available === true && source.fulfillment_source === "ESTADISTICA_BAASE"
     && /^[0-9a-f]{64}$/.test(source.fulfillment_file_sha256 ?? "");
   if (source?.fulfillment_available === true && !fulfillmentAuthorized) throw new Error("fulfillment_source_invalid");

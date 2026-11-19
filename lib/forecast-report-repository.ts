@@ -2,10 +2,11 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Filters, ForecastReadRepository, OperationalFulfillment, OperationalInventory, OperationalReadContext, Product } from "./supabase/types";
 import { emptyFilters } from "./supabase/types";
 import type { CustomerForecast, DatabasePage, DatabaseSection, ReportCalculation, ReportDecision, ReportHorizon, ReportLive, ReportSnapshot } from "./forecast-reporting";
-import { addReportMonth, amount, matchesOfficialSource } from "./forecast-reporting";
+import { forecastTargetMonth, amount, matchesOfficialSource } from "./forecast-reporting";
 import { attachCommercial, filteredProducts, hasCommercialFilters, selectedScopeIds } from "./commercial-filters";
 import { forecastSourceAvailable, forecastHistoryAvailable, forecastObjective, sourceReadMessage } from "./official-sales-source";
 import { actualMetrics, combineObservations, observationFields, observationScope, operationalArguments } from "./forecast-data";
+import { verifiedLocalChampions } from "./local-champion";
 
 const calculationFields = "id,chain_id,product_id,objective,calculation_no,calculation_code,issue_period,cutoff_at,status,created_at,created_by,preview_id,data_snapshot_hash,content_hash,input_snapshot,candidate_metrics,research_snapshot,suggested_reference,scope_leader,evidence_mode,engine_version,git_sha,recalculation_reason";
 const horizonFields = "id,calculation_id,chain_id,product_id,horizon,target_period,statistical_value,ml_value,ensemble_value,ensemble_ml_component,statistical_model,ml_model,ensemble_ml_model,statistical_weight,ml_weight,p10,p50,p90,p95,band_basis,band_observations,band_status";
@@ -79,7 +80,7 @@ export class SupabaseReportReader {
       }
       for (const c of calculations.filter(c => ["READY_FOR_DECISION", "DECIDED", "SUPERSEDED"].includes(c.status))) {
         const rows = horizons.filter(h => h.calculation_id === c.id);
-        if (rows.length !== 12 || new Set(rows.map(h => h.horizon)).size !== 12 || rows.some(h => h.horizon < 1 || h.horizon > 12 || h.target_period.slice(0, 7) !== addReportMonth(c.issue_period, h.horizon) || amount(h.statistical_value) === null)) throw new Error("report_horizon_lineage");
+        if (rows.length !== 12 || new Set(rows.map(h => h.horizon)).size !== 12 || rows.some(h => h.horizon < 1 || h.horizon > 12 || h.target_period.slice(0, 7) !== forecastTargetMonth(c.issue_period, h.horizon, context) || (context.forecast_contract !== "pedido-unificado-v1" || h.statistical_value != null) && amount(h.statistical_value) === null)) throw new Error("report_horizon_lineage");
       }
     }
     const customers: CustomerForecast[] = [];
@@ -89,9 +90,23 @@ export class SupabaseReportReader {
     for (const row of [...calculations, ...horizons, ...decisions, ...live, ...customers]) {
       if (allowed.get(row.product_id) !== row.chain_id) throw new Error("report_scope_mismatch");
     }
-    if (this.repository.openOperationalRead && !matchesOfficialSource(await this.repository.openOperationalRead(), context)) throw new Error("official_source_changed");
-    return { products, chains, categories, calculations, horizons, decisions, live, customers, sourceContext: context,
+    const snapshot: ReportSnapshot = { products, chains, categories, calculations, horizons, decisions, live, customers, sourceContext: context,
       provisionals: provisionals.filter(p => allowed.get(p.product_id) === p.chain_id && matchesOfficialSource(p.source_context, context)), capabilities };
+    if (context.forecast_contract === "pedido-unificado-v1" && forecastSourceAvailable(context) && capabilities.local_champion_publication) {
+      if (!this.repository.previews?.currentChampion) throw new Error("champion_reader_unavailable");
+      const year = Number(context.planning_start?.slice(0, 4));
+      const current = products.length ? await this.repository.previews.currentChampion({ source_context: context, planning_year: year,
+        chain_ids: [...new Set(products.map(product => product.chain_id))].sort(), product_ids: products.map(product => product.id).sort() })
+        : { source_context: context, planning_year: year, products: [], covered: 0, eligible: 0 };
+      snapshot.localChampions = verifiedLocalChampions(snapshot, current);
+      const byProduct = new Map(current.products.map(row => [row.product.product_id, row]));
+      snapshot.calculations = calculations.map(calculation => {
+        const champion = byProduct.get(calculation.product_id);
+        return champion ? { ...calculation, current_local_champion: champion } : calculation;
+      });
+    }
+    if (this.repository.openOperationalRead && !matchesOfficialSource(await this.repository.openOperationalRead(), context)) throw new Error("official_source_changed");
+    return snapshot;
   }
   async history(filters: Filters, context: OperationalReadContext, includeForecasts = false) {
     const products = await filteredProducts(this.repository, filters);
@@ -119,7 +134,8 @@ export class SupabaseReportReader {
         for (const row of data as OperationalInventory[]) {
           const key = `${row.chain_id}/${row.product_id}/${row.period}`;
           if (seen.has(key) || !ids.includes(row.product_id) || byId.get(row.product_id) !== row.chain_id || !/^\d+(?:\.\d+)?$/.test(row.quantity_text)) throw new Error("inventory_lineage_invalid");
-          seen.add(key); output.push(row);
+          seen.add(key);
+          if (context.forecast_contract !== "pedido-unificado-v1" || !/^0+(?:\.0+)?$/.test(row.quantity_text)) output.push(row);
         }
         if (data.length < 500) break;
         if (offset >= 99500) throw new Error("report_read_limit");
@@ -156,7 +172,11 @@ export class SupabaseReportReader {
             || !decimal(row.order_text) || !decimal(row.delivery_text) || typeof row.partial_period !== "boolean" || typeof row.format !== "string" || !reference(row.upc)
             || !reference(row.source_reference) || row.order_text !== null && !reference(row.order_source_reference) || row.delivery_text !== null && !reference(row.delivery_source_reference))
             throw new Error("fulfillment_lineage_invalid");
-          seen.add(key); output.push(row);
+          seen.add(key);
+          if (context.forecast_contract === "pedido-unificado-v1") {
+            const reported = (v: string | null) => v !== null && /^0+(?:\.0+)?$/.test(v) ? null : v;
+            output.push({ ...row, order_text: reported(row.order_text), delivery_text: reported(row.delivery_text) });
+          } else output.push(row);
         }
         if (data.length < 500) break;
         if (offset >= 99500) throw new Error("report_read_limit");

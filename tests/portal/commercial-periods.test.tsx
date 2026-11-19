@@ -6,11 +6,12 @@ import { attachCommercial, changeCommercial, commercialOptions, filteredProducts
 import { periodsDashboard } from "../../lib/periods-dashboard";
 import { operationalContext } from "./operational-context-fixture";
 import { operationalPeriodsSheets } from "../../lib/operational-periods-xlsx";
-import { addReportMonth, buildForecastMatrix, emptyReportChoice, matrixTotal, type ReportSnapshot } from "../../lib/forecast-reporting";
+import { addReportMonth, buildForecastMatrix, emptyReportChoice, matchesOfficialSource, matrixTotal, type ReportSnapshot } from "../../lib/forecast-reporting";
 import { planningXlsx } from "../../lib/planning-xlsx";
 import { emptyFilters, type CommercialClassification, type Filters, type ForecastReadRepository, type HistoricalRow, type Product } from "../../lib/supabase/types";
 import { ForecastFiltersContext, GlobalFilters } from "../../app/forecast-towell-app";
 import { ForecastPeriodsView } from "../../app/forecast-periods-view";
+import { unifiedMasterSha } from "../../lib/official-sales-source";
 import { PeriodsComparisonChart } from "../../components/forecast/periods-comparison-chart";
 import { RailwayPreviewClient } from "../../lib/forecast-preview";
 import { SupabaseReportReader } from "../../lib/forecast-report-repository";
@@ -30,6 +31,26 @@ describe("Pedido and inventory at a pinned local source", () => {
     forecast_contract: "pedido-towell-v1", objective: "Pedido", target_metric: "ORDER", target_sheet: "Pedidos", target_file_sha256: "e".repeat(64),
     unit: "PIEZAS", inventory_source: "ESTADISTICA", target_source_available: true, training_cutoff: null,
     forecast_available: false, forecast_block_code: "ORDER_CLOSURE_UNVERIFIED", first_period: "2024-01", last_period: "2026-10" } as const;
+  it("keeps the September close, the three bridge months and the full January–December plan in the same export", () => {
+    const s = snapshot();
+    const context = { ...orderContext, forecast_contract: "pedido-unificado-v1", target_sheet: "Base_2024_2026",
+      target_file_sha256: unifiedMasterSha, last_period: "2026-12", training_cutoff: "2026-09",
+      planning_start: "2027-01", planning_end: "2027-12", forecast_available: true, forecast_block_code: null } as const;
+    s.sourceContext = context;
+    const bridge = [1, 2, 3].map(i => ({ target_period: addReportMonth("2026-09", i),
+      statistical_value: 3 + i, ml_value: null, ensemble_value: 3 + i }));
+    s.calculations[0] = { ...s.calculations[0], objective: "Pedido", issue_period: "2026-09",
+      input_snapshot: { source_context: context, bridge_horizons: bridge } };
+    s.horizons = s.horizons.map(h => ({ ...h, target_period: addReportMonth("2026-12", h.horizon), ensemble_value: h.horizon * 12 }));
+    const d = periodsDashboard(s, [], emptyReportChoice, [null, null]);
+    expect(d.matrix.periods).toEqual(Array.from({length: 12}, (_, i) => addReportMonth("2026-12", i + 1)));
+    expect(d.matrix.rows[0].values["2027-12"].ENSEMBLE).toBe(144);
+    expect(d.points.slice(-3).map(p => [p.period, p.values.ENSEMBLE])).toEqual([["2026-10",4],["2026-11",5],["2026-12",6]]);
+    const sheets = operationalPeriodsSheets(s, d, [], [], true);
+    expect(sheets.find(sh => sh.name === "Cálculos almacenados")?.rows.at(-1)).toContain(144);
+    expect(d.matrix.rows[0].adopted).toBeNull();
+    expect(matchesOfficialSource({ ...context, planning_start: "2026-10" }, context)).toBe(false);
+  });
   it("exports observed orders before closure, preserves inventory zero and leaves horizons unassigned", () => {
     const s = { ...snapshot(), sourceContext: orderContext };
     const data = [history("2026-07", 81, { ORDER: 13.75, DELIVERY: null }), history("2025-07", 95, { ORDER: 11 })];
@@ -397,7 +418,7 @@ describe("Commercial filters and compact Periodos UI", () => {
     render(<Harness/>); const table = await screen.findByRole("table", { name: "Matriz compacta de forecast" });
     expect(within(table).getAllByRole("columnheader")).toHaveLength(5); expect(within(table).getAllByRole("row")).toHaveLength(13);
     expect(within(table).getByText("Ago-26")).toBeTruthy(); expect(within(table).getByText("Sep-26")).toBeTruthy(); expect(within(table).getByText("Jul-27")).toBeTruthy();
-    expect(screen.getByText("TOTAL PARCIAL")).toBeTruthy(); expect(screen.getByText(/Emisión retrospectiva\./)).toBeTruthy();
+    expect(screen.queryByText("TOTAL PARCIAL")).toBeNull(); expect(screen.queryByText(/Emisión retrospectiva\./)).toBeNull();
     await userEvent.click(screen.getByLabelText("Modelo")); await userEvent.click(screen.getByRole("button", { name: "Limpiar selección" }));
     await userEvent.click(screen.getByRole("checkbox", { name: /FENDI/ }));
     await waitFor(() => expect(repository.getReportSnapshot).toHaveBeenLastCalledWith(expect.objectContaining({ commercialModels: ["FENDI"] })));

@@ -339,8 +339,25 @@ class GateBPostgres(unittest.TestCase):
         old_guard = '    if objective != "Venta":\n        raise ValueError("unsupported_forecast_objective")'
         new_guard = '    if objective not in {"Venta", "Pedido"}:\n        raise ValueError("unsupported_forecast_objective")'
         self.assertEqual(previous_engine.count(old_guard), 1)
-        self.assertEqual((REPO / engine_path).read_text(encoding='utf-8'), previous_engine.replace(old_guard, new_guard))
-        approved_pedido = {engine_path, 'lib/statistical-preview-data.ts'}
+        # Planning 2027 explicitly authorizes distances 1..15. The numerical
+        # functions remain frozen; only this keyword/default and its loop vary.
+        expected_engine = previous_engine.replace(old_guard, new_guard).replace(
+            "                      identities: list[str]) -> tuple[list[list[float | None]], np.ndarray]:",
+            "                      identities: list[str], *,\n                      horizons: tuple[int, ...] = HORIZONS) -> tuple[list[list[float | None]], np.ndarray]:")
+        training_start = expected_engine.index('def _training_samples(')
+        training_end = expected_engine.index('\ndef _metrics(', training_start)
+        expected_engine = (expected_engine[:training_start] +
+            expected_engine[training_start:training_end].replace('for horizon in HORIZONS:', 'for horizon in horizons:') +
+            expected_engine[training_end:])
+        self.assertEqual((REPO / engine_path).read_text(encoding='utf-8'), expected_engine)
+        # Exact reviewed orchestration: no broad exception for engine changes.
+        # Legacy-default numerical invariance is also exercised by
+        # services.operational_update.test_planning_engine.LegacyDefaultCalendarTests.
+        retrospective_path = 'services/forecast_engine/retrospective.py'
+        reviewed_calendar_sha256 = '6cddc8627fa9cee1155f2c9336f6fa230d3db43b5f8b1180f0105afbd1ee6dd3'
+        self.assertEqual(hashlib.sha256((REPO / retrospective_path).read_text(encoding='utf-8').encode()).hexdigest(), reviewed_calendar_sha256)
+        approved_pedido = {engine_path, retrospective_path, 'lib/statistical-preview-data.ts',
+                           'lib/local-champion.ts'}
         after_gateb=subprocess.check_output(['git','diff','--name-only',gateb,'--',*prefixes],cwd=REPO,text=True)
         self.assertEqual(set(after_gateb.splitlines()) - approved_prd3a9 - approved_portal_rs - approved_rs_assistant - approved_localhost - approved_hybrid_auth - approved_stored_scope_reads - approved_towell_sales - approved_pedido,set())
         private=os.environ.get('GATEB_PRIVATE_CANDIDATE')

@@ -40,13 +40,22 @@ class PromoteRequest(ApprovalRequest):
     model_version_id: str
 
 
+class LocalChampionRequest(ApprovalRequest):
+    run_id: str
+    candidate_family: str
+    planning_year: int = Field(ge=2020, le=2099)
+    chain_ids: list[str] = Field(min_length=1, max_length=100)
+    product_ids: list[str] = Field(min_length=1, max_length=2000)
+    source_context: dict
+
+
 class ClosePeriodRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     target_period: str = Field(pattern=r"^20\d{2}-(0[1-9]|1[0-2])-01$")
     confirm: bool
 
 
-def mount_preview_routes(app, config, identity, data, runner, limiter, write_repository=None):
+def mount_preview_routes(app, config, identity, data, runner, limiter, write_repository=None, *, local_champion=None):
     router = APIRouter(prefix="/api/forecast")
 
     def quality_policy():
@@ -350,13 +359,55 @@ def mount_preview_routes(app, config, identity, data, runner, limiter, write_rep
         return writer().rpc("e3_close_target_period", {"p_vintage_id": vintage_id,
             "p_target_period": body.target_period, "p_actor_id": principal.user_id})
 
+    def champion_service():
+        if (local_champion is None or getattr(config, "local_postgres_config", None) is None
+                or config.app_env not in {"development", "test"} or config.api_host != "127.0.0.1"
+                or getattr(config, "railway_runtime", False)):
+            raise PreviewError("LOCAL_CHAMPION_DISABLED", 403)
+        return local_champion
+
+    @router.get("/champion")
+    def local_current_champion(request: Request, planning_year: int = Query(ge=2020, le=2099),
+                              chain_ids: list[str] = Query(), product_ids: list[str] | None = Query(default=None),
+                              authorization: str | None = Header(default=None)):
+        principal, token = actor(request, authorization)
+        service = champion_service()
+        source = data.bind(token)
+        current = source.source_context()
+        catalogue = source.client.catalog_rows()
+        # Bounded chains keep large report URLs short; RLS still supplies the
+        # complete allowed membership before one SQLite read transaction.
+        selected = product_ids if product_ids is not None else [row["product_id"] for row in catalogue if row.get("chain_id") in chain_ids]
+        result = service.current(principal, current, catalogue, planning_year=planning_year,
+                                 chain_ids=chain_ids, product_ids=selected)
+        if data.bind(token).source_context() != current:
+            raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 409)
+        return result
+
     @router.post("/champion/promote")
-    def promote(request: Request, body: PromoteRequest | None = None, authorization: str | None = Header(default=None),
+    def promote(request: Request, body: PromoteRequest | LocalChampionRequest | None = None, authorization: str | None = Header(default=None),
                 idempotency_key: str | None = Header(default=None)):
         principal, token = manager(request, authorization)
+        if getattr(config, "local_postgres_config", None) is not None:
+            service = champion_service()
+            if not isinstance(body, LocalChampionRequest):
+                raise PreviewError("REQUEST_001", 422)
+            idempotency(idempotency_key)
+            source = data.bind(token)
+            current = source.source_context()
+            catalogue = source.client.catalog_rows()
+            if data.bind(token).source_context() != current:
+                raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 409)
+            result = service.publish(body.model_dump(), principal, current, catalogue, idempotency_key=idempotency_key)
+            if data.bind(token).source_context() != current:
+                # An event is permanently scoped to its source. A source change
+                # cannot expose it as the Champion of a different source.
+                raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 409)
+            return {"champion_id": result["id"], "status": result["status"],
+                    "planning_year": result["planning_year"], "source_context": result["source_context"]}
         if not config.champion_publication_enabled:
             raise PreviewError("CHAMPION_PUBLICATION_DISABLED", 503)
-        if body is None:
+        if not isinstance(body, PromoteRequest):
             raise PreviewError("REQUEST_001", 422)
         idempotency(idempotency_key)
         if not body.confirm:

@@ -45,7 +45,7 @@ def feature_names(identities):
             + [f"{kind}:{identity}" for identity in identities for kind in ("cadena", "categoría", "producto")])
 
 
-def scored(rows, family, model):
+def scored(rows, family, model, *, horizons=stat.HORIZONS):
     relevant = [row for row in rows if model in row[family]]
     metrics = _metrics([(row["actual"], row[family][model]) for row in relevant])
     return {**{f"retrospective_{key}": value for key, value in metrics.items()},
@@ -53,27 +53,49 @@ def scored(rows, family, model):
             "by_horizon": [{"horizon": h, **_metrics([(row["actual"], row[family][model])
                               for row in relevant if row["horizon"] == h]),
                             "observations": sum(row["horizon"] == h for row in relevant)}
-                           for h in stat.HORIZONS]}
+                           for h in horizons]}
 
 
 def order(candidate):
     return (candidate["retrospective_wape"], abs(candidate["retrospective_bias"]), candidate["model"])
 
 
-def forecast_chain(products, issue, policy, incumbent, on_stage=None):
+def forecast_chain(products, issue, policy, incumbent, on_stage=None, *,
+                   horizons=HORIZONS, evaluation_horizons=None,
+                   max_folds=MAX_FOLDS, retain_pairs=False,
+                   evaluation_origins=None):
+    """Use literal distances from the real cutoff, including an isolated plan.
+
+    Defaults retain the existing twelve-month contract. The optional calendar
+    only changes sample/target distances, never the statistical or ML methods.
+    """
+    evaluation_horizons = stat.HORIZONS if evaluation_horizons is None else tuple(evaluation_horizons)
+    horizons = tuple(horizons)
+    if (not horizons or any(not isinstance(h, int) or isinstance(h, bool) or h < 1 for h in horizons)
+            or len(set(horizons)) != len(horizons) or not evaluation_horizons
+            or any(h not in horizons for h in evaluation_horizons) or max_folds < 1):
+        raise ValueError("invalid_forecast_calendar")
+    def calendar_score(data, family, model):
+        return scored(data, family, model, horizons=evaluation_horizons)
     chain = products[0].chain_id
     if on_stage:
         on_stage("STATISTICAL")
     # All statistical candidate forecasts use only the contiguous tail at origin.
     # Like stat.backtest, H6/H12 require a 12-period train; H1/H3 require six.
     periods = sorted({period for item in products for period in item.observations if period < issue})
-    origins = [period for period in periods if any(len(item.history(period)) >= 6 for item in products)][-MAX_FOLDS:]
+    origins = [period for period in periods if any(len(item.history(period)) >= 6 for item in products)][-max_folds:]
+    if evaluation_origins is not None:
+        requested = tuple(evaluation_origins)
+        if (len(set(requested)) != len(requested) or not requested
+                or any(period >= issue or period not in periods for period in requested)):
+            raise ValueError("invalid_evaluation_origins")
+        origins = [period for period in requested if any(len(item.history(period)) >= 6 for item in products)]
     rows, fold_audit = [], []
     for origin in origins:
         for item in products:
             history = item.history(origin)
             allowed = stat.allowed_models(stat.classify(history)[0]) if history else []
-            for h in stat.HORIZONS:
+            for h in evaluation_horizons:
                 target = add_month(origin, h)
                 observed = item.observations.get(target)
                 if target > issue or observed is None or observed.value is None or len(history) < (12 if h >= 6 else 6):
@@ -104,7 +126,7 @@ def forecast_chain(products, issue, policy, incumbent, on_stage=None):
             reason = ("CLASSIFICATION_UNSUPPORTED" if name not in allowed else
                       f"REQUIRES_{REQUIREMENTS.get(name, 1)}_PERIODS" if len(history) < REQUIREMENTS.get(name, 1)
                       else "NO_COMPARABLE_ROLLING_ORIGINS")
-            metrics = scored(common if name in evaluated else [], "statistical", name)
+            metrics = calendar_score(common if name in evaluated else [], "statistical", name)
             valid = metrics["retrospective_wape"] is not None
             if metrics["observations"] and not valid:
                 reason = "ZERO_ACTUAL_DENOMINATOR"
@@ -129,7 +151,7 @@ def forecast_chain(products, issue, policy, incumbent, on_stage=None):
         if not test:
             continue
         identities = identities_at(products, origin)
-        x, y = _training_samples(products, origin, identities)
+        x, y = _training_samples(products, origin, identities, horizons=horizons)
         if len(x) < policy.min_train_observations:
             continue
         fold_audit.append({"origin": origin, "train_target_max": origin, "training_samples": len(x),
@@ -150,14 +172,14 @@ def forecast_chain(products, issue, policy, incumbent, on_stage=None):
                     row["ml"].pop(name, None)
                 ml_failures.append({"model": name, "error": type(exc).__name__})
     identities = identities_at(products, issue)
-    current_x, current_y = _training_samples(products, issue, identities)
+    current_x, current_y = _training_samples(products, issue, identities, horizons=horizons)
     trainable = len(current_x) >= policy.min_train_observations
     evaluated_ml = [name for name in MODEL_FACTORIES if any(name in row["ml"] for row in rows)]
     common_ml = [row for row in rows if all(name in row["ml"] for name in evaluated_ml)
                  and choices[row["product_id"]] in row["statistical"]] if evaluated_ml else []
     ml_candidates = []
     for name in MODEL_FACTORIES:
-        metrics = scored(common_ml, "ml", name)
+        metrics = calendar_score(common_ml, "ml", name)
         validated = metrics["retrospective_wape"] is not None and metrics["origins"] >= 2
         ml_candidates.append({"family": "ml", "model": name, "evaluation_mode": EVALUATION_MODE,
                               "training_samples": len(current_x), "validation_observations": metrics["observations"],
@@ -171,7 +193,7 @@ def forecast_chain(products, issue, policy, incumbent, on_stage=None):
     product_ml_choices = {}
     for item in products:
         product_rows = [row for row in common_ml if row["product_id"] == item.product_id]
-        valid = [{"model": name, **scored(product_rows, "ml", name)} for name in MODEL_FACTORIES]
+        valid = [{"model": name, **calendar_score(product_rows, "ml", name)} for name in MODEL_FACTORIES]
         valid = [candidate for candidate in valid if candidate["retrospective_wape"] is not None and
                  candidate["observations"] >= policy.min_product_observations]
         product_ml_choices[item.product_id] = min(valid, key=order)["model"] if valid else None
@@ -211,7 +233,7 @@ def forecast_chain(products, issue, policy, incumbent, on_stage=None):
                                "statistical_weight": weight, **{f"retrospective_{k}": v for k, v in score.items()},
                                "observations": len(common), "evaluation_mode": EVALUATION_MODE,
                                "by_horizon": [{"horizon": h, **_metrics(pairs([r for r in common if r["horizon"] == h], weight))}
-                                              for h in HORIZONS]})
+                                              for h in horizons]})
     strategies.sort(key=lambda c: (c["retrospective_wape"], abs(c["retrospective_bias"]), -c["statistical_weight"]))
     leader = strategies[0] if strategies else {"strategy": "statistical", "statistical_weight": 1.0, "retrospective_wape": None}
     # Descriptive leader never replaces an existing published model without PIT evidence.
@@ -221,7 +243,7 @@ def forecast_chain(products, issue, policy, incumbent, on_stage=None):
     product_ml_forecasts = {}
     for item in products:
         history = item.history(issue)
-        for h in HORIZONS:
+        for h in horizons:
             target = add_month(issue, h)
             statistical = predict(choices[item.product_id], history, h) if history else 0.0
             ml = None
@@ -242,7 +264,7 @@ def forecast_chain(products, issue, policy, incumbent, on_stage=None):
             band_basis, band_rows = select_band_rows(common, product_id=item.product_id,
                 category=item.category, horizon=h)
             residuals = [a - p for a, p in pairs(band_rows, weight)]
-            forecast.append({"chain_id": chain, "product_id": item.product_id, "product_code": item.product_code,
+            forecast.append({"chain_id": item.chain_id, "product_id": item.product_id, "product_code": item.product_code,
                              "category": item.category, "variant": item.variant, "objective": item.objective,
                              "issue_period": issue, "target_period": target, "horizon": h,
                              "statistical": round(statistical, 2), "ml": round(ml, 2) if ml is not None else None,
@@ -256,7 +278,7 @@ def forecast_chain(products, issue, policy, incumbent, on_stage=None):
                              "band_status": "AVAILABLE" if band_rows else "INSUFFICIENT_BAND_EVIDENCE"})
     aggregates = []
     for level in ("category", "chain"):
-        for h in HORIZONS:
+        for h in horizons:
             for key in sorted({r["category"] if level == "category" else chain for r in forecast}):
                 members = [r for r in forecast if r["horizon"] == h and (level == "chain" or r["category"] == key)]
                 aggregates.append({"level": level, "key": key, "horizon": h, "target_period": add_month(issue, h),
@@ -266,19 +288,19 @@ def forecast_chain(products, issue, policy, incumbent, on_stage=None):
     # Scope model scores aggregate actual/predicted pairs, NOT product WAPE means.
     scope_candidates = []
     for name in stat.MODELS:
-        metrics = scored(rows, "statistical", name)
+        metrics = calendar_score(rows, "statistical", name)
         reasons = sorted({c["reason"] for c in stat_candidates if c["model"] == name and c["reason"]})
         scope_candidates.append({"family": "statistical", "model": name, **metrics,
                                  "status": "EVALUATED" if metrics["retrospective_wape"] is not None else "NOT_APPLICABLE",
                                  "reason": None if metrics["retrospective_wape"] is not None else reasons[0] if len(reasons) == 1 else "NO_APPLICABLE_PRODUCTS_OR_ORIGINS",
                                  "products_evaluated": sum(c["model"] == name and c["status"] == "EVALUATED" for c in stat_candidates)})
     for candidate in ml_candidates:
-        candidate["by_product"] = [{"product_id": p.product_id, **scored([r for r in common_ml if r["product_id"] == p.product_id], "ml", candidate["model"])} for p in products]
+        candidate["by_product"] = [{"product_id": p.product_id, **calendar_score([r for r in common_ml if r["product_id"] == p.product_id], "ml", candidate["model"])} for p in products]
     stat_pairs = [(r["actual"], r["statistical"][choices[r["product_id"]]]) for r in rows if choices[r["product_id"]] in r["statistical"]]
     selected_stat_rows = [{**r, "selected_statistical": {"selected": r["statistical"][choices[r["product_id"]]]}}
                           for r in rows if choices[r["product_id"]] in r["statistical"]]
     selected_stat_metrics = {"model": "Selección por producto", "evaluation_mode": EVALUATION_MODE,
-                             **scored(selected_stat_rows, "selected_statistical", "selected")}
+                             **calendar_score(selected_stat_rows, "selected_statistical", "selected")}
     ml_pairs = [(r["actual"], r["ml"][ml_choice]) for r in common_ml if ml_choice and ml_choice in r["ml"]]
     for strategy in strategies:
         strategy["by_product"] = [{"product_id": p.product_id,
@@ -291,14 +313,14 @@ def forecast_chain(products, issue, policy, incumbent, on_stage=None):
         own_forecast = [row for row in forecast if row["product_id"] == item.product_id]
         comparable = [row for row in (common_ml if product_ml_choices[item.product_id] else common)
                       if row["product_id"] == item.product_id]
-        signature = evaluation_signature(chain_id=chain, category_id=item.category,
+        signature = evaluation_signature(chain_id=item.chain_id, category_id=item.category,
             product_id=item.product_id, objective=item.objective, issue_period=issue,
             evaluation_mode=EVALUATION_MODE, rows=comparable) if comparable else None
         for family, model, weight_value in (("statistical", choices[item.product_id], 1.0),
                                              ("ml", product_ml_choices[item.product_id], 0.0),
                                              ("ensemble", "weighted", next((s["statistical_weight"] for s in strategies
                                                 if s["strategy"] == "ensemble"), None))):
-            if model is None or weight_value is None or family == "ensemble" and any(row["ml"] is None for row in own_forecast) or family == "ml" and any((item.product_id, h) not in product_ml_forecasts for h in HORIZONS):
+            if model is None or weight_value is None or family == "ensemble" and any(row["ml"] is None for row in own_forecast) or family == "ml" and any((item.product_id, h) not in product_ml_forecasts for h in horizons):
                 continue
             def candidate_pairs(data):
                 if family == "ml":
@@ -307,7 +329,7 @@ def forecast_chain(products, issue, policy, incumbent, on_stage=None):
             values = candidate_pairs(comparable)
             metrics = _metrics(values)
             by_horizon = [{"horizon": h, **_metrics(candidate_pairs([r for r in comparable if r["horizon"] == h])),
-                           "observations": sum(r["horizon"] == h for r in comparable)} for h in HORIZONS]
+                           "observations": sum(r["horizon"] == h for r in comparable)} for h in horizons]
             product_candidates.append({"family": family, "model": model,
                 "strategy": family, "product_id": item.product_id,
                 "statistical_weight": weight_value if family == "ensemble" else None,
@@ -323,7 +345,7 @@ def forecast_chain(products, issue, policy, incumbent, on_stage=None):
                     for row in own_forecast]})
         suggested_references[item.product_id] = suggest_reference(
             [candidate for candidate in product_candidates if candidate["product_id"] == item.product_id])
-    return {"chain_id": chain, "objective": products[0].objective, "policy": asdict(policy),
+    result = {"chain_id": chain, "objective": products[0].objective, "policy": asdict(policy),
             "evaluation_mode": EVALUATION_MODE, "certification_status": "PROVISIONAL_TEMPORAL_UNKNOWN",
             "certified_metrics": {"certified_wape": None, "certified_bias": None},
             "forecast_towell": forecast, "aggregates": aggregates, "by_horizon": [], "by_product": [],
@@ -333,7 +355,7 @@ def forecast_chain(products, issue, policy, incumbent, on_stage=None):
                           "scope_comparable_baseline": {"retrospective_wape": _metrics(pairs(common, 1.0))["wape"],
                               "retrospective_bias": _metrics(pairs(common, 1.0))["bias"],
                               "by_horizon": [{"horizon": h, **_metrics(pairs([r for r in common if r["horizon"] == h], 1.0))}
-                                             for h in HORIZONS], "observations": len(common)},
+                                             for h in horizons], "observations": len(common)},
                           "comparison_status": "PRODUCT_GRAIN", "comparison_reason": None,
                           "applied_strategy": applied, "status": "PREVIEW", "official": incumbent,
                           "no_degradation": False if incumbent else None, "automatic_promotion": False,
@@ -344,10 +366,26 @@ def forecast_chain(products, issue, policy, incumbent, on_stage=None):
                             "evaluation_mode": EVALUATION_MODE, "dataset_cutoff": month_end(issue), "temporal_certification": False,
                             "certified_wape": None, "certified_bias": None, "certification_status": "PROVISIONAL_TEMPORAL_UNKNOWN",
                             "origins": {"selection": len(origins), "certification": 0}, "folds": fold_audit,
-                            "evaluation_horizons": list(stat.HORIZONS), "max_folds": MAX_FOLDS,
+                            "evaluation_horizons": list(evaluation_horizons), "max_folds": max_folds,
                             "training_samples": len(current_x), "training_products": sum(bool(p.history(issue)) for p in products),
                             "feature_names": feature_names(identities), "ml_candidates": ml_candidates,
                             "available_statistical_candidates": list(stat.MODELS), "available_ml_candidates": list(MODEL_FACTORIES),
                             "retrospective_statistical_metrics": _metrics(stat_pairs), "retrospective_ml_metrics": _metrics(ml_pairs),
                             "selected_statistical_metrics": selected_stat_metrics,
                             "ml_failures": ml_failures, "ensemble_failures": ensemble_failures}}
+
+    if retain_pairs:
+        product_chains = {p.product_id: p.chain_id for p in products}
+        ml_keys = {(r["product_id"], r["origin"], r["horizon"]) for r in common_ml}
+        common_keys = {(r["product_id"], r["origin"], r["horizon"]) for r in common}
+        result["paired_evidence"] = [{**row,
+            "chain_id": product_chains[row["product_id"]],
+            "selected_statistical_model": choices[row["product_id"]],
+            "selected_ml_model": product_ml_choices[row["product_id"]],
+            "ensemble_ml_model": ml_choice,
+            "ensemble_statistical_weight": next((s["statistical_weight"] for s in strategies if s["strategy"] == "ensemble"), None),
+            "statistical_comparable": choices[row["product_id"]] in row["statistical"],
+            "candidate_comparable": (row["product_id"], row["origin"], row["horizon"]) in
+                (ml_keys if product_ml_choices[row["product_id"]] else common_keys)}
+            for row in rows]
+    return result

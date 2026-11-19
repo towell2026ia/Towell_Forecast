@@ -4,6 +4,7 @@ import type { PlanningSheet } from "./planning-results";
 import type { HistoricalRow, OperationalInventory } from "./supabase/types";
 import { forecastSourceAvailable, forecastHistoryAvailable, forecastSourceState, forecastUnavailableMessage } from "./official-sales-source";
 import { forecastComposition } from "./forecast-composition";
+import { championFamilyNames, verifiedLocalChampions } from "./local-champion";
 
 export function operationalPeriodsSheets(snapshot: ReportSnapshot, dashboard: ReturnType<typeof periodsDashboard>, history: HistoricalRow[], inventory: OperationalInventory[], historyComplete = false): PlanningSheet[] {
   const context = snapshot.sourceContext;
@@ -14,6 +15,8 @@ export function operationalPeriodsSheets(snapshot: ReportSnapshot, dashboard: Re
     || dashboard.sourceContext.fulfillment_available !== context.fulfillment_available) throw new Error("official_source_changed");
   const historyAvailable = forecastHistoryAvailable(context);
   const scope = new Map(dashboard.matrix.rows.map(row => [row.product.id, row]));
+  const champions = snapshot.localChampions ? verifiedLocalChampions(snapshot, snapshot.localChampions).products
+    .filter(row => scope.get(row.product.product_id)?.product.chain_id === row.product.chain_id) : null;
   const series = Object.keys(dashboardSeries) as (keyof typeof dashboardSeries)[];
   const forecast = Object.keys(reportSeries) as (keyof typeof reportSeries)[];
   const comparable = comparableForecastRows(dashboard.matrix.rows, dashboard.matrix.periods);
@@ -36,6 +39,17 @@ export function operationalPeriodsSheets(snapshot: ReportSnapshot, dashboard: Re
       ...(context.forecast_contract ? [["Objetivo", context.objective!], ["Métrica", context.target_metric!], ["Unidad", context.unit!], ["Contrato", context.forecast_contract], ["Hoja objetivo", context.target_sheet!], ["SHA-256 del maestro", context.target_file_sha256!], ["Cierre de Pedido", context.training_cutoff ?? "Sin acreditar"], ["Estado del cálculo", forecastSourceAvailable(context) ? "Disponible" : forecastUnavailableMessage(context)], ["Fuente de inventario", context.inventory_source!]] : []),
       ...(context.sales_contract ? [["Fuente de ventas", context.sales_source!], ["Contrato de ventas", context.sales_contract], ["Archivo de ventas SHA-256", context.sales_file_sha256!], ["Hoja de ventas", context.sales_sheet!], ["Ventas disponibles", historyAvailable ? "Sí" : forecastUnavailableMessage(context)], ["Fuente de inventario", context.inventory_source!]] : []),
       ["Productos", scope.size], ["Productos con cálculo", dashboard.available], ["Productos con decisión", dashboard.adopted],
+      ...(champions ? [["Champion local · cobertura", `${champions.length}/${scope.size}`],
+        ["Champion local · estado", champions.length ? "Guardado; independiente de recomendación y FT-Decision" : "Sin Champion local guardado"],
+        ...champions.flatMap(row => {
+          const key = `Champion local · ${row.product.chain_id}/${row.product.product_id}`;
+          return [[`${key} · ID`, row.id], [`${key} · Corrida`, row.run_id], [`${key} · Año`, row.planning_year],
+            [`${key} · Alternativa`, championFamilyNames[row.candidate_family]], [`${key} · Método`, row.product.model], [`${key} · Origen`, row.product.origin],
+            [`${key} · Fuente SHA-256`, row.source_context.source_hash], [`${key} · Actualización`, row.source_context.generation],
+            [`${key} · Archivo de corrida SHA-256`, row.run_file_sha256], [`${key} · Contenido de corrida SHA-256`, row.run_content_digest],
+            [`${key} · Emisión de corrida`, row.run_emitted_at], [`${key} · Usuario`, row.selected_by], [`${key} · Fecha de elección`, row.selected_at],
+            ...row.product.horizons.map(h => [`${key} · ${h.target_period}`, h.value])];
+        })] : []),
       ...(context.forecast_contract ? [["Pedido capturado parcial visible", dashboard.points.filter(point => point.partialOrder).map(point => point.period).join("; ") || "Sin dato"]] : []),
       ["Variantes comunes a tres motores", comparable.length], ["Variantes comunes · IDs", comparable.map(row => `${row.product.chain_id}/${row.product.id}`).join(";")],
       ["Pares Pedido/Entrega", dashboard.kpis.paired], ["Pares esperados", dashboard.kpis.expectedPairs],
@@ -45,7 +59,7 @@ export function operationalPeriodsSheets(snapshot: ReportSnapshot, dashboard: Re
       ["Cobertura Fill Rate", dashboard.kpis.expectedPairs === 0 ? "Sin alcance" : dashboard.kpis.paired < dashboard.kpis.expectedPairs ? "Parcial" : "Completa"], ["Fill Rate (%)", dashboard.kpis.fillRate],
     ] },
     { name: "Comparativa", title: "Series de la gráfica de Períodos", note: "Mismos puntos y cobertura de la consulta visible. Los tres subtotales comparables usan una única intersección de variantes. El inventario corresponde al saldo de cada mes. Pedido capturado parcial posterior al cierre no participa en el entrenamiento ni en los KPI de meses cerrados. Fill Rate (%) divide Entrega entre Pedido de los mismos pares comparables. En objetivo Pedido, sus pares proceden exclusivamente de BAASE y no sustituyen el histórico utilizado para entrenar.", headers: ["Periodo", ...series.flatMap(key => [dashboardLabel(key, dashboard.objective ?? ""), `Cobertura ${dashboardLabel(key, dashboard.objective ?? "")}`]), "Estadístico · mismas variantes", "ML · mismas variantes", "Ensemble · mismas variantes", "Cobertura · mismas variantes", "Estado Pedido", "Fuente Fill Rate", "Captura Fill Rate", "Fill Rate (%)", "Cobertura Fill Rate", "Pedido comparable", "Entrega comparable"], rows: dashboard.points.map(point => {
-      const future = point.horizon !== null && dashboard.matrix.periods.includes(point.period);
+      const future = point.horizon !== null && dashboard.matrix.rows.some(row => row.values[point.period]);
       return [point.period, ...series.flatMap(key => [point.coverage[key].exact ?? point.values[key], `${point.coverage[key].covered}/${point.coverage[key].eligible}`]),
         ...(["STATISTICAL", "ML", "ENSEMBLE"] as const).map(family => future ? matrixTotal(comparable, point.period, family).value : null), `${future ? comparable.length : 0}/${scope.size}`,
         point.partialOrder ? "Capturado parcial; excluido de entrenamiento y KPI cerrados" : point.values.order !== null ? "Histórico" : "Sin dato",

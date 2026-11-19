@@ -16,7 +16,7 @@ type Mapping = { scope?: { parent_uuid?: string; scope_type?: string }; products
 const observationReader = "operational_read_observations";
 const periodReader = "operational_read_periods";
 export const actualMetrics = ["SALES", "ORDER", "DELIVERY"] as const;
-const allMetrics: readonly OperationalMetric[] = [...actualMetrics, "FCST_TOWELL_HISTORY", "FCST_CLIENTE_HISTORY"];
+const allMetrics: readonly OperationalMetric[] = [...actualMetrics, "SALES_CLIENTE", "FCST_TOWELL_HISTORY", "FCST_CLIENTE_HISTORY"];
 export const observationFields = "observation_id,chain_id,chain_name,product_id,product_code,variant_code,product_description,category_id,period,metric_code,value,value_text,availability_source,version_no,available_at";
 type Observation = Cursor & { metric_code: OperationalMetric; value: number; value_text?: string; availability_source: string; product_code: string; variant_code: string | null; product_description: string; category_id: string | null; chain_name: string; observation_id?: string; version_no?: number; available_at?: string | null };
 
@@ -59,7 +59,7 @@ export function combineObservations(observations: Observation[], products: Map<s
     const value = Number(o.value);
     if (!Number.isFinite(value) || value < 0 || requireExact && typeof o.value_text !== "string" || (o.value_text !== undefined && (!/^\d+(?:\.\d+)?$/.test(literal) || Number(literal) !== value))) throw new Error("invalid_observation_value");
     row.exact = { ...row.exact, [o.metric_code]: literal };
-    if (o.metric_code === "FCST_TOWELL_HISTORY" || o.metric_code === "FCST_CLIENTE_HISTORY") continue;
+    if (o.metric_code === "SALES_CLIENTE" || o.metric_code === "FCST_TOWELL_HISTORY" || o.metric_code === "FCST_CLIENTE_HISTORY") continue;
     row[o.metric_code] = value;
     if (o.observation_id) row.observations = { ...row.observations, [o.metric_code]: { id: o.observation_id, version: o.version_no ?? 1, availableAt: o.available_at ?? null } };
   }

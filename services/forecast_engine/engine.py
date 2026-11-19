@@ -322,14 +322,15 @@ def _feature(series: ProductSeries, issue: str, target: str, identities: list[st
 
 
 def _training_samples(series: list[ProductSeries], train_end: str,
-                      identities: list[str]) -> tuple[list[list[float | None]], np.ndarray]:
+                      identities: list[str], *,
+                      horizons: tuple[int, ...] = HORIZONS) -> tuple[list[list[float | None]], np.ndarray]:
     features, targets = [], []
     first = min(min(item.observations) for item in series)
     for item in series:
         for target, observation in sorted(item.observations.items()):
             if target > train_end or observation.value is None or not item.known(observation, train_end):
                 continue
-            for horizon in HORIZONS:
+            for horizon in horizons:
                 issue = add_month(target, -horizon)
                 if issue < first or issue >= target or not item.history(issue):
                     continue

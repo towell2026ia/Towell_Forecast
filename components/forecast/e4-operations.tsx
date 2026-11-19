@@ -2,7 +2,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { PreviewReadError } from "@/lib/forecast-preview";
-import type { CalculationDetail, CalculationHorizon, CalculationSummary, PreviewClient, SelectionEvent } from "@/lib/forecast-preview";
+import type { CalculationDetail, CalculationHorizon, CalculationSummary, ChampionFamily, LocalChampions, PreviewClient, SelectionEvent } from "@/lib/forecast-preview";
+import { championFamilies, championFamilyNames, type ChampionSelection } from "@/lib/local-champion";
 import { forecastComposition } from "@/lib/forecast-composition";
 import { percent } from "@/lib/forecast-chart-data";
 import { ForecastGrid } from "./forecast-horizon-table";
@@ -76,13 +77,59 @@ function CalculationCurveChart({ detail, compare }: { detail: CalculationDetail;
 type E4OperationsProps = {
   mode: "decision" | "history"; client: PreviewClient; chainId: string | null; productId: string | null;
   canWrite: boolean; canDecide: boolean; children?: React.ReactNode;
+  champion?: ChampionSelection | null; canChampion?: boolean;
 };
 export function E4Operations(props: E4OperationsProps) {
   // A new commercial scope cannot inherit rows, detail or a decision from the
   // previous product, including late responses to its outstanding requests.
-  return <ScopedE4Operations key={JSON.stringify([props.chainId, props.productId])} {...props}/>;
+  return <ScopedE4Operations key={JSON.stringify([props.chainId, props.productId, props.champion])} {...props}/>;
 }
-function ScopedE4Operations({ mode, client, chainId, productId, canWrite: writeAllowed, canDecide: decideAllowed, children }: E4OperationsProps) {
+function ChampionControls({ client, selection, canManage, onError }: { client: PreviewClient; selection: ChampionSelection; canManage: boolean; onError: (message: string) => void }) {
+  const [family, setFamily] = useState<ChampionFamily | "">("");
+  const [saved, setSaved] = useState<LocalChampions | null>(null);
+  const [loading, setLoading] = useState(true), [busy, setBusy] = useState(false);
+  const active = useRef(true), running = useRef(false);
+  const pending = useRef<{ signature: string; key: string } | null>(null);
+  useEffect(() => {
+    let alive = true;
+    active.current = true;
+    void Promise.resolve().then(() => {
+      if (!alive) return null;
+      setSaved(null); setFamily(""); setLoading(true);
+      return client.currentChampion!(selection);
+    }).then(result => {
+      if (!alive || !result) return;
+      setSaved(result);
+      const families = new Set(result.products.filter(row => row.run_id === selection.run_id).map(row => row.candidate_family));
+      if (families.size === 1) setFamily([...families][0]);
+      setLoading(false);
+    }).catch(() => { if (alive) { setSaved(null); setLoading(false); onError("No fue posible consultar el Champion guardado."); } });
+    return () => { alive = false; active.current = false; };
+  }, [client, selection, onError]);
+  const ids = family ? selection.eligible[family] : [];
+  const unchanged = Boolean(saved && ids.length && ids.every(id => saved.products.some(row => row.product.product_id === id && row.run_id === selection.run_id && row.candidate_family === family)));
+  async function save() {
+    if (!canManage || loading || !saved || busy || running.current || !family || !ids.length || unchanged || !client.promoteChampion || !client.currentChampion) return;
+    if (!window.confirm(`¿Guardar Champion ${championFamilyNames[family]} para ${ids.length}/${selection.product_ids.length} productos del alcance seleccionado, enero–diciembre de ${selection.planning_year}?\nObjetivo: Pedido · Corrida: ${selection.run_id} · Fuente: ${selection.source_context.source_hash}.`)) return;
+    running.current = true; setBusy(true); onError("");
+    const request = { source_context: selection.source_context, planning_year: selection.planning_year, run_id: selection.run_id,
+      candidate_family: family, chain_ids: [...new Set(ids.map(id => selection.productChains[id]))].sort(), product_ids: [...ids].sort(),
+      confirm: true as const, comment: `Elección explícita ${family}; corrida ${selection.run_id}; plan ${selection.planning_year}` };
+    const signature = JSON.stringify(request);
+    if (pending.current?.signature !== signature) pending.current = { signature, key: crypto.randomUUID() };
+    try {
+      const id = await client.promoteChampion(request, pending.current.key);
+      const result = await client.currentChampion(selection);
+      if (!ids.every(pid => result.products.some(row => row.id === id && row.product.product_id === pid && row.candidate_family === family))) throw new Error("champion_readback_failed");
+      if (active.current) { setSaved(result); window.dispatchEvent(new Event("towell-champion-changed")); }
+    } catch { if (active.current) { setSaved(null); onError("No fue posible guardar y verificar el Champion."); } }
+    finally { running.current = false; if (active.current) setBusy(false); }
+  }
+  return <div className="flex flex-wrap gap-2"><select aria-label="Champion" className="rounded border p-2" value={family} disabled={!canManage || loading || !saved || busy} onChange={event => setFamily(event.target.value as ChampionFamily | "")}>
+    <option value="">Selecciona Champion</option>{championFamilies.map(value => <option key={value} value={value} disabled={!selection.eligible[value].length}>{championFamilyNames[value]} ({selection.eligible[value].length}/{selection.product_ids.length})</option>)}
+  </select><Button disabled={!canManage || loading || !saved || busy || !family || !ids.length || unchanged} onClick={() => void save()}>Guardar Champion</Button></div>;
+}
+function ScopedE4Operations({ mode, client, chainId, productId, canWrite: writeAllowed, canDecide: decideAllowed, champion, canChampion, children }: E4OperationsProps) {
   const canWrite = writeAllowed && client.readOnly !== true;
   const canDecide = decideAllowed && client.readOnly !== true;
   const [rows, setRows] = useState<CalculationSummary[]>([]);
@@ -187,8 +234,10 @@ function ScopedE4Operations({ mode, client, chainId, productId, canWrite: writeA
     try { setCompare(id ? await client.calculationDetail(id) : null); }
     catch { setError("No se pudo abrir el cálculo comparativo."); }
   }
+  const championControls = mode === "decision" && champion && client.currentChampion && client.promoteChampion
+    ? <ChampionControls client={client} selection={champion} canManage={canChampion === true} onError={setError}/> : null;
   if ((!chainId || !productId) && mode === "history") return <div className="space-y-3"><div className="flex gap-2"><Button variant={tab === "calculations" ? "default" : "outline"} onClick={() => setTab("calculations")}>Cálculos C1/C2/C3</Button><Button variant={tab === "official" ? "default" : "outline"} onClick={() => setTab("official")}>Versiones oficiales</Button></div>{tab === "official" ? children : <p className="rounded-xl border bg-white p-5 text-sm text-slate-600">Selecciona cadena y producto para consultar sus cálculos.</p>}</div>;
-  if (!chainId || !productId) return <p className="rounded-xl border bg-white p-5 text-sm text-slate-600">Selecciona una cadena y un producto para consultar sus cálculos C1/C2/C3.</p>;
+  if (!chainId || !productId) return <><p className="rounded-xl border bg-white p-5 text-sm text-slate-600">Selecciona una cadena y un producto para consultar sus cálculos C1/C2/C3.</p>{championControls}{error && <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</p>}</>;
   const suggested = String(detail?.suggested_reference?.family ?? "").toUpperCase();
   const hasCandidate = (kind: Candidate) => detail?.horizons.length === 12 && detail.horizons.every(row =>
     row[`${kind === "STATISTICAL" ? "statistical" : kind === "ML" ? "ml" : "ensemble"}_value`] != null);
@@ -197,6 +246,7 @@ function ScopedE4Operations({ mode, client, chainId, productId, canWrite: writeA
   return <section className="space-y-4" aria-label={mode === "decision" ? "Decisión Forecast Towell" : "Historial de cálculos"}>
     {client.readOnly && <p role="status" className="text-sm text-slate-600">Sólo lectura local: los cálculos y las decisiones guardadas pueden consultarse; calcular, recalcular y adoptar están bloqueados.</p>}
     {error && <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</p>}
+    {championControls}
     {mode === "history" && <div className="flex gap-2"><Button variant={tab === "calculations" ? "default" : "outline"} onClick={() => setTab("calculations")}>Cálculos C1/C2/C3</Button><Button variant={tab === "official" ? "default" : "outline"} onClick={() => setTab("official")}>Versiones oficiales</Button></div>}
     {mode === "history" && tab === "official" ? children : <>
       <div className="rounded-xl border bg-white p-5">

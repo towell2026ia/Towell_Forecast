@@ -1,4 +1,5 @@
-import { addMonth, commercialScopeKey } from "./forecast-chart-data";
+import { forecastTargetMonth } from "./forecast-reporting";
+import { commercialScopeKey } from "./forecast-chart-data";
 import type { PreviewCandidate, PreviewProduct, PreviewScope } from "./forecast-preview";
 import type { Filters } from "./supabase/types";
 
@@ -22,12 +23,12 @@ export function compareStatisticalCandidates(a: PreviewCandidate, b: PreviewCand
 export function getStatisticalCandidates(scope: PreviewScope | null, productId: string) {
   return [...(scope?.statistical?.candidates ?? [])].filter(c => c.family === "statistical" && c.product_id === productId).sort(compareStatisticalCandidates);
 }
-export function selectedStatisticalModel(product?: PreviewProduct, issuePeriod?: string) {
+export function selectedStatisticalModel(product?: PreviewProduct, issuePeriod?: string, context?: PreviewScope["source_context"]) {
   const rows = product?.horizons ?? [];
   const model = rows.find(h => h.horizon === 1)?.statistical_model;
   const consistent = Boolean(model && issuePeriod && rows.length === 12 && new Set(rows.map(h => h.horizon)).size === 12 && rows.every(h =>
     Number.isInteger(h.horizon) && h.horizon >= 1 && h.horizon <= 12 && h.statistical_model === model &&
-    h.target_period === addMonth(issuePeriod!, h.horizon) && Number.isFinite(h.statistical_value)));
+    h.target_period === forecastTargetMonth(issuePeriod!, h.horizon, context) && Number.isFinite(h.statistical_value)));
   return { model: model ?? null, consistent, horizons: consistent ? [...rows].sort((a, b) => a.horizon - b.horizon) : [] };
 }
 export function statisticalModelDistribution(scope: PreviewScope | null) {
@@ -47,7 +48,7 @@ export function statisticalRanking(scope: PreviewScope | null, filters: Filters)
     .flatMap(product => {
       const candidates = getStatisticalCandidates(scope, product.product_id);
       if (!candidates.length) return [];
-      const selection = selectedStatisticalModel(product, scope.issue_period);
+      const selection = selectedStatisticalModel(product, scope.issue_period, scope.source_context);
       return [{ product, selection, candidate: candidates.find(c => c.model === (selection.model ?? product.statistical_model)) }];
     });
 }

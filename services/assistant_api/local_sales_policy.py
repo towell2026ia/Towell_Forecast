@@ -10,7 +10,7 @@ import hashlib
 from pathlib import Path
 import re
 
-from .supabase_access import PreviewError
+from .supabase_access import ORDER_SHEETS, UNIFIED_CONTRACT, UNIFIED_MASTER_SHA256, PreviewError
 
 
 SALES_CONTRACT = "towell-sales-v1"
@@ -28,8 +28,8 @@ LEGACY_READERS = frozenset({
 
 class LocalSalesPolicy:
     def __init__(self, config):
-        if (not isinstance(config, dict) or config.get("contract") not in {SALES_CONTRACT, "pedido-towell-v1"}
-                or config.get("sheet") != ("Pedidos" if config.get("contract") == "pedido-towell-v1" else "Towell") or config.get("unit") != "PIEZAS"
+        if (not isinstance(config, dict) or config.get("contract") not in {SALES_CONTRACT, *ORDER_SHEETS}
+                or config.get("sheet") != ORDER_SHEETS.get(config.get("contract"), "Towell") or config.get("unit") != "PIEZAS"
                 or any(not isinstance(config.get(key), str)
                        or not re.fullmatch(r"[0-9a-f]{64}", config[key])
                        for key in ("master_sha256", "source_hash"))
@@ -38,7 +38,13 @@ class LocalSalesPolicy:
                     and not re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", str(config.get("last_closed_period", ""))))):
             raise ValueError("local_authorized_sales_policy_required")
         self.path = Path(config.get("master_path", ""))
-        if (not self.path.is_absolute() or self.path.name != MASTER_NAME
+        if config["contract"] == UNIFIED_CONTRACT:
+            if (not self.path.is_absolute() or self.path.suffix.lower() != ".xlsx"
+                    or "datos_privados" not in self.path.resolve().parts
+                    or config["master_sha256"] != UNIFIED_MASTER_SHA256
+                    or config["last_closed_period"] != "2026-09"):
+                raise ValueError("local_authorized_unified_master_required")
+        elif (not self.path.is_absolute() or self.path.name != MASTER_NAME
                 or self.path.parent.name != "datos_privados"):
             raise ValueError("local_authorized_sales_master_required")
         self.config = dict(config)
@@ -52,6 +58,12 @@ class LocalSalesPolicy:
         # Check the real file on every operation, including after service restart.
         # No workbook copy, prior source, inventory, or result cache is a fallback.
         try:
+            if self.config["contract"] == UNIFIED_CONTRACT:
+                with self.path.open("rb") as stream:
+                    digest = hashlib.sha256()
+                    for block in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(block)
+                return digest.hexdigest() == UNIFIED_MASTER_SHA256
             from services.operational_update.towell_sales_source import read_master_bytes
             return hashlib.sha256(read_master_bytes(self.path)).hexdigest() == self.config["master_sha256"]
         except (OSError, ValueError):
@@ -65,11 +77,12 @@ class LocalSalesPolicy:
                 or self.config["last_closed_period"] is not None and actual["last_period"] < self.config["last_closed_period"]):
             raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 503)
         available = self.available()
-        if self.config["contract"] == "pedido-towell-v1":
+        if self.config["contract"] in ORDER_SHEETS:
             closed = self.config["last_closed_period"] is not None
             return {**actual, **{key: self.config[key] for key in ("fulfillment_source", "fulfillment_file_sha256", "fulfillment_available") if key in self.config},
-                "forecast_contract": "pedido-towell-v1", "objective": "Pedido", "target_metric": "ORDER",
-                "target_sheet": "Pedidos", "target_file_sha256": self.config["master_sha256"], "training_cutoff": self.config["last_closed_period"],
+                **({"planning_start": "2027-01", "planning_end": "2027-12"} if self.config["contract"] == UNIFIED_CONTRACT else {}),
+                "forecast_contract": self.config["contract"], "objective": "Pedido", "target_metric": "ORDER",
+                "target_sheet": self.config["sheet"], "target_file_sha256": self.config["master_sha256"], "training_cutoff": self.config["last_closed_period"],
                 "authorized_source_hash": self.config["source_hash"], "target_source_available": available, "forecast_available": available and closed,
                 "forecast_block_code": None if closed else "ORDER_CLOSURE_UNVERIFIED",
                 "forecast_unavailable_reason": "Sin cálculo: fuente de pedidos no disponible" if not available else None if closed else "Sin cálculo: cierre de Pedido no acreditado",

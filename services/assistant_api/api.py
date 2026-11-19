@@ -92,6 +92,7 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
     from .e4_api import mount_e4_routes
     from .vintage_service import SupabaseForecastWriteRepository
     local_database = None
+    local_champion = None
     if config.local_postgres_config is not None:
         from .local_postgres import LocalPostgresGateway
         local_database = LocalPostgresGateway(config)
@@ -153,14 +154,19 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
     researcher = ColdStartResearch(config.openai_api_key, timeout=config.external_timeout_seconds) \
         if config.deep_research_enabled and local_database is None else None
     preview_runner = OperationalMultiChainForecastRunner(storage, concurrency=config.max_forecast_runs,
-        environment=config.app_env, require_authorized_sales=local_database is not None) if config.operational_preview_enabled else None
+        environment=config.app_env, require_authorized_sales=local_database is not None,
+        planning_reference=local_database.config.get("local_champion_planning_run") if local_database else None) if config.operational_preview_enabled else None
     app.state.preview_runner = preview_runner
     if preview_runner:
         write_repository = SupabaseForecastWriteRepository(config.supabase_url, config.supabase_service_role_key,
             timeout=config.external_timeout_seconds) if (config.vintage_persistence_enabled or any((
                 config.forecast_calculation_history_enabled,config.forecast_selection_enabled,
                 config.capture_center_enabled,config.live_learning_enabled))) else None
-        mount_preview_routes(app, config, identity, data, preview_runner, rate_limiter, write_repository)
+        if local_database and (local_database.config.get("local_champion_planning_run") or {}).get("enabled") is True:
+            from .local_champion import LocalChampionService
+            local_champion = LocalChampionService(storage, local_database.config["local_champion_planning_run"])
+        mount_preview_routes(app, config, identity, data, preview_runner, rate_limiter, write_repository,
+                             local_champion=local_champion)
         mount_e4_routes(app, config, identity, data, preview_runner, write_repository)
         from .rs_assistant import RSAssistantWorkflow, mount_rs_assistant
         from .rs_research import RSResearch
@@ -298,6 +304,7 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
                 "local_postgres": local_database is not None,
                 "operational_preview": True,
                 "local_bounded_preview": local_database is not None,
+                "local_champion_publication": local_champion is not None,
                 "rs_assistant_enabled": config.ai_assistant_api_enabled,
                 "openai_enabled": config.openai_enabled,
                 "deep_research_enabled": config.deep_research_enabled and local_database is None,

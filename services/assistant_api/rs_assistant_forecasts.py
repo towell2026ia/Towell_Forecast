@@ -84,6 +84,10 @@ def stored_rs_forecast(client, context, *, chain_id, product_ids, period):
     if context.get("forecast_available") is False:
         return None
     objective = forecast_objective(context)
+    def target_month(horizon):
+        if context.get("forecast_contract") == "pedido-unificado-v1":
+            return add_month(context["planning_start"], horizon - 1)
+        return add_month(period, horizon)
     ids = sorted({_uuid(value) for value in product_ids})
     if not ids:
         return None
@@ -137,19 +141,19 @@ def stored_rs_forecast(client, context, *, chain_id, product_ids, period):
             h = row.get("horizon")
             if (header is None or row["calculation_id"] not in batch or row.get("chain_id") != chain_id
                     or row.get("product_id") != header["product_id"] or type(h) is not int
-                    or h not in range(1, 13) or row.get("target_period") != add_month(period, h) + "-01"
+                    or h not in range(1, 13) or row.get("target_period") != target_month(h) + "-01"
                     or not set(FAMILIES.values()) <= row.keys()
                     or h in curves[header["product_id"]]):
                 _invalid()
             values = {name: _quantity(row.get(field)) for name, field in FAMILIES.items()}
-            if values["statistical"] is None:
+            if values["statistical"] is None and context.get("forecast_contract") != "pedido-unificado-v1":
                 _invalid()
             curves[header["product_id"]][h] = values
     for curve in curves.values():
         if set(curve) != set(range(1, 13)):
             _invalid()
         for family in ("ml", "ensemble_value"):
-            if sum(curve[h][family] is not None for h in curve) not in {0, 12}:
+            if context.get("forecast_contract") != "pedido-unificado-v1" and sum(curve[h][family] is not None for h in curve) not in {0, 12}:
                 _invalid()
     periods = []
     with localcontext() as decimal_context:
@@ -160,7 +164,7 @@ def stored_rs_forecast(client, context, *, chain_id, product_ids, period):
                 numbers = [curve[h][family] for curve in curves.values() if curve[h][family] is not None]
                 values[family] = {"pieces": format(sum(numbers), "f") if numbers else None,
                                   "covered": len(numbers), "eligible": len(ids)}
-            periods.append({"period": add_month(period, h), **values})
+            periods.append({"period": target_month(h), **values})
     _check_context(client, context)
     provenance = []
     for product_id, row in sorted(latest.items()):

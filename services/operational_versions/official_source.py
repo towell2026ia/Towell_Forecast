@@ -37,7 +37,7 @@ def _attribute_references(row):
     canonical = row.get("canonical_attribute_source")
     if canonical is not None:
         if (not isinstance(canonical, dict) or set(canonical) != {"contract", "master_sha256", "identity"}
-                or canonical["contract"] not in {"towell-sales-v1", "pedido-towell-v1"} or not isinstance(canonical["master_sha256"], str)
+                or canonical["contract"] not in {"towell-sales-v1", "pedido-towell-v1", "pedido-unificado-v1"} or not isinstance(canonical["master_sha256"], str)
                 or not SHA256.fullmatch(canonical["master_sha256"])
                 or not isinstance(canonical["identity"], list) or len(canonical["identity"]) != 3
                 or any(value is not None and not isinstance(value, str) for value in canonical["identity"])):
@@ -91,7 +91,7 @@ def validate_package(payload):
                     or not isinstance(row["format"], str) or not row["format"].strip()
                     or not isinstance(row["upc"], str) or not re.fullmatch(r"[0-9]+", row["upc"])
                     or not isinstance(row["source_reference"], str) or not row["source_reference"].strip()
-                    or section == "observations" and metric not in METRICS):
+                    or section == "observations" and metric not in (set(METRICS) | ({"SALES_CLIENTE"} if payload.get("contract") == "pedido-unificado-v1" else set()))):
                 raise ValueError("official_record_identity_invalid")
             if section == "fulfillment":
                 expected_source = next(s for s in sources if s["id"] == source)
@@ -110,6 +110,12 @@ def validate_package(payload):
             ids.add(oid)
             keys.add((*identity, metric))
             periods.append(row["period"])
+    if payload.get("contract") == "pedido-unificado-v1":
+        grid = payload.get("source_grid_periods")
+        if (not isinstance(grid, list) or not grid or any(not isinstance(p, str) or not MONTH.fullmatch(p) for p in grid)
+                or len(set(grid)) != len(grid) or not set(periods).issubset(grid)):
+            raise ValueError("unified_source_grid_invalid")
+        periods = grid
     if not periods or min(periods) != payload["first_period"] or max(periods) != payload["last_period"]:
         raise ValueError("official_periods_invalid")
     return payload
@@ -177,6 +183,8 @@ class OfficialSourceLab(LocalLab):
         self._official()
         payload = validate_package(payload)
         source_hash = payload["source_hash"]
+        if payload.get("contract") == "pedido-unificado-v1" and not (getattr(self, "local_rehearsal", False) or isinstance(self, OfficialSourceLab)):
+            raise ValueError("unified_source_local_only")
         fulfillment = payload.get("fulfillment", [])
         if fulfillment and not (getattr(self, "local_rehearsal", False) or isinstance(self, OfficialSourceLab)):
             raise ValueError("local_fulfillment_only")

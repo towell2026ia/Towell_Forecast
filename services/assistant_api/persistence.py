@@ -114,6 +114,76 @@ class LocalPersistenceProvider(PersistenceProvider):
         except (sqlite3.Error, OSError):
             return {"status": "not_ready", "provider": "sqlite", "error_code": "PERSISTENCE_001"}
 
+    def promote_local_champion(self, registry_keys: dict[str, str], event_id: str,
+                               event: dict[str, Any]) -> dict[str, Any]:
+        """Atomically retain an immutable decision and its source-scoped pointer.
+
+        This local operation does not update an E4 selection or a forecast run.
+        A retried key returns its original event, even after another promotion.
+        """
+        if not registry_keys:
+            raise ValueError("invalid_champion_scope")
+        for registry_key in registry_keys.values():
+            self._check("champion_registry", registry_key)
+        self._check("champion_history", event_id)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute("SELECT payload,sha256 FROM champion_history WHERE id=?",
+                                          (event_id,)).fetchone()
+            if existing:
+                if hashlib.sha256(existing["payload"].encode()).hexdigest() != existing["sha256"]:
+                    raise ValueError("persistence_integrity_failed")
+                saved = json.loads(existing["payload"])
+                if saved.get("request_hash") != event.get("request_hash"):
+                    raise ValueError("champion_idempotency_conflict")
+                return saved
+            previous_ids = {}
+            for product_id, registry_key in registry_keys.items():
+                previous = connection.execute("SELECT payload,sha256 FROM champion_registry WHERE id=?",
+                                              (registry_key,)).fetchone()
+                if previous and hashlib.sha256(previous["payload"].encode()).hexdigest() != previous["sha256"]:
+                    raise ValueError("persistence_integrity_failed")
+                previous_ids[product_id] = json.loads(previous["payload"])["id"] if previous else None
+            saved = {**event, "id": event_id, "previous_champion_ids": previous_ids}
+            encoded = json.dumps(saved, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            digest = hashlib.sha256(encoded.encode()).hexdigest()
+            connection.execute("INSERT INTO champion_history(id,payload,sha256) VALUES(?,?,?)",
+                               (event_id, encoded, digest))
+            for product_id, registry_key in registry_keys.items():
+                pointer = {"id": event_id, "product_id": product_id, "request_hash": event["request_hash"]}
+                pointer_json = json.dumps(pointer, sort_keys=True, separators=(",", ":"))
+                connection.execute("""INSERT INTO champion_registry(id,payload,sha256) VALUES(?,?,?)
+                    ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,sha256=excluded.sha256""",
+                    (registry_key, pointer_json, hashlib.sha256(pointer_json.encode()).hexdigest()))
+            return saved
+
+    def read_local_champions(self, registry_keys: dict[str, str]) -> dict[str, dict[str, Any]]:
+        """One read snapshot, including all pointers and immutable event payloads."""
+        result, events = {}, {}
+        with self._connect() as connection:
+            connection.execute("PRAGMA query_only=ON")
+            connection.execute("BEGIN")
+            for product_id, registry_key in registry_keys.items():
+                self._check("champion_registry", registry_key)
+                pointer = connection.execute("SELECT payload,sha256 FROM champion_registry WHERE id=?",
+                                             (registry_key,)).fetchone()
+                if not pointer:
+                    continue
+                if hashlib.sha256(pointer["payload"].encode()).hexdigest() != pointer["sha256"]:
+                    raise ValueError("persistence_integrity_failed")
+                selected = json.loads(pointer["payload"])
+                event_id = selected["id"]
+                if event_id not in events:
+                    event = connection.execute("SELECT payload,sha256 FROM champion_history WHERE id=?",
+                                               (event_id,)).fetchone()
+                    if not event or hashlib.sha256(event["payload"].encode()).hexdigest() != event["sha256"]:
+                        raise ValueError("persistence_integrity_failed")
+                    events[event_id] = json.loads(event["payload"])
+                if events[event_id].get("request_hash") != selected.get("request_hash"):
+                    raise ValueError("persistence_integrity_failed")
+                result[product_id] = events[event_id]
+        return result
+
     def backup(self, destination: Path) -> dict[str, Any]:
         target = Path(destination).resolve()
         if target == self.path.resolve() or target.exists():

@@ -35,7 +35,7 @@ export function StatisticalEngineDetail({ scope, scopes, filters, historical, hi
     {future.length === 12 ? <><StatisticalForecastChart points={traderPoints(historical, [], future, selectedScope.issue_period, filters)} cutoff={selectedScope.issue_period} compareTowell={compareTowell} onCompare={onCompare} towellLabel={stored ? "Ensemble provisional" : undefined}/><ForecastGrid headers={["Horizonte", "Periodo", "Estadístico", stored ? "Ensemble provisional" : "Fcst Towell"]} rows={future.map(h => [`H${h.horizon}`, h.target_period, quantity(h.statistical_value), quantity(h.forecast_towell)])}/></> : <p className="text-sm text-slate-500">Sin forecast H1–H12 para este filtro. Selecciona un producto si estás usando búsqueda.</p>}
   </section>;
   if (!product) return <p className="text-sm text-slate-500">El producto seleccionado no está incluido en este preview.</p>;
-  const selection = selectedStatisticalModel(product, selectedScope.issue_period);
+  const selection = selectedStatisticalModel(product, selectedScope.issue_period, selectedScope.source_context);
   const candidates = getStatisticalCandidates(selectedScope, product.product_id), candidate = candidates.find(c => c.model === selection.model);
   const first = product.horizons?.find(h => h.horizon === 1), classification = first?.classification;
   const intermittent = ["Croston", "SBA", "TSB"].includes(selection.model ?? "") && ["Intermitente", "Altamente intermitente"].includes(classification ?? "");
