@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from services.assistant_api.local_sales_policy import LocalSalesPolicy, MASTER_NAME
+from services.assistant_api.local_postgres import _response
 from services.assistant_api.reported_fulfillment import reported_fulfillment
 from services.assistant_api.supabase_access import PreviewError, matches_source, require_sales_context
 from services.assistant_api.test_order_paths import order_context
@@ -78,6 +79,15 @@ class ReportedFulfillmentTests(unittest.TestCase):
         self.save([{**self.row, "upc": "1234", "format": "synthetic"}])
         with self.assertRaisesRegex(PreviewError, "FILL_RATE_REPORT_UNAVAILABLE"):
             self.read()
+
+    def test_postgresql_numeric_response_is_json_number_with_exact_companion(self):
+        row, = self.read()
+        # jsonb_to_recordset declares the primary column numeric. Psycopg then
+        # yields Decimal; the gateway serializes that column as a JSON number.
+        row["reported_fill_rate_pct"] = Decimal(row["reported_fill_rate_pct"])
+        value, = _response(200, [row]).json()
+        self.assertIsInstance(value["reported_fill_rate_pct"], (float, int))
+        self.assertEqual(value["reported_fill_rate_pct_text"], "91.5800000000000001")
 
     def test_baase_partial_status_does_not_inherit_order_observed_cutoff(self):
         self.context.update(training_cutoff="2026-12", observed_cutoff="2026-01")
