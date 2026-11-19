@@ -4,6 +4,7 @@ import unittest
 from services.operational_update.unified_scenario import build_close_runtime, validate_scenario
 from services.operational_update.unified_source import CONTRACT, MASTER_SHA256
 from services.operational_update.unified_runtime import catalog_origin_batch
+from services.operational_update.unified_runtime import accredited_auxiliary_attributes
 
 
 def fixture(period="2026-09", observed="0", definitive="99", proposal="88", complete=True):
@@ -91,6 +92,27 @@ class UnifiedScenarioTests(unittest.TestCase):
         document["rows"].append(deepcopy(document["rows"][0]))
         with self.assertRaisesRegex(ValueError, "DUPLICATE_PRODUCT_MONTH"):
             build_close_runtime(document, bindings)
+
+
+class AuxiliaryAttributesRegressionTests(unittest.TestCase):
+    def fixture(self):
+        row = {"chain_id": "CHAIN", "product_id": "PRODUCT", "upc": "000123", "format": " Suburbia "}
+        registered = {**row, "format": "SUBURBIA", "model": "SOURCE_MODEL"}
+        return row, {"PRODUCT": registered}, {("CHAIN", "PRODUCT"): registered}
+
+    def test_case_trim_equivalent_format_uses_accredited_literal(self):
+        args = self.fixture()
+        result = accredited_auxiliary_attributes(*args)
+        self.assertEqual(result["format"], "SUBURBIA")
+        self.assertEqual(args[0]["format"], " Suburbia ")
+
+    def test_format_scope_or_upc_contradiction_never_normalizes_into_identity(self):
+        for field, value in (("upc", "123"), ("chain_id", "OTHER"), ("product_id", "OTHER"), ("format", "BODEGA")):
+            row, metadata, catalog = self.fixture()
+            metadata = deepcopy(metadata)
+            metadata["PRODUCT"][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "contradiction"):
+                accredited_auxiliary_attributes(row, metadata, catalog)
 
 
 class CatalogOriginRegressionTests(unittest.TestCase):

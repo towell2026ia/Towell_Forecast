@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 
 from services.operational_versions.official_source import AuthorizedOfficialConnection, COMMERCIAL_FIELDS, validate_package
-from .unified_runtime import uid, norm, catalog_origin_batch
+from .unified_runtime import uid, norm, catalog_origin_batch, accredited_auxiliary_attributes
 
 
 def build_payload(runtime, previous, installed_sources, *, source_periods):
@@ -23,17 +23,16 @@ def build_payload(runtime, previous, installed_sources, *, source_periods):
                "sources": [runtime["source"], stock_source], "first_period": "2024-01", "last_period": "2026-12",
                "observations": deepcopy(runtime["facts"]), "inventory": [], "fulfillment": [], "source_grid_periods": sorted(set(source_periods))}
     for row in previous["inventory"]:
-        attrs = metadata.get(row["product_id"], by_product[row["chain_id"], row["product_id"]])
-        attrs = {k: attrs.get(k) for k in COMMERCIAL_FIELDS}
+        attrs = accredited_auxiliary_attributes(row, metadata, by_product)
         payload["inventory"].append({**row, **attrs, "id": uid("inventory:" + runtime["source_hash"] + ":" + row["chain_id"] + ":" + row["product_id"] + ":" + str(row["period"])),
             "value": row["quantity_text"], "period": str(row["period"])[:7], "source_id": stock_source["id"],
-            "source_native_attributes": {k: row.get(k, by_product[row["chain_id"],row["product_id"]].get(k)) for k in COMMERCIAL_FIELDS}})
+            "source_native_attributes": {k: row.get(k, by_product[row["chain_id"],row["product_id"]].get(k)) for k in (*COMMERCIAL_FIELDS, "format")}})
     for row in previous["fulfillment"]:
-        attrs = metadata.get(row["product_id"], by_product[row["chain_id"],row["product_id"]])
-        attrs = {k: attrs.get(k) for k in COMMERCIAL_FIELDS}
+        attrs = accredited_auxiliary_attributes(row, metadata, by_product)
         payload["fulfillment"].append({**row, **attrs, "id": uid("fulfillment:" + runtime["source_hash"] + ":" + row["chain_id"] + ":" + row["product_id"] + ":" + str(row["period"])),
             "period": str(row["period"])[:7], "order_value": row["order_text"], "delivery_value": row["delivery_text"],
-            "source_id": stock_source["id"]})
+            "source_id": stock_source["id"],
+            "source_native_attributes": {k: row.get(k, by_product[row["chain_id"],row["product_id"]].get(k)) for k in (*COMMERCIAL_FIELDS, "format")}})
     validate_package(payload)
     return payload
 

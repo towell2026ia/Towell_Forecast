@@ -26,6 +26,20 @@ def uid(seed):
     return str(uuid5(NAMESPACE_URL, "towell-unified:" + seed))
 
 
+def accredited_auxiliary_attributes(row, metadata, catalog):
+    """Canonical format only for an exact scope, product and original UPC."""
+    key = row["chain_id"], row["product_id"]
+    registered = catalog[key]
+    current = metadata.get(row["product_id"], registered)
+    for candidate in (registered, current):
+        if (candidate["chain_id"], candidate["product_id"], candidate["upc"]) != (*key, row["upc"]):
+            raise ValueError("unified_auxiliary_identity_contradiction")
+    if str(current["format"]).strip().casefold() != str(row["format"]).strip().casefold():
+        raise ValueError("unified_auxiliary_format_contradiction")
+    fields = ("model", "presentation", "color", "product_type", "commercial_code", "account")
+    return {**{name: current.get(name) for name in fields}, "format": current["format"]}
+
+
 def catalog_origin_batch(connection, *, chain_id, file_sha256, candidate_id, profile_version_id, actor):
     """One original file/chain provenance survives a new planning scenario."""
     previous = connection.execute("""select id::text,filename from public.import_batches
