@@ -84,7 +84,7 @@ describe("Hosted G6 transport and manual Champion", () => {
     }, rpc: (name: string) => result(name, name === "operational_read_context" ? [source] : [], 1) } as unknown as SupabaseClient;
     let champions = saved();
     const fetcher = vi.fn(async (url: string) => url.endsWith("/api/ready") ? Response.json({ forecast_calculation_history: true, hosted_champion_publication: true })
-      : url.includes("/champion?") ? Response.json(champions)
+      : url.endsWith("/champion") ? Response.json(champions)
       : url.endsWith("/commercial-catalog") ? Response.json({ products: [classification], persisted: false, source_context: source })
       : Promise.reject(new Error(`unexpected_legacy_api:${url}`)));
     vi.stubGlobal("fetch", fetcher);
@@ -118,16 +118,18 @@ describe("Hosted G6 transport and manual Champion", () => {
   it("permits only the explicit authenticated and idempotent hosted Champion POST, never an E3 write", async () => {
     const fetcher = vi.fn(async (url: string) => url.endsWith("/api/ready") ? Response.json({ hosted_champion_publication: true, local_champion_publication: false,
       official_publication: true, vintage_persistence: true, forecast_selection: true, capture_center: true, live_learning: true })
-      : url.includes("/champion?") ? Response.json(saved())
+      : url.endsWith("/champion") ? Response.json(saved())
       : Response.json({ champion_id: "synthetic-champion", status: "ACTIVE", planning_year: 2027, source_context: source }));
     vi.stubGlobal("fetch", fetcher);
     const client = new RailwayPreviewClient(auth(), origin);
     expect(client.readOnly).toBe(true);
     await expect(client.promoteChampion({ ...query, run_id: run, candidate_family: "ML", confirm: true, comment: "Synthetic explicit decision" }, "synthetic-idempotency")).resolves.toBe("synthetic-champion");
     await expect(client.currentChampion(query)).resolves.toMatchObject({ covered: 1, products: [{ environment: "hosted", publication_scope: "HOSTED_OPERATIONAL" }] });
-    const getUrl = new URL(fetcher.mock.calls.find(([url]) => url.includes("/champion?"))![0]);
-    expect(getUrl.searchParams.getAll("product_ids")).toEqual([product]);
-    expect(getUrl.searchParams.getAll("chain_ids")).toEqual([chain]);
+    const [readUrl, readOptions] = fetcher.mock.calls.find(([url]) => url.endsWith("/champion")) as unknown as [string, RequestInit];
+    expect(readUrl).toBe(origin + "/api/forecast/champion"); expect(readOptions.method).toBe("POST");
+    expect(JSON.parse(readOptions.body as string)).toEqual(query);
+    expect(readOptions.headers).toMatchObject({ Authorization: "Bearer synthetic-only-token", "Content-Type": "application/json" });
+    expect(readOptions.headers).not.toHaveProperty("Idempotency-Key");
     const flags = await client.vintageCapabilities();
     expect(flags).toMatchObject({ hosted_champion_publication: true, local_champion_publication: false, vintage_persistence: false,
       official_publication: false, forecast_selection: false, capture_center: false, live_learning: false });
@@ -139,7 +141,7 @@ describe("Hosted G6 transport and manual Champion", () => {
     expect(options.headers).toMatchObject({ Authorization: "Bearer synthetic-only-token", "Idempotency-Key": "synthetic-idempotency" });
     const body = JSON.parse(options.body as string); expect(body.source_context).toEqual(source);
     expect(body.quantities).toBeUndefined(); expect(body.candidate_family).toBe("ML");
-    expect((fetcher.mock.calls as unknown as [string, RequestInit][]).filter(([, options]) => options?.method === "POST")).toHaveLength(1);
+    expect((fetcher.mock.calls as unknown as [string, RequestInit][]).filter(([url, options]) => options?.method === "POST" && url.endsWith("/champion/promote"))).toHaveLength(1);
   });
 
   it("requires remote capability, the accredited HTTPS service, exact source and a real session", async () => {
@@ -152,6 +154,18 @@ describe("Hosted G6 transport and manual Champion", () => {
     await expect(new RailwayPreviewClient(auth(), origin).promoteChampion({ ...request, source_context: { ...source, generation: 5 } }, "key")).rejects.toThrow("CHAMPION_SOURCE_INELIGIBLE");
     await expect(new RailwayPreviewClient(auth(null), origin).currentChampion(query)).rejects.toThrow("AUTH_REQUIRED");
     expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("keeps a whole 427-product read in JSON instead of a long query URL", async () => {
+    const ids = Array.from({ length: 427 }, (_, i) => `00000000-0000-4000-8000-${String(i + 10).padStart(12, "0")}`);
+    const fetcher = vi.fn(async () => Response.json({ source_context: source, planning_year: 2027, products: [], covered: 0, eligible: ids.length }));
+    vi.stubGlobal("fetch", fetcher);
+    const client = new RailwayPreviewClient(auth(), origin);
+    await expect(client.currentChampion({ ...query, product_ids: ids })).resolves.toMatchObject({ covered: 0, eligible: 427 });
+    const [url, options] = fetcher.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe(origin + "/api/forecast/champion"); expect(url).not.toContain("?");
+    expect(JSON.parse(options.body as string).product_ids).toEqual(ids);
+    expect(options.headers).not.toHaveProperty("Idempotency-Key");
   });
 
   it("rejects local publication evidence in hosted readers and keeps manual choice separate from FT-Decision", () => {

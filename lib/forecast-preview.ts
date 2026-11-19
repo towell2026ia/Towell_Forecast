@@ -282,7 +282,7 @@ export class RailwayPreviewClient implements PreviewClient {
       capture_center: !hostedG6Enabled() && response.ok && result.capture_center === true,
       live_learning: !hostedG6Enabled() && response.ok && result.live_learning === true };
   }
-  private async e4<T>(path: string, body?: unknown, idempotencyKey?: string, signal?: AbortSignal): Promise<T> {
+  private async e4<T>(path: string, body?: unknown, idempotencyKey?: string, signal?: AbortSignal, readBody = false): Promise<T> {
     const origin = this.apiOrigin();
     const requestSignal = signal ? AbortSignal.any([this.controller.signal, signal]) : this.controller.signal;
     if (requestSignal.aborted) throw new PreviewReadError("AUTH_REQUIRED");
@@ -291,7 +291,7 @@ export class RailwayPreviewClient implements PreviewClient {
     const response = await fetch(origin + path, { method: body === undefined ? "GET" : "POST", credentials: "omit",
       cache: "no-store", signal: requestSignal,
       headers: { Authorization: `Bearer ${data.session.access_token}`,
-        ...(body === undefined ? {} : { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey ?? crypto.randomUUID() }) },
+        ...(body === undefined ? {} : { "Content-Type": "application/json", ...(!readBody ? { "Idempotency-Key": idempotencyKey ?? crypto.randomUUID() } : {}) }) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     const result = await response.json() as T & { error_code?: string };
     if (!response.ok) throw new PreviewReadError(result.error_code ?? "DATA_READ_FAILED");
@@ -400,7 +400,9 @@ export class RailwayPreviewClient implements PreviewClient {
     const params = new URLSearchParams({ planning_year: String(query.planning_year) });
     query.chain_ids.forEach(id => params.append("chain_ids", id));
     if (hostedG6Enabled()) query.product_ids.forEach(id => params.append("product_ids", id));
-    const result = await this.e4<LocalChampions>(`/api/forecast/champion?${params}`);
+    const result = hostedG6Enabled() ? await this.e4<LocalChampions>("/api/forecast/champion", {
+      source_context: source, planning_year: query.planning_year, chain_ids: query.chain_ids, product_ids: query.product_ids,
+    }, undefined, undefined, true) : await this.e4<LocalChampions>(`/api/forecast/champion?${params}`);
     if (!matchesOfficialSource(result.source_context, source) || result.planning_year !== query.planning_year
       || !Array.isArray(result.products) || result.covered !== result.products.length || !Number.isSafeInteger(result.eligible) || result.eligible < query.product_ids.length
       || hostedG6Enabled() && (result.eligible !== query.product_ids.length || result.products.some(row => !query.product_ids.includes(row.product?.product_id)))
