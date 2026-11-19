@@ -77,6 +77,8 @@ def mount_e4_routes(app, config, identity, data, runner, writer):
         return chain_id
 
     def write(name, payload):
+        if getattr(config, "hosted_unified_planning_enabled", False):
+            raise PreviewError("HOSTED_WRITE_DISABLED", 403)
         if getattr(config, "local_postgres_config", None) is not None:
             raise PreviewError("LOCAL_WRITE_DISABLED", 403)
         if writer is None:
@@ -116,6 +118,8 @@ def mount_e4_routes(app, config, identity, data, runner, writer):
                idempotency_key: str | None = Header(default=None)):
         enabled("forecast_calculation_history_enabled")
         principal, source = actor(request, authorization)
+        if getattr(config, "hosted_unified_planning_enabled", False):
+            raise PreviewError("SEALED_PLANNING_ONLY", 403)
         chain, product = allowed(principal, body.chain_id, execute=True), uuid_value(body.product_id)
         key(idempotency_key)
         if body.recalculation_reason and len(body.recalculation_reason) > 1000:

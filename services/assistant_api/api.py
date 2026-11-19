@@ -93,13 +93,15 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
     from .vintage_service import SupabaseForecastWriteRepository
     local_database = None
     local_champion = None
+    hosted_champion = None
     if config.local_postgres_config is not None:
         from .local_postgres import LocalPostgresGateway
         local_database = LocalPostgresGateway(config)
     supabase_client = SupabaseReadClient(config.supabase_url, config.supabase_publishable_key,
         timeout=config.external_timeout_seconds,
         transport=local_database.transport if local_database else None,
-        auth_url=config.local_supabase_auth_url if local_database else None) if config.operational_preview_enabled else None
+        auth_url=config.local_supabase_auth_url if local_database else None,
+        hosted_g6=config.hosted_unified_planning_enabled) if config.operational_preview_enabled else None
     data = provider or (SupabaseDataProvider(supabase_client) if supabase_client else
                         NormalizedDataProvider(data_dir=config.data_dir, state_dir=config.state_dir))
     state_dir = (Path(historical_state_dir) if historical_state_dir else
@@ -154,25 +156,29 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
     researcher = ColdStartResearch(config.openai_api_key, timeout=config.external_timeout_seconds) \
         if config.deep_research_enabled and local_database is None else None
     preview_runner = OperationalMultiChainForecastRunner(storage, concurrency=config.max_forecast_runs,
-        environment=config.app_env, require_authorized_sales=local_database is not None,
+        environment=config.app_env, require_authorized_sales=local_database is not None or config.hosted_unified_planning_enabled,
+        hosted_planning=config.hosted_unified_planning_enabled,
         planning_reference=local_database.config.get("local_champion_planning_run") if local_database else None) if config.operational_preview_enabled else None
     app.state.preview_runner = preview_runner
     if preview_runner:
         write_repository = SupabaseForecastWriteRepository(config.supabase_url, config.supabase_service_role_key,
-            timeout=config.external_timeout_seconds) if (config.vintage_persistence_enabled or any((
+            timeout=config.external_timeout_seconds) if not config.hosted_unified_planning_enabled and (config.vintage_persistence_enabled or any((
                 config.forecast_calculation_history_enabled,config.forecast_selection_enabled,
                 config.capture_center_enabled,config.live_learning_enabled))) else None
         if local_database and (local_database.config.get("local_champion_planning_run") or {}).get("enabled") is True:
             from .local_champion import LocalChampionService
             local_champion = LocalChampionService(storage, local_database.config["local_champion_planning_run"])
+        if config.hosted_unified_planning_enabled:
+            from .hosted_planning import HostedChampionService
+            hosted_champion = HostedChampionService()
         mount_preview_routes(app, config, identity, data, preview_runner, rate_limiter, write_repository,
-                             local_champion=local_champion)
+                             local_champion=local_champion, hosted_champion=hosted_champion)
         mount_e4_routes(app, config, identity, data, preview_runner, write_repository)
         from .rs_assistant import RSAssistantWorkflow, mount_rs_assistant
         from .rs_research import RSResearch
         research = RSResearch(storage, researcher) if researcher and config.ai_assistant_api_enabled else None
         mount_rs_assistant(app, config, identity, supabase_client, rate_limiter,
-                           RSAssistantWorkflow(storage, research, research_disabled=local_database is not None))
+                           RSAssistantWorkflow(storage, research, research_disabled=local_database is not None or config.hosted_unified_planning_enabled))
         from .commercial_api import mount_commercial_routes
         mount_commercial_routes(app, identity, supabase_client, rate_limiter)
 
@@ -314,6 +320,8 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
                 "operational_preview": True,
                 "local_bounded_preview": local_database is not None,
                 "local_champion_publication": local_champion is not None,
+                "hosted_unified_planning": config.hosted_unified_planning_enabled,
+                "hosted_champion_publication": hosted_champion is not None,
                 "rs_assistant_enabled": config.ai_assistant_api_enabled,
                 "openai_enabled": config.openai_enabled,
                 "deep_research_enabled": config.deep_research_enabled and local_database is None,
@@ -388,6 +396,8 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
     def forecast_run(body: ForecastRunRequest, request: Request,
                      principal: Principal = Depends(execute_access),
                      idempotency_key: str | None = Header(default=None)):
+        if config.hosted_unified_planning_enabled:
+            raise HTTPException(status_code=403, detail="SEALED_PLANNING_ONLY")
         if not config.monthly_runner_enabled or not config.ai_assistant_api_enabled:
             raise HTTPException(status_code=503, detail="RUNNER_001")
         if body.objective not in {"Venta", "Pedido", "Entrega"}:
@@ -429,6 +439,8 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
     @app.get("/api/forecast/jobs/{job_id}")
     @app.get("/api/v1/forecast/jobs/{job_id}")
     def forecast_job(job_id: str, principal: Principal = Depends(read_access)):
+        if config.hosted_unified_planning_enabled:
+            raise HTTPException(status_code=403, detail="SEALED_PLANNING_ONLY")
         job = storage.get("forecast_jobs", job_id)
         if not job or (job.get("actor") != principal.user_id and ADMIN not in principal.permissions):
             raise HTTPException(status_code=404, detail="REQUEST_001")
@@ -483,6 +495,8 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
     def historical_run(body: HistoricalRunRequest, request: Request,
                        principal: Principal = Depends(admin_access),
                        idempotency_key: str | None = Header(default=None)):
+        if config.hosted_unified_planning_enabled:
+            raise HTTPException(status_code=403, detail="SEALED_PLANNING_ONLY")
         if not config.historical_runner_enabled or not config.ai_assistant_api_enabled:
             raise HTTPException(status_code=503, detail="RUNNER_001")
         if body.start_period > body.end_period or body.objective not in {"Venta", "Pedido", "Entrega"}:
@@ -543,6 +557,8 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
     @app.post("/api/v1/historical/first-vintage", status_code=202)
     def historical_first_vintage(request: Request, principal: Principal = Depends(admin_access),
                                  idempotency_key: str | None = Header(default=None)):
+        if config.hosted_unified_planning_enabled:
+            raise HTTPException(status_code=403, detail="SEALED_PLANNING_ONLY")
         if (not config.historical_runner_enabled or not config.ai_assistant_api_enabled
                 or not config.legacy_pilot_enabled or legacy_historical is None):
             raise HTTPException(status_code=503, detail="RUNNER_001")
@@ -578,6 +594,8 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
     @app.get("/api/historical/jobs/{job_id}")
     @app.get("/api/v1/historical/jobs/{job_id}")
     def historical_job(job_id: str, principal: Principal = Depends(read_access)):
+        if config.hosted_unified_planning_enabled:
+            raise HTTPException(status_code=403, detail="SEALED_PLANNING_ONLY")
         job = storage.get("historical_runs", job_id)
         if not job or (job.get("actor") != principal.user_id and ADMIN not in principal.permissions):
             raise HTTPException(status_code=404, detail="REQUEST_001")

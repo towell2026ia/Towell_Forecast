@@ -49,14 +49,23 @@ class LocalChampionRequest(ApprovalRequest):
     source_context: dict
 
 
+class ChampionReadRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    planning_year: int = Field(ge=2020, le=2099)
+    chain_ids: list[str] = Field(min_length=1, max_length=100)
+    product_ids: list[str] = Field(min_length=1, max_length=2000)
+    source_context: dict
+
+
 class ClosePeriodRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     target_period: str = Field(pattern=r"^20\d{2}-(0[1-9]|1[0-2])-01$")
     confirm: bool
 
 
-def mount_preview_routes(app, config, identity, data, runner, limiter, write_repository=None, *, local_champion=None):
+def mount_preview_routes(app, config, identity, data, runner, limiter, write_repository=None, *, local_champion=None, hosted_champion=None):
     router = APIRouter(prefix="/api/forecast")
+    hosted = getattr(config, "hosted_unified_planning_enabled", False)
 
     def quality_policy():
         if config.quality_policy_version == "E3-GATES-2.0.0":
@@ -141,19 +150,21 @@ def mount_preview_routes(app, config, identity, data, runner, limiter, write_rep
     @router.get("/preview-runs/{job_id}")
     def status(job_id: str, request: Request, authorization: str | None = Header(default=None)):
         principal, token = actor(request, authorization)
-        return runner.get_job(job_id, principal, source_context=data.bind(token).source_context())
+        source = data.bind(token)
+        return runner.get_job(job_id, principal, source_context=source.source_context(), **({"planning_provider": source} if hosted else {}))
 
     @router.get("/preview-runs/{job_id}/result")
     def result(job_id: str, request: Request, product_id: str | None = None, authorization: str | None = Header(default=None)):
         principal, token = actor(request, authorization)
         if product_id:
             uuid_value(product_id)
-        return runner.result(job_id, principal, product_id, source_context=data.bind(token).source_context())
+        source = data.bind(token)
+        return runner.result(job_id, principal, product_id, source_context=source.source_context(), **({"planning_provider": source} if hosted else {}))
 
     @router.get("/preview-runs/{job_id}/research")
     def research(job_id: str, request: Request, authorization: str | None = Header(default=None)):
         principal, token = actor(request, authorization)
-        if getattr(config, "local_postgres_config", None) is not None:
+        if getattr(config, "local_postgres_config", None) is not None or hosted:
             raise PreviewError("DEEP_RESEARCH_DISABLED", 503)
         if not limiter.allow("research-poll:" + principal.user_id, config.forecast_rate_per_minute):
             raise PreviewError("RATE_001", 429)
@@ -169,7 +180,8 @@ def mount_preview_routes(app, config, identity, data, runner, limiter, write_rep
             uuid_value(chain_id)
         if product_id:
             uuid_value(product_id)
-        return runner.latest(principal, chain_id, product_id, mode, source_context=data.bind(token).source_context())
+        source = data.bind(token)
+        return runner.latest(principal, chain_id, product_id, mode, source_context=source.source_context(), **({"planning_provider": source} if hosted else {}))
 
     @router.get("/provisional-forecasts")
     def provisionals(request: Request, chain_id: str | None = None, product_id: str | None = None,
@@ -180,8 +192,9 @@ def mount_preview_routes(app, config, identity, data, runner, limiter, write_rep
             uuid_value(chain_id)
         if product_id:
             uuid_value(product_id)
+        source = data.bind(token)
         return runner.provisional_forecasts(principal, chain_id, product_id, offset, limit,
-                                          source_context=data.bind(token).source_context())
+                                          source_context=source.source_context(), **({"planning_provider": source} if hosted else {}))
 
     @router.get("/quality-gates")
     def quality_gates(request: Request, chain_id: str, authorization: str | None = Header(default=None)):
@@ -190,7 +203,7 @@ def mount_preview_routes(app, config, identity, data, runner, limiter, write_rep
         if chain_id not in principal.chain_ids:
             raise PreviewError("SCOPE_FORBIDDEN", 403)
         source = data.bind(token)
-        latest_job = runner.latest(principal, chain_id, None, source_context=source.source_context())
+        latest_job = runner.latest(principal, chain_id, None, source_context=source.source_context(), **({"planning_provider": source} if hosted else {}))
         if latest_job.get("status") != "READY_PREVIEW":
             raise PreviewError("PREVIEW_NOT_READY", 409)
         saved_job = runner.persistence.get("forecast_jobs", latest_job["job_id"])
@@ -288,7 +301,7 @@ def mount_preview_routes(app, config, identity, data, runner, limiter, write_rep
         if chain_id not in principal.execute_chain_ids:
             raise PreviewError("SCOPE_FORBIDDEN", 403)
         source = data.bind(token)
-        latest_job = runner.latest(principal, chain_id, None, source_context=source.source_context())
+        latest_job = runner.latest(principal, chain_id, None, source_context=source.source_context(), **({"planning_provider": source} if hosted else {}))
         saved_job = runner.persistence.get("forecast_jobs", latest_job["job_id"])
         reference = next((scope for scope in (saved_job or {}).get("scopes", []) if scope.get("chain_id") == chain_id), None)
         if latest_job.get("status") != "READY_PREVIEW" or not reference or reference.get("status") != "READY_PREVIEW" or reference.get("preview_id") != body.preview_id:
@@ -360,6 +373,8 @@ def mount_preview_routes(app, config, identity, data, runner, limiter, write_rep
             "p_target_period": body.target_period, "p_actor_id": principal.user_id})
 
     def champion_service():
+        if hosted and hosted_champion is not None:
+            return hosted_champion
         if (local_champion is None or getattr(config, "local_postgres_config", None) is None
                 or config.app_env not in {"development", "test"} or config.api_host != "127.0.0.1"
                 or getattr(config, "railway_runtime", False)):
@@ -379,7 +394,8 @@ def mount_preview_routes(app, config, identity, data, runner, limiter, write_rep
         # complete allowed membership before one SQLite read transaction.
         selected = product_ids if product_ids is not None else [row["product_id"] for row in catalogue if row.get("chain_id") in chain_ids]
         result = service.current(principal, current, catalogue, planning_year=planning_year,
-                                 chain_ids=chain_ids, product_ids=selected)
+                                 chain_ids=chain_ids, product_ids=selected,
+                                 **({"client": source.client} if hosted else {}))
         if data.bind(token).source_context() != current:
             raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 409)
         return result
@@ -388,7 +404,7 @@ def mount_preview_routes(app, config, identity, data, runner, limiter, write_rep
     def promote(request: Request, body: PromoteRequest | LocalChampionRequest | None = None, authorization: str | None = Header(default=None),
                 idempotency_key: str | None = Header(default=None)):
         principal, token = manager(request, authorization)
-        if getattr(config, "local_postgres_config", None) is not None:
+        if getattr(config, "local_postgres_config", None) is not None or hosted:
             service = champion_service()
             if not isinstance(body, LocalChampionRequest):
                 raise PreviewError("REQUEST_001", 422)
@@ -398,7 +414,8 @@ def mount_preview_routes(app, config, identity, data, runner, limiter, write_rep
             catalogue = source.client.catalog_rows()
             if data.bind(token).source_context() != current:
                 raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 409)
-            result = service.publish(body.model_dump(), principal, current, catalogue, idempotency_key=idempotency_key)
+            result = service.publish(body.model_dump(), principal, current, catalogue, idempotency_key=idempotency_key,
+                **({"client": source.client} if hosted else {}))
             if data.bind(token).source_context() != current:
                 # An event is permanently scoped to its source. A source change
                 # cannot expose it as the Champion of a different source.
@@ -419,5 +436,14 @@ def mount_preview_routes(app, config, identity, data, runner, limiter, write_rep
             "p_model_version_id": uuid_value(body.model_version_id), "p_actor_id": principal.user_id,
             "p_comment": body.comment})
         return {"champion_id": champion_id, "status": "ACTIVE"}
+
+    @router.post("/champion")
+    def hosted_current_champion(body: ChampionReadRequest, request: Request, authorization: str | None = Header(default=None)):
+        if not hosted:
+            raise PreviewError("HOSTED_CHAMPION_DISABLED", 403)
+        _, token = actor(request, authorization)
+        if body.source_context != data.bind(token).source_context():
+            raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 409)
+        return local_current_champion(request, body.planning_year, body.chain_ids, body.product_ids, authorization)
 
     app.include_router(router)

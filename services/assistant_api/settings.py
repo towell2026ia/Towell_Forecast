@@ -64,6 +64,7 @@ class Settings:
     openai_api_key: str = field(default="", repr=False)
     supabase_enabled: bool = False
     operational_preview_enabled: bool = False
+    hosted_unified_planning_enabled: bool = False
     vintage_persistence_enabled: bool = False
     official_publication_enabled: bool = False
     champion_publication_enabled: bool = False
@@ -116,6 +117,13 @@ class Settings:
         return f"forecast-towell-frontend:{self.app_env}"
 
     def validate(self) -> "Settings":
+        if self.hosted_unified_planning_enabled and (self.local_postgres_config is not None
+                or self.supabase_url.rstrip("/") != "https://bskoyqhbgrycpwhydnnr.supabase.co"
+                or self.data_provider != "supabase" or not self.supabase_enabled or not self.operational_preview_enabled
+                or self.deep_research_enabled or self.openai_enabled or self.voice_enabled
+                or self.vintage_persistence_enabled or self.official_publication_enabled or self.champion_publication_enabled
+                or self.forecast_selection_enabled or self.capture_center_enabled or self.live_learning_enabled):
+            raise ValueError("hosted_unified_planning_configuration_invalid")
         if self.local_postgres_config is not None:
             local_url = urlparse(self.supabase_url)
             if (self.app_env not in {"development", "test"} or self.railway_runtime
@@ -154,7 +162,9 @@ class Settings:
             raise ValueError("vintage_requires_operational_preview")
         if any((self.forecast_calculation_history_enabled, self.forecast_selection_enabled,
                 self.capture_center_enabled, self.live_learning_enabled)):
-            if not self.operational_preview_enabled or not self.supabase_service_role_key:
+            if not self.operational_preview_enabled or not self.supabase_service_role_key and not (
+                    self.hosted_unified_planning_enabled and self.forecast_calculation_history_enabled
+                    and not any((self.forecast_selection_enabled, self.capture_center_enabled, self.live_learning_enabled))):
                 raise ValueError("e4_requires_supabase_write_repository")
             if self.forecast_selection_enabled and not self.forecast_calculation_history_enabled:
                 raise ValueError("selection_requires_calculation_history")
@@ -263,6 +273,7 @@ class Settings:
             openai_api_key=env.get("OPENAI_API_KEY", ""),
             supabase_enabled=flag("SUPABASE_ENABLED", False),
             operational_preview_enabled=flag("OPERATIONAL_PREVIEW_ENABLED", False),
+            hosted_unified_planning_enabled=flag("HOSTED_UNIFIED_PLANNING_ENABLED", False),
             vintage_persistence_enabled=flag("VINTAGE_PERSISTENCE_ENABLED", False),
             official_publication_enabled=flag("OFFICIAL_PUBLICATION_ENABLED", False),
             champion_publication_enabled=flag("CHAMPION_PUBLICATION_ENABLED", False),
@@ -294,7 +305,7 @@ class Settings:
             historical_rate_per_minute=number("HISTORICAL_RATE_PER_MINUTE", 4, 100000),
             external_timeout_seconds=number("EXTERNAL_TIMEOUT_SECONDS", 10, 300),
             retry_max_attempts=number("RETRY_MAX_ATTEMPTS", 3, 10),
-            git_sha=env.get("GIT_SHA") or env.get("RAILWAY_GIT_COMMIT_SHA") or "unknown",
+            git_sha=env.get("RAILWAY_GIT_COMMIT_SHA") or env.get("GIT_SHA") or "unknown",
             build_time=env.get("BUILD_TIME", "unknown"),
             app_version=env.get("APP_VERSION", "0.11.0-prd09"),
             railway_runtime=bool(env.get("RAILWAY_ENVIRONMENT_ID") or env.get("RAILWAY_SERVICE_ID")),

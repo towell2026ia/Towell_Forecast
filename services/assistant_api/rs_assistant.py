@@ -154,10 +154,12 @@ def mount_rs_assistant(app, config, identity, client, limiter, workflow):
             raise PreviewError("AUTH_REQUIRED" if error.status_code == 401 else "SCOPE_FORBIDDEN",
                                error.status_code) from None
         request.state.user_id = principal.user_id
+        if getattr(config, "hosted_unified_planning_enabled", False) and body.action == "forecast":
+            raise PreviewError("SEALED_PLANNING_ONLY", 403)
         chain = uuid_value(body.chain_id)
         if chain not in (principal.execute_chain_ids if executes else principal.chain_ids):
             raise PreviewError("SCOPE_FORBIDDEN", 403)
-        local_sales = getattr(config, "local_postgres_config", None) is not None
+        local_sales = getattr(config, "local_postgres_config", None) is not None or getattr(config, "hosted_unified_planning_enabled", False)
         if local_sales and body.action in {"research", "research_status"}:
             raise PreviewError("DEEP_RESEARCH_DISABLED", 503)
         if not limiter.allow("rs-assistant:" + principal.user_id, 20):

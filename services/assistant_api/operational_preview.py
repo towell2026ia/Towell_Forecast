@@ -36,7 +36,7 @@ def snapshot_hash(rows: list[dict[str, Any]]) -> str:
 class OperationalMultiChainForecastRunner:
     def __init__(self, persistence, *, concurrency: int = 2, environment: str = "production",
                  policy: ForecastPolicy | None = None, compute=forecast_dataset, researcher=None,
-                 require_authorized_sales: bool = False, planning_reference=None):
+                 require_authorized_sales: bool = False, planning_reference=None, hosted_planning: bool = False):
         if not 1 <= concurrency <= 2:
             raise ValueError("operational_concurrency_maximum_two")
         self.persistence, self.environment = persistence, environment
@@ -44,6 +44,7 @@ class OperationalMultiChainForecastRunner:
         self.researcher = researcher
         self.require_authorized_sales = require_authorized_sales
         self.planning_reference = planning_reference
+        self.hosted_planning = hosted_planning
         self.champions = ChampionRegistry(persistence)
         self._executor = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="preview")
         self._lock = threading.Lock()
@@ -57,6 +58,15 @@ class OperationalMultiChainForecastRunner:
 
     def close(self):
         self._executor.shutdown(wait=True)
+
+    def _planning(self, context, provider=None, *, product_ids=(), chain_ids=()):
+        if getattr(self, "hosted_planning", False):
+            from .hosted_planning import hosted_run
+            if provider is None or not getattr(provider, "client", None):
+                raise PreviewError("PLANNING_RUN_UNAVAILABLE", 503)
+            return hosted_run(provider.client, context, product_ids=product_ids, chain_ids=chain_ids)
+        from .unified_plan_reader import pinned_run
+        return pinned_run(self.planning_reference, context)
 
     def submit(self, provider, principal, *, chain_ids: list[str], product_id: str | None = None,
                mode: str = "RETROSPECTIVE_TRAINING", issue_period: str | None = None, all_scopes: bool = False,
@@ -84,8 +94,8 @@ class OperationalMultiChainForecastRunner:
             "product": product_id, "mode": mode, "issue": issue_period, "all_scopes": all_scopes,
             "source_context": source_context, "objective": objective, "product_ids": sorted(product_ids or [])})
         if (source_context or {}).get("forecast_contract") == "pedido-unificado-v1":
-            from .unified_plan_reader import annual_preview, pinned_run
-            run = pinned_run(self.planning_reference, source_context)
+            from .unified_plan_reader import annual_preview
+            run = self._planning(source_context, provider, product_ids=product_ids, chain_ids=chain_ids)
             if mode != run["evaluation_mode"] or issue_period and issue_period != run["cutoff"]:
                 raise PreviewError("PLANNING_CUTOFF_INCOMPATIBLE", 409)
             requested = set(product_ids)
@@ -488,7 +498,7 @@ class OperationalMultiChainForecastRunner:
                         or all(value is not None for value in band) and band != sorted(band):
                     raise PreviewError("STATISTICAL_FAILED", 503)
 
-    def get_job(self, job_id, principal, *, source_context=None):
+    def get_job(self, job_id, principal, *, source_context=None, planning_provider=None):
         require_sales_context(source_context, required=self.require_authorized_sales)
         job = self.persistence.get("forecast_jobs", job_id)
         if not job or job.get("kind") != "OPERATIONAL_PREVIEW":
@@ -498,8 +508,7 @@ class OperationalMultiChainForecastRunner:
         if source_context is not None and not matches_source(job.get("source_context"), source_context):
             raise PreviewError("PREVIEW_NOT_FOUND", 404)
         if (source_context or {}).get("forecast_contract") == "pedido-unificado-v1":
-            from .unified_plan_reader import pinned_run
-            plan = pinned_run(self.planning_reference, source_context)
+            plan = self._planning(source_context, planning_provider)
             if job.get("planning_digest") != plan["content_digest"] or job.get("planning_run_id") != plan["run_id"]:
                 raise PreviewError("PREVIEW_NOT_FOUND", 404)
         return job
@@ -525,15 +534,14 @@ class OperationalMultiChainForecastRunner:
             self.persistence.put("forecast_jobs", job_id, job)
         return self.result(job_id, principal, job.get("product_id"), source_context=source_context)
 
-    def provisional_forecasts(self, principal, chain_id=None, product_id=None, offset=0, limit=100, *, source_context=None):
+    def provisional_forecasts(self, principal, chain_id=None, product_id=None, offset=0, limit=100, *, source_context=None, planning_provider=None):
         """Read existing numeric proposals only; never start or poll research."""
         from datetime import datetime, timezone
 
         require_sales_context(source_context, required=self.require_authorized_sales)
         planning = None
         if (source_context or {}).get("forecast_contract") == "pedido-unificado-v1":
-            from .unified_plan_reader import pinned_run
-            planning = pinned_run(self.planning_reference, source_context)
+            planning = self._planning(source_context, planning_provider)
         if chain_id and chain_id not in principal.chain_ids:
             raise PreviewError("SCOPE_FORBIDDEN", 403)
         latest = {}
@@ -572,8 +580,8 @@ class OperationalMultiChainForecastRunner:
         rows = sorted(latest.values(), key=lambda r: (r["chain_id"], r["product_id"], r["issue_period"]))
         return {"rows": rows[offset:offset + limit], "next_offset": offset + limit if len(rows) > offset + limit else None}
 
-    def result(self, job_id, principal, product_id=None, *, source_context=None):
-        job = self.get_job(job_id, principal, source_context=source_context)
+    def result(self, job_id, principal, product_id=None, *, source_context=None, planning_provider=None):
+        job = self.get_job(job_id, principal, source_context=source_context, planning_provider=planning_provider)
         if job["status"] not in {"READY_PREVIEW", "READY_PROVISIONAL", "NOT_ELIGIBLE"}:
             raise PreviewError("PREVIEW_NOT_READY", 409)
         return self._render_result(job, job["scopes"], product_id)
@@ -620,12 +628,11 @@ class OperationalMultiChainForecastRunner:
         return {**job, "chain_ids": [scope["chain_id"] for scope in scopes], "dataset_hash": content_hash({"scopes": sorted(
             (scope["chain_id"], scope.get("dataset_hash")) for scope in scopes)}), "scopes": scopes}
 
-    def latest(self, principal, chain_id=None, product_id=None, mode="RETROSPECTIVE_TRAINING", *, source_context=None):
+    def latest(self, principal, chain_id=None, product_id=None, mode="RETROSPECTIVE_TRAINING", *, source_context=None, planning_provider=None):
         require_sales_context(source_context, required=self.require_authorized_sales)
         planning_digest = None
         if (source_context or {}).get("forecast_contract") == "pedido-unificado-v1":
-            from .unified_plan_reader import pinned_run
-            planning_digest = pinned_run(self.planning_reference, source_context)["content_digest"]
+            planning_digest = self._planning(source_context, planning_provider)["content_digest"]
         if chain_id and chain_id not in principal.chain_ids:
             raise PreviewError("SCOPE_FORBIDDEN", 403)
         jobs = [job for job in self.persistence.list("forecast_jobs") if job.get("kind") == "OPERATIONAL_PREVIEW"

@@ -150,17 +150,19 @@ def matches_source(value, context):
 
 class SupabaseReadClient:
     def __init__(self, url: str, key: str, token: str | None = None, *, timeout: int = 10,
-                 transport: httpx.BaseTransport | None = None, auth_url: str | None = None):
+                 transport: httpx.BaseTransport | None = None, auth_url: str | None = None, hosted_g6: bool = False):
         self.url, self._key, self._token = url.rstrip("/"), key, token
         self.auth_url = (auth_url or url).rstrip("/")
         self.timeout, self.transport = timeout, transport
+        self.hosted_g6 = hosted_g6
         self._operational_context: dict[str, str | int] | None = None
 
     def __repr__(self) -> str:
         return "SupabaseReadClient(GET-only, credentials redacted)"
 
     def bind(self, token: str) -> "SupabaseReadClient":
-        return SupabaseReadClient(self.url, self._key, token, timeout=self.timeout, transport=self.transport, auth_url=self.auth_url)
+        return SupabaseReadClient(self.url, self._key, token, timeout=self.timeout, transport=self.transport,
+                                  auth_url=self.auth_url, hosted_g6=self.hosted_g6)
 
     def get(self, path: str, params: dict[str, Any] | None = None):
         if not self._token:
@@ -188,7 +190,46 @@ class SupabaseReadClient:
     def rows(self, table: str, params: dict[str, Any]) -> list[dict[str, Any]]:
         if table in {"monthly_observations", "monthly_observations_current", "portal_monthly_observations_current"}:
             raise PreviewError("DATA_READ_FAILED", 503)
+        if self.hosted_g6 and table in {"products", "categories", "chains", "import_profile_versions",
+                "forecast_calculations", "forecast_calculation_horizons"}:
+            table = "ft_g6_" + table
         return self._pages(f"/rest/v1/{table}", params)
+
+    def champion_rpc(self, arguments):
+        """The sole hosted user-token mutation; SQL validates the decision again."""
+        if not self.hosted_g6 or not self._token:
+            raise PreviewError("AUTH_REQUIRED", 401)
+        try:
+            with httpx.Client(timeout=self.timeout, transport=self.transport, follow_redirects=False) as client:
+                response = client.post(self.url + "/rest/v1/rpc/operational_save_champion", json=arguments,
+                    headers={"apikey": self._key, "Authorization": f"Bearer {self._token}"})
+            if response.status_code != 200:
+                code = response.json().get("message", "")
+                safe = {"CHAMPION_IDEMPOTENCY_CONFLICT", "CHAMPION_CANDIDATE_INELIGIBLE", "OFFICIAL_SOURCE_MISMATCH",
+                        "SCOPE_FORBIDDEN", "MANAGER_REQUIRED", "CHAMPION_RUN_UNAVAILABLE", "REQUEST_001"}
+                raise PreviewError(code if code in safe else "CHAMPION_PERSISTENCE_FAILED",
+                    401 if response.status_code == 401 else 403 if response.status_code == 403 else 409)
+            return response.json()
+        except (httpx.HTTPError, ValueError, AttributeError):
+            raise PreviewError("CHAMPION_PERSISTENCE_FAILED", 503) from None
+
+    def read_rpc(self, name, arguments):
+        """POST transports bounded read arrays without putting them in a URL."""
+        if not self.hosted_g6 or not self._token or name not in {"operational_read_planning_run", "operational_read_champions"}:
+            raise PreviewError("AUTH_REQUIRED", 401)
+        try:
+            with httpx.Client(timeout=self.timeout, transport=self.transport, follow_redirects=False) as client:
+                response = client.post(self.url + "/rest/v1/rpc/" + name, json=arguments,
+                    headers={"apikey": self._key, "Authorization": f"Bearer {self._token}"})
+            if response.status_code == 401:
+                raise PreviewError("AUTH_REQUIRED", 401)
+            if response.status_code == 403:
+                raise PreviewError("SCOPE_FORBIDDEN", 403)
+            if response.status_code != 200:
+                raise PreviewError("PLANNING_RUN_UNAVAILABLE", 503)
+            return response.json()
+        except (httpx.HTTPError, ValueError):
+            raise PreviewError("PLANNING_RUN_UNAVAILABLE", 503) from None
 
     def operational_context(self) -> dict[str, str | int]:
         if self._operational_context is None:
@@ -239,6 +280,9 @@ class SupabaseReadClient:
                             or cutoff < first or cutoff > last):
                         raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 503)
                     context["sales_training_cutoff"] = cutoff
+            if self.hosted_g6 and (context.get("forecast_contract") != UNIFIED_CONTRACT or context.get("generation") != 6
+                    or context.get("planning_basis") != COMMERCIAL_CLOSE_BASIS):
+                raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 503)
             self._operational_context = context
         return dict(self._operational_context)
 
