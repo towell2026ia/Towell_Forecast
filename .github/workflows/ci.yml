@@ -12,6 +12,8 @@ jobs:
         with:
           python-version: '3.12'
       - run: python scripts/check-public-repo.py
+      - name: Check sealed publication transport with synthetic fixtures
+        run: python -m unittest discover -s scripts/publication_g6 -p 'test_prepare.py' -v
 
   backend:
     runs-on: ubuntu-latest
