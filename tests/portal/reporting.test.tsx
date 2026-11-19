@@ -84,7 +84,9 @@ describe("E5 read-only interactive views", () => {
   it("renders all 12 matrix months, comparison and partial coverage without adoption", async () => {
     const repo = repository(); mount(repo, <ForecastPeriodsView/>); const table = await screen.findByRole("table", { name: "Matriz compacta de forecast" });
     expect(within(table).getAllByRole("columnheader")).toHaveLength(5); expect(within(table).getByText("Ago-26")).toBeTruthy(); expect(within(table).getByText("Sep-26")).toBeTruthy(); expect(within(table).getByText("Jul-27")).toBeTruthy();
-    expect(within(table).getAllByRole("row")).toHaveLength(13); expect(screen.getByText("TOTAL PARCIAL")).toBeTruthy();
+    expect(within(table).getAllByRole("row")).toHaveLength(13); expect(screen.queryByText("TOTAL PARCIAL")).toBeNull();
+    const coverage = within(screen.getByRole("table", { name: "Cobertura por modelo" })).getAllByRole("row")[1];
+    expect(within(coverage).getAllByRole("cell").slice(2).map(cell => cell.textContent)).toEqual(["1", "1", "0", "2", "2"]);
     expect(screen.getByText("Sin decisión", { selector: "dd" })).toBeTruthy();
     await userEvent.selectOptions(screen.getByLabelText("Estado de decisión"), "ADOPTED"); expect(await screen.findByText("Sin cálculo compatible disponible para los periodos seleccionados.")).toBeTruthy();
     expect(repo.previews!.create).not.toHaveBeenCalled(); expect(repo.previews!.selectCalculation).not.toHaveBeenCalled(); expect(repo.previews!.research).not.toHaveBeenCalled();

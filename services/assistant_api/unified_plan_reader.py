@@ -11,6 +11,7 @@ from uuid import UUID, uuid5
 
 from .persistence import content_hash
 from .supabase_access import PreviewError, matches_source, require_sales_context
+from .local_champion import manual_champion_candidate
 
 
 @lru_cache(maxsize=1)
@@ -98,7 +99,7 @@ def product_rows(run, product):
             "band_basis": "INSUFFICIENT", "band_status": "INSUFFICIENT_BAND_EVIDENCE", "band_observations": 0})
     snap = {**product["input_snapshot"], "planning_run_id": str(run_id),
         "product": {"offline_provenance": {"emitted_at": run["emitted_at"]}},
-        "champion_eligible": [name for name, c in families.items() if c.get("eligible") is True]}
+        "champion_eligible": [name for name, c in families.items() if manual_champion_candidate(c, name, run["planning_year"], run["cutoff"])]}
     cutoff = date.fromisoformat(run["cutoff"] + "-01")
     month_end = (cutoff.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
     header = {**identity, "id": calculation_id, "objective": run["objective"], "calculation_no": 1,

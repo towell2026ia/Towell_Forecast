@@ -2,10 +2,14 @@
 from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock
 
 from services.assistant_api import test_local_champion as fixtures
 from services.assistant_api.supabase_access import PreviewError
+from services.assistant_api.operational_preview import OperationalMultiChainForecastRunner
+from services.assistant_api.persistence import LocalPersistenceProvider
 from services.assistant_api.unified_plan_reader import annual_preview, pinned_run, report_records
 
 
@@ -53,3 +57,43 @@ class PlanReaderTests(unittest.TestCase):
         scope, = annual_preview(run, fixtures.catalogue()[:1])
         self.assertEqual(scope["products"][0]["forecast_status"], "INSUFFICIENT")
         self.assertEqual(scope["products"][0]["horizons"], [])
+
+    def test_bounded_submit_reuses_frozen_plan_without_engine_or_provider_history(self):
+        storage = LocalPersistenceProvider(Path(self.temp.name) / "bounded.sqlite")
+        context = fixtures.context()
+        catalog = fixtures.catalogue()
+        provider = SimpleNamespace(source_context=lambda: deepcopy(context),
+            refresh_source_context=lambda: deepcopy(context),
+            client=SimpleNamespace(catalog_rows=lambda: deepcopy(catalog)),
+            records=Mock(side_effect=AssertionError("frozen_plan_must_not_read_training_rows")))
+        compute = Mock(side_effect=AssertionError("frozen_plan_must_not_execute_engine"))
+        runner = OperationalMultiChainForecastRunner(storage, require_authorized_sales=True,
+            planning_reference=self.ref, compute=compute)
+        self.addCleanup(runner.close)
+        arguments = {"chain_ids": [fixtures.CHAIN], "product_ids": [fixtures.PRODUCT, fixtures.SECOND],
+                     "objective": "Pedido", "issue_period": "2026-09"}
+        job = runner.submit(provider, fixtures.actor(), **arguments)
+        self.assertEqual(job["status"], "READY_PREVIEW", job)
+        self.assertEqual(job["planning_digest"], self.run["content_digest"])
+        repeated = runner.submit(provider, fixtures.actor(), **{**arguments, "product_ids": list(reversed(arguments["product_ids"]))})
+        self.assertEqual(repeated["job_id"], job["job_id"])
+        self.assertEqual(len(storage.list("forecast_jobs")), 1)
+        result = runner.result(job["job_id"], fixtures.actor(), source_context=context)
+        scope, = result["scopes"]
+        self.assertEqual({p["product_id"] for p in scope["products"]}, {fixtures.PRODUCT, fixtures.SECOND})
+        for product in scope["products"]:
+            self.assertEqual([r["target_period"] for r in product["horizons"]], [f"2027-{m:02}" for m in range(1, 13)])
+            self.assertEqual([(int(r["target_period"][:4])-2026)*12 + int(r["target_period"][5:7])-9
+                              for r in product["horizons"]], list(range(4, 16)))
+        for changes in ({"issue_period": "2026-10"}, {"mode": "POINT_IN_TIME"},
+                        {"product_ids": [fixtures.PRODUCT, "00000000-0000-4000-8000-000000000099"]}):
+            with self.subTest(changes=changes), self.assertRaises(PreviewError):
+                runner.submit(provider, fixtures.actor(), **{**arguments, **changes})
+        original = catalog[0]["chain_id"]
+        catalog[0]["chain_id"] = "00000000-0000-4000-8000-000000000098"
+        with self.assertRaisesRegex(PreviewError, "SCOPE_FORBIDDEN"):
+            runner.submit(provider, fixtures.actor(), **arguments)
+        catalog[0]["chain_id"] = original
+        self.assertEqual(len(storage.list("forecast_jobs")), 1)
+        provider.records.assert_not_called()
+        compute.assert_not_called()

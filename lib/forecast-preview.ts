@@ -58,8 +58,10 @@ export type LocalChampionQuery = { source_context: OperationalReadContext; plann
 export type LocalChampionRequest = LocalChampionQuery & { run_id: string; candidate_family: ChampionFamily; confirm: true; comment: string };
 export type LocalChampionRecord = { id: string; run_id: string; candidate_family: ChampionFamily; source_context: OperationalReadContext;
   planning_year: number; selected_by: string; selected_at: string; objective: "Pedido"; environment: "localhost"; status: "ACTIVE";
+  publication_scope: "LOCAL_OPERATIONAL"; official_publication: false;
   run_content_digest: string; run_file_sha256: string; run_emitted_at: string; cutoff: string; unit: "PIEZAS";
   product: { product_id: string; chain_id: string; candidate_family: ChampionFamily; model: string; origin: string;
+    technical_eligible?: boolean; technical_status?: string | null; technical_reason?: string | null; technical_metrics?: Record<string, unknown> | null;
     horizons: { planning_horizon: number; horizon: number; target_period: string; forecast_distance: number; value: string }[] } };
 export type LocalChampions = { source_context: OperationalReadContext; planning_year: number; products: LocalChampionRecord[]; covered: number; eligible: number };
 export type CalculationSummary = { id: string; chain_id: string; product_id: string; calculation_no: number; calculation_code: string;
@@ -390,7 +392,8 @@ export class RailwayPreviewClient implements PreviewClient {
       || !Array.isArray(result.products) || result.covered !== result.products.length || !Number.isSafeInteger(result.eligible) || result.eligible < query.product_ids.length
       || new Set(result.products.map(row => row.product?.product_id)).size !== result.products.length
       || result.products.some(row => !row.id || !row.run_id || row.objective !== "Pedido" || row.environment !== "localhost"
-        || row.status !== "ACTIVE" || row.planning_year !== query.planning_year || !matchesOfficialSource(row.source_context, source)
+        || row.status !== "ACTIVE" || row.publication_scope !== "LOCAL_OPERATIONAL" || row.official_publication !== false
+        || row.planning_year !== query.planning_year || !matchesOfficialSource(row.source_context, source)
         || !query.chain_ids.includes(row.product?.chain_id)
         || !Array.isArray(row.product.horizons) || row.product.horizons.length !== 12
         || row.product.horizons.some((h, i) => h.horizon !== i + 1 || h.planning_horizon !== i + 1

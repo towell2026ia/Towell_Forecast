@@ -29,6 +29,7 @@ function empty(): LocalChampions { return { source_context: source, planning_yea
 function saved(): LocalChampions {
   return { ...empty(), covered: 1, products: [{ id: "champion-synthetic", run_id: run, candidate_family: "ML", source_context: source,
     planning_year: 2027, selected_by: "synthetic-user", selected_at: "2026-11-18T00:00:00Z", objective: "Pedido", environment: "localhost", status: "ACTIVE",
+    publication_scope: "LOCAL_OPERATIONAL", official_publication: false,
     run_content_digest: "c".repeat(64), run_file_sha256: "d".repeat(64), run_emitted_at: "2026-11-17T00:00:00Z", cutoff: "2026-09", unit: "PIEZAS",
     product: { product_id: product, chain_id: chain, candidate_family: "ML", model: "Synthetic ML", origin: "PYTHON_EXISTING_ENGINE",
       horizons: Array.from({ length: 12 }, (_, i) => ({ planning_horizon: i + 1, horizon: i + 1, forecast_distance: i + 4,

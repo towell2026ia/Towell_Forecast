@@ -23,6 +23,22 @@ from .supabase_access import PreviewError, require_sales_context, uuid_value
 FAMILIES = frozenset({"STATISTICAL", "ML", "ENSEMBLE", "COMMERCIAL_PLAN"})
 
 
+def manual_champion_candidate(candidate, family, planning_year, cutoff):
+    """Human local choice requires a real complete curve, not a recommendation gate."""
+    if not isinstance(candidate, dict) or family not in FAMILIES or candidate.get("family") != family:
+        return False
+    if family == "COMMERCIAL_PLAN":
+        if not isinstance(candidate.get("source_reference"), str) or not candidate["source_reference"].strip():
+            return False
+    elif candidate.get("origin") != "PYTHON_EXISTING_ENGINE":
+        return False
+    try:
+        LocalChampionService._curve(candidate, planning_year, cutoff)
+        return True
+    except (PreviewError, ValueError, TypeError):
+        return False
+
+
 class LocalChampionService:
     def __init__(self, persistence: LocalPersistenceProvider, reference: dict):
         if not isinstance(persistence, LocalPersistenceProvider):
@@ -99,7 +115,7 @@ class LocalChampionService:
     @staticmethod
     def _curve(candidate, year, cutoff):
         rows = candidate.get("horizons")
-        if (candidate.get("eligible") is not True or not isinstance(candidate.get("model"), str)
+        if (not isinstance(candidate.get("model"), str)
                 or not candidate["model"].strip() or not isinstance(candidate.get("origin"), str)
                 or not candidate["origin"].strip() or not isinstance(rows, list) or len(rows) != 12):
             raise PreviewError("CHAMPION_CANDIDATE_INELIGIBLE", 409)
@@ -147,9 +163,7 @@ class LocalChampionService:
             product = found[0]
             candidates = product.get("candidates")
             candidate = candidates.get(request["candidate_family"]) if isinstance(candidates, dict) else None
-            if not isinstance(candidate, dict) or candidate.get("family") != request["candidate_family"]:
-                raise PreviewError("CHAMPION_CANDIDATE_INELIGIBLE", 409)
-            if request["candidate_family"] != "COMMERCIAL_PLAN" and candidate.get("origin") != "PYTHON_EXISTING_ENGINE":
+            if not manual_champion_candidate(candidate, request["candidate_family"], run["planning_year"], run["cutoff"]):
                 raise PreviewError("CHAMPION_CANDIDATE_INELIGIBLE", 409)
             curve = self._curve(candidate, run["planning_year"], run["cutoff"])
             if request["candidate_family"] == "COMMERCIAL_PLAN" and not candidate.get("source_reference"):
@@ -158,10 +172,13 @@ class LocalChampionService:
                 "identity_key": product.get("identity_key"), "model_group_key": product.get("model_group_key"),
                 "candidate_family": request["candidate_family"], "model": candidate["model"],
                 "origin": candidate["origin"], "source_reference": candidate.get("source_reference"),
-                "evaluation_signature": candidate.get("evaluation_signature"), "horizons": curve})
+                "evaluation_signature": candidate.get("evaluation_signature"), "technical_eligible": candidate.get("eligible") is True,
+                "technical_status": candidate.get("status"), "technical_reason": candidate.get("reason"),
+                "technical_metrics": deepcopy(candidate.get("metrics")), "horizons": curve})
         request_data = {**request, "chain_ids": sorted(binding.values()), "product_ids": sorted(binding),
                         "actor_id": principal.user_id, "run_content_digest": run["content_digest"]}
         event = {"request_hash": content_hash(request_data), "environment": "localhost", "status": "ACTIVE",
+            "publication_scope": "LOCAL_OPERATIONAL", "official_publication": False,
             "objective": "Pedido", "unit": "PIEZAS", "planning_year": run["planning_year"], "cutoff": run["cutoff"],
             "run_id": run["run_id"], "run_content_digest": run["content_digest"],
             "run_file_sha256": self.reference["sha256"], "run_emitted_at": run["emitted_at"],

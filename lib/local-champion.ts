@@ -21,6 +21,7 @@ export function verifiedLocalChampions(snapshot: ReportSnapshot, result: LocalCh
   for (const row of result.products) {
     const product = row.product;
     if (!row.id || !row.run_id || row.objective !== "Pedido" || row.environment !== "localhost" || row.status !== "ACTIVE"
+      || row.publication_scope !== "LOCAL_OPERATIONAL" || row.official_publication !== false
       || row.unit !== "PIEZAS" || row.cutoff !== source.training_cutoff || row.planning_year !== result.planning_year
       || !sha(row.run_content_digest) || !sha(row.run_file_sha256) || !row.selected_by
       || !Number.isFinite(Date.parse(row.selected_at)) || !Number.isFinite(Date.parse(row.run_emitted_at))

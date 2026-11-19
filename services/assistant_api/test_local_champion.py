@@ -203,8 +203,8 @@ class LocalChampionTests(unittest.TestCase):
         with self.assertRaisesRegex(PreviewError, "CHAMPION_RUN_UNAVAILABLE"):
             self.publish()
 
-    def test_missing_negative_duplicate_ineligible_or_wrong_month_curve_blocks_entire_selection(self):
-        for mutation in ("missing", "negative", "duplicate", "ineligible", "wrong_month", "wrong_distance", "nan"):
+    def test_missing_negative_duplicate_or_wrong_origin_month_curve_blocks_entire_selection(self):
+        for mutation in ("missing", "negative", "duplicate", "origin", "wrong_month", "wrong_distance", "nan"):
             payload = run()
             candidate = payload["products"][1]["candidates"]["STATISTICAL"]
             if mutation == "missing":
@@ -213,8 +213,8 @@ class LocalChampionTests(unittest.TestCase):
                 candidate["horizons"][0]["value"] = "-1"
             if mutation == "duplicate":
                 candidate["horizons"][1] = deepcopy(candidate["horizons"][0])
-            if mutation == "ineligible":
-                candidate["eligible"] = False
+            if mutation == "origin":
+                candidate["origin"] = "UNKNOWN_QUANTITY_SOURCE"
             if mutation == "wrong_month":
                 candidate["horizons"][0]["target_period"] = "2026-10"
             if mutation == "wrong_distance":
@@ -226,6 +226,31 @@ class LocalChampionTests(unittest.TestCase):
                 self.publish()
             self.assertEqual(self.storage.list("champion_history"), [])
             self.assertEqual(self.storage.list("champion_registry"), [])
+
+    def test_manual_local_choice_retains_technical_restrictions_without_becoming_official(self):
+        payload = run()
+        candidate = payload["products"][0]["candidates"]["STATISTICAL"]
+        candidate.update(eligible=False, status="PROVISIONAL", reason="INSUFFICIENT_RETROSPECTIVE_WINDOWS",
+                         metrics={"observations": 2, "windows": 1, "wape": None})
+        self.service.reference = save_run(self.folder, payload)
+        selected = self.publish(request(products=[PRODUCT]))
+        product = selected["products"][0]
+        self.assertFalse(product["technical_eligible"])
+        self.assertEqual(product["technical_status"], "PROVISIONAL")
+        self.assertEqual(product["technical_reason"], "INSUFFICIENT_RETROSPECTIVE_WINDOWS")
+        self.assertEqual(product["technical_metrics"]["windows"], 1)
+        self.assertEqual(product["horizons"][0]["value"], "10.10")
+        self.assertFalse(selected["official_publication"])
+        self.assertEqual(selected["publication_scope"], "LOCAL_OPERATIONAL")
+        self.assertFalse(selected["ft_decision_changed"])
+
+    def test_current_uses_one_read_snapshot_and_never_individual_provider_reads(self):
+        from unittest.mock import patch
+        self.publish()
+        with patch.object(self.storage, "_connect", wraps=self.storage._connect) as connections, \
+                patch.object(self.storage, "get", side_effect=AssertionError("independent_read_forbidden")):
+            self.assertEqual(self.current()["covered"], 2)
+            self.assertEqual(connections.call_count, 1)
 
     def test_persistence_survives_a_fresh_process(self):
         selected = self.publish()
@@ -276,6 +301,10 @@ print(json.dumps({'covered':result['covered'],'id':result['products'][0]['id'],'
             self.assertEqual(read.json()["covered"], 1)
             self.assertEqual(len(read.json()["products"]), 1)
             self.assertEqual(read.json()["products"][0]["product"]["product_id"], PRODUCT)
+            all_scope = client.get("/api/forecast/champion", params=[("planning_year", "2027"), ("chain_ids", CHAIN)],
+                                   headers={"Authorization": "Bearer reader"})
+            self.assertEqual(all_scope.status_code, 200, all_scope.text)
+            self.assertEqual(all_scope.json()["covered"], 2)
 
     def test_real_http_restart_reads_the_same_synthetic_champion(self):
         with socket.socket() as sock:

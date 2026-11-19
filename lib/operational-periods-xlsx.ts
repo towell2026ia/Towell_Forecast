@@ -37,6 +37,12 @@ export function operationalPeriodsSheets(snapshot: ReportSnapshot, dashboard: Re
       ["Fuente oficial SHA-256", context.source_hash], ["Actualización", context.generation], ["Primer periodo", context.first_period], ["Último periodo", context.last_period], ["Corte del cálculo", dashboard.cutoff],
       ...(context.sales_training_cutoff && context.sales_training_cutoff !== dashboard.cutoff ? [["Cierre de ventas acreditado", context.sales_training_cutoff]] : []),
       ...(context.forecast_contract ? [["Objetivo", context.objective!], ["Métrica", context.target_metric!], ["Unidad", context.unit!], ["Contrato", context.forecast_contract], ["Hoja objetivo", context.target_sheet!], ["SHA-256 del maestro", context.target_file_sha256!], ["Cierre de Pedido", context.training_cutoff ?? "Sin acreditar"], ["Estado del cálculo", forecastSourceAvailable(context) ? "Disponible" : forecastUnavailableMessage(context)], ["Fuente de inventario", context.inventory_source!]] : []),
+      ...(context.forecast_contract === "pedido-unificado-v1" ? [["Inicio del plan anual", context.planning_start!], ["Fin del plan anual", context.planning_end!],
+        ...dashboard.matrix.periods.flatMap(period => {
+          const horizon = (Number(period.slice(0, 4)) - Number(context.planning_start!.slice(0, 4))) * 12 + Number(period.slice(5, 7)) - Number(context.planning_start!.slice(5, 7)) + 1;
+          const distance = (Number(period.slice(0, 4)) - Number(context.training_cutoff!.slice(0, 4))) * 12 + Number(period.slice(5, 7)) - Number(context.training_cutoff!.slice(5, 7));
+          return [[`Horizonte del plan · ${period}`, `H${horizon}`], [`Distancia desde el cierre · ${period}`, distance]];
+        })] : []),
       ...(context.sales_contract ? [["Fuente de ventas", context.sales_source!], ["Contrato de ventas", context.sales_contract], ["Archivo de ventas SHA-256", context.sales_file_sha256!], ["Hoja de ventas", context.sales_sheet!], ["Ventas disponibles", historyAvailable ? "Sí" : forecastUnavailableMessage(context)], ["Fuente de inventario", context.inventory_source!]] : []),
       ["Productos", scope.size], ["Productos con cálculo", dashboard.available], ["Productos con decisión", dashboard.adopted],
       ...(champions ? [["Champion local · cobertura", `${champions.length}/${scope.size}`],
@@ -45,6 +51,9 @@ export function operationalPeriodsSheets(snapshot: ReportSnapshot, dashboard: Re
           const key = `Champion local · ${row.product.chain_id}/${row.product.product_id}`;
           return [[`${key} · ID`, row.id], [`${key} · Corrida`, row.run_id], [`${key} · Año`, row.planning_year],
             [`${key} · Alternativa`, championFamilyNames[row.candidate_family]], [`${key} · Método`, row.product.model], [`${key} · Origen`, row.product.origin],
+            [`${key} · Publicación oficial`, "No; elección operativa local"],
+            [`${key} · Elegibilidad técnica`, row.product.technical_eligible === true ? "Sí" : row.product.technical_eligible === false ? "No" : "Sin dato"],
+            [`${key} · Estado técnico`, row.product.technical_status ?? null], [`${key} · Motivo técnico`, row.product.technical_reason ?? null],
             [`${key} · Fuente SHA-256`, row.source_context.source_hash], [`${key} · Actualización`, row.source_context.generation],
             [`${key} · Archivo de corrida SHA-256`, row.run_file_sha256], [`${key} · Contenido de corrida SHA-256`, row.run_content_digest],
             [`${key} · Emisión de corrida`, row.run_emitted_at], [`${key} · Usuario`, row.selected_by], [`${key} · Fecha de elección`, row.selected_at],

@@ -2,7 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Filters, ForecastReadRepository, OperationalFulfillment, OperationalInventory, OperationalReadContext, Product } from "./supabase/types";
 import { emptyFilters } from "./supabase/types";
 import type { CustomerForecast, DatabasePage, DatabaseSection, ReportCalculation, ReportDecision, ReportHorizon, ReportLive, ReportSnapshot } from "./forecast-reporting";
-import { forecastTargetMonth, amount, matchesOfficialSource } from "./forecast-reporting";
+import { addReportMonth, forecastTargetMonth, amount, matchesOfficialSource } from "./forecast-reporting";
 import { attachCommercial, filteredProducts, hasCommercialFilters, selectedScopeIds } from "./commercial-filters";
 import { forecastSourceAvailable, forecastHistoryAvailable, forecastObjective, sourceReadMessage } from "./official-sales-source";
 import { actualMetrics, combineObservations, observationFields, observationScope, operationalArguments } from "./forecast-data";
@@ -193,6 +193,19 @@ export class SupabaseReportReader {
     const historical = await this.repository.getPeriods(chainId, context);
     const caps = this.repository.previews?.vintageCapabilities ? await this.repository.previews.vintageCapabilities() : null;
     if (!caps?.forecast_calculation_history) return historical;
+    if (context.forecast_contract === "pedido-unificado-v1" && forecastSourceAvailable(context)) {
+      // The fixed planning calendar is shared by all authorized scopes,
+      // including months with no estimate. Do not load the entire report
+      // (or every Champion and horizon) merely to populate a month filter.
+      const authorized = await this.repository.getVisibleChains(context);
+      if (!authorized.some(scope => !chainId || scope.id === chainId)) return historical;
+      const calendar = Array.from({ length: 12 }, (_, i) => forecastTargetMonth(context.training_cutoff!, i + 1, context));
+      const firstPlanMonth = calendar[0];
+      for (let month = addReportMonth(context.training_cutoff!, 1); month < firstPlanMonth; month = addReportMonth(month, 1)) {
+        calendar.push(month);
+      }
+      return [...new Set([...historical, ...calendar])].sort();
+    }
     const snapshot = await this.snapshot({ ...emptyFilters, chainId }, context);
     return [...new Set([...historical, ...snapshot.horizons.map(h => h.target_period.slice(0, 7)), ...snapshot.provisionals.flatMap(p => p.horizons.map(h => h.target_period.slice(0, 7)))])].sort();
   }
