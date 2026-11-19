@@ -1,7 +1,7 @@
 import { addReportMonth, buildForecastMatrix, matrixTotal, type ForecastMatrixRow, type ReportChoice, type ReportSeries, type ReportSnapshot } from "./forecast-reporting";
 import type { Filters, HistoricalRow, OperationalFulfillment, OperationalInventory } from "./supabase/types";
 import { modelKey } from "./commercial-filters";
-import { forecastObjective, forecastHistoryAvailable, forecastTrainingCutoff } from "./official-sales-source";
+import { forecastObjective, forecastHistoryAvailable, forecastTrainingCutoff, validFulfillmentSource } from "./official-sales-source";
 
 export const monthNames = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
 export const dashboardSeries = {
@@ -58,6 +58,12 @@ function monthlyFillRate(rows: HistoricalRow[], eligible: number): DashboardFill
   };
   return pairedFillRate(rows.map(row => ({ ordered: literal(row, "ORDER"), delivered: literal(row, "DELIVERY") })), eligible);
 }
+function sourceFillRate(rows: OperationalFulfillment[], eligible: number, percentageOnly: boolean): DashboardFillRate {
+  if (!percentageOnly) return pairedFillRate(rows.map(row => ({ ordered: row.order_text, delivered: row.delivery_text })), eligible);
+  const empty = pairedFillRate([], eligible);
+  const value = rows.length === 1 && eligible === 1 ? rows[0].reported_fill_rate_pct : null;
+  return value != null && Number.isFinite(value) && value > 0 ? { ...empty, value, covered: 1 } : empty;
+}
 export const shortPeriod = (period: string) => `${monthNames[Number(period.slice(5, 7)) - 1]}-${period.slice(2, 4)}`;
 export function periodsDashboard(snapshot: ReportSnapshot, history: HistoricalRow[], choice: ReportChoice, range: Filters["periodRange"], inventory: OperationalInventory[] = [], fulfillment: OperationalFulfillment[] = []) {
   const matrix = buildForecastMatrix(snapshot, choice, range);
@@ -80,8 +86,8 @@ export function periodsDashboard(snapshot: ReportSnapshot, history: HistoricalRo
   }
   const source = snapshot.sourceContext;
   const separateFulfillment = (source?.forecast_contract === "pedido-towell-v1" || source?.forecast_contract === "pedido-unificado-v1");
-  const fulfillmentAuthorized = separateFulfillment && source.fulfillment_available === true && source.fulfillment_source === "ESTADISTICA_BAASE"
-    && /^[0-9a-f]{64}$/.test(source.fulfillment_file_sha256 ?? "");
+  const fulfillmentAuthorized = separateFulfillment && validFulfillmentSource(source);
+  const percentageOnly = source?.fulfillment_mode === "REPORTED_PERCENTAGE";
   if (source?.fulfillment_available === true && !fulfillmentAuthorized) throw new Error("fulfillment_source_invalid");
   if (fulfillment.length && !fulfillmentAuthorized) throw new Error("fulfillment_source_invalid");
   const compliance = fulfillment.filter(row => allowed.get(row.product_id) === row.chain_id);
@@ -102,10 +108,11 @@ export function periodsDashboard(snapshot: ReportSnapshot, history: HistoricalRo
   const historySlots = !cutoff && objective === "Pedido" && !calendarOutlook ? 12 : 9;
   const axisEnd = cutoff ?? snapshot.sourceContext?.last_period ?? null;
   const eligible = allowed.size;
+  const observedCutoff = source?.observed_cutoff ?? forecastTrainingCutoff(source);
   const points: DashboardPoint[] = axisEnd ? Array.from({ length: 12 }, (_, i) => {
     const period = addReportMonth(axisEnd, i - historySlots + 1);
     const metrics = {} as Record<DashboardSeries, Quantity>;
-    const partialOrderPeriod = fulfillmentAuthorized && Boolean(forecastTrainingCutoff(source)) && period > forecastTrainingCutoff(source)! && period <= source!.last_period;
+    const partialOrderPeriod = (source?.planning_basis || fulfillmentAuthorized) && observedCutoff && period > observedCutoff && period <= source!.last_period;
     for (const [key, offset, field] of [["previous2", -24, historicalMetric], ["previous1", -12, historicalMetric], ["actual", 0, "SALES"], ["order", 0, "ORDER"], ["delivery", 0, "DELIVERY"]] as const) {
       const target = addReportMonth(period, offset);
       const members = rows.filter(row => row.period.slice(0, 7) === target);
@@ -124,7 +131,7 @@ export function periodsDashboard(snapshot: ReportSnapshot, history: HistoricalRo
       ? inRange(period, range) ? exactQuantity(rows.filter(row => row.period.slice(0, 7) === period).map(row => row.exact?.FCST_CLIENTE_HISTORY ?? null), eligible) : { value: null, covered: 0, eligible }
       : i >= historySlots && inRange(period, range) ? quantity(customer, eligible) : { value: null, covered: 0, eligible };
     const monthlyCompliance = inRange(period, range) ? compliance.filter(row => row.period.slice(0, 7) === period) : [];
-    const complianceBasis = separateFulfillment ? pairedFillRate(monthlyCompliance.map(row => ({ ordered: row.order_text, delivered: row.delivery_text })), eligible) : null;
+    const complianceBasis = separateFulfillment ? sourceFillRate(monthlyCompliance, eligible, percentageOnly) : null;
     const fillRate: DashboardFillRate = complianceBasis ? { ...complianceBasis, ...(fulfillmentAuthorized ? { source: "ESTADISTICA_BAASE" as const } : {}), reported: complianceBasis.covered > 0,
       partialPeriod: monthlyCompliance.some(row => row.partial_period) || Boolean(monthlyCompliance.length && cutoff && period > cutoff) } : monthlyFillRate(i < historySlots && inRange(period, range) ? rows.filter(row => row.period.slice(0, 7) === period) : [], eligible);
     return { month: shortPeriod(period), period, horizon: cutoff && i >= historySlots ? i - historySlots + 1 : null,
@@ -134,11 +141,13 @@ export function periodsDashboard(snapshot: ReportSnapshot, history: HistoricalRo
   }) : [];
   const historicalPeriods = new Set(points.slice(0, historySlots).filter(p => inRange(p.period, range)).map(p => p.period));
   const actual = rows.filter(r => historicalPeriods.has(r.period.slice(0, 7)));
-  const sum = (field: "SALES" | "ORDER" | "DELIVERY") => quantity(actual.map(r => r[field]), eligible * historicalPeriods.size).value;
+  const sum = (field: "SALES" | "ORDER" | "DELIVERY") => quantity(actual
+    .filter(r => field !== "ORDER" || !source?.observed_cutoff || r.period.slice(0, 7) <= source.observed_cutoff)
+    .map(r => r[field]), eligible * historicalPeriods.size).value;
   const fulfillmentPeriods = new Set((separateFulfillment ? points.filter(point => point.period <= source!.last_period) : points.slice(0, historySlots)).filter(point => inRange(point.period, range)).map(point => point.period));
   const reportedCompliance = compliance.filter(row => fulfillmentPeriods.has(row.period.slice(0, 7)));
   const fillRateBasis = separateFulfillment
-    ? pairedFillRate(reportedCompliance.map(row => ({ ordered: row.order_text, delivered: row.delivery_text })), eligible * fulfillmentPeriods.size)
+    ? sourceFillRate(reportedCompliance, eligible * fulfillmentPeriods.size, percentageOnly)
     : monthlyFillRate(actual, eligible * historicalPeriods.size);
   const completeness = (key: DashboardSeries) => points.filter(p => p.coverage[key].covered === eligible && eligible > 0).length;
   const models = [...new Map(matrix.rows.map(r => {

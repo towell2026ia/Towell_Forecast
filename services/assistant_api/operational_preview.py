@@ -530,11 +530,17 @@ class OperationalMultiChainForecastRunner:
         from datetime import datetime, timezone
 
         require_sales_context(source_context, required=self.require_authorized_sales)
+        planning = None
+        if (source_context or {}).get("forecast_contract") == "pedido-unificado-v1":
+            from .unified_plan_reader import pinned_run
+            planning = pinned_run(self.planning_reference, source_context)
         if chain_id and chain_id not in principal.chain_ids:
             raise PreviewError("SCOPE_FORBIDDEN", 403)
         latest = {}
         for job in self.persistence.list("forecast_jobs"):
             if source_context is not None and not matches_source(job.get("source_context"), source_context):
+                continue
+            if planning and (job.get("planning_digest") != planning["content_digest"] or job.get("planning_run_id") != planning["run_id"]):
                 continue
             if job.get("kind") != "OPERATIONAL_PREVIEW" or job.get("status") != "READY_PROVISIONAL":
                 continue

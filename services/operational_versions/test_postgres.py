@@ -350,11 +350,13 @@ class GateBPostgres(unittest.TestCase):
             expected_engine[training_start:training_end].replace('for horizon in HORIZONS:', 'for horizon in horizons:') +
             expected_engine[training_end:])
         self.assertEqual((REPO / engine_path).read_text(encoding='utf-8'), expected_engine)
-        # Exact reviewed orchestration: no broad exception for engine changes.
-        # Legacy-default numerical invariance is also exercised by
-        # services.operational_update.test_planning_engine.LegacyDefaultCalendarTests.
+        # Exact reviewed December scenario orchestration, specifically authorized:
+        # current-method applicability/fallback and observed-only folds/ML labels.
+        # Statistical formulas and ML factories remain guarded by the other paths.
+        # Regression proofs: test_commercial_close and LegacyDefaultCalendarTests.
+        # No broad exception or reduced SQL/source integrity check is introduced.
         retrospective_path = 'services/forecast_engine/retrospective.py'
-        reviewed_calendar_sha256 = '6cddc8627fa9cee1155f2c9336f6fa230d3db43b5f8b1180f0105afbd1ee6dd3'
+        reviewed_calendar_sha256 = '5c08f757f7fb2fbad0a5a4f3fa383b02dc740500e2f92146bfe28e8764921450'
         self.assertEqual(hashlib.sha256((REPO / retrospective_path).read_text(encoding='utf-8').encode()).hexdigest(), reviewed_calendar_sha256)
         approved_pedido = {engine_path, retrospective_path, 'lib/statistical-preview-data.ts',
                            'lib/local-champion.ts'}

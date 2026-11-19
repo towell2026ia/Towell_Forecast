@@ -25,13 +25,13 @@ def build_payload(runtime, previous, installed_sources, *, source_periods):
     for row in previous["inventory"]:
         attrs = metadata.get(row["product_id"], by_product[row["chain_id"], row["product_id"]])
         attrs = {k: attrs.get(k) for k in COMMERCIAL_FIELDS}
-        payload["inventory"].append({**attrs, **row, "id": uid("inventory:" + runtime["source_hash"] + ":" + row["chain_id"] + ":" + row["product_id"] + ":" + str(row["period"])),
+        payload["inventory"].append({**row, **attrs, "id": uid("inventory:" + runtime["source_hash"] + ":" + row["chain_id"] + ":" + row["product_id"] + ":" + str(row["period"])),
             "value": row["quantity_text"], "period": str(row["period"])[:7], "source_id": stock_source["id"],
-            "source_native_attributes": {k: by_product[row["chain_id"],row["product_id"]].get(k) for k in COMMERCIAL_FIELDS}})
+            "source_native_attributes": {k: row.get(k, by_product[row["chain_id"],row["product_id"]].get(k)) for k in COMMERCIAL_FIELDS}})
     for row in previous["fulfillment"]:
         attrs = metadata.get(row["product_id"], by_product[row["chain_id"],row["product_id"]])
         attrs = {k: attrs.get(k) for k in COMMERCIAL_FIELDS}
-        payload["fulfillment"].append({**attrs, **row, "id": uid("fulfillment:" + runtime["source_hash"] + ":" + row["chain_id"] + ":" + row["product_id"] + ":" + str(row["period"])),
+        payload["fulfillment"].append({**row, **attrs, "id": uid("fulfillment:" + runtime["source_hash"] + ":" + row["chain_id"] + ":" + row["product_id"] + ":" + str(row["period"])),
             "period": str(row["period"])[:7], "order_value": row["order_text"], "delivery_value": row["delivery_text"],
             "source_id": stock_source["id"]})
     validate_package(payload)
@@ -40,6 +40,33 @@ def build_payload(runtime, previous, installed_sources, *, source_periods):
 
 class UnifiedLocalWriter(AuthorizedOfficialConnection):
     """Exact profile/product/account membership for explicitly local identities."""
+    def install_scenario(self, c, scenario):
+        """Append private provenance only; never write commercial close as ORDER."""
+        from .unified_scenario import validate_scenario, canonical
+
+        validate_scenario(scenario)
+        if not self.local_rehearsal or scenario["source_hash"] != self.source_hash:
+            raise ValueError("unified_scenario_local_source_required")
+        self.maintenance(c, self.source_hash)
+        if not c.execute("select private.is_active_admin() allowed").fetchone()["allowed"]:
+            raise ValueError("unified_local_admin_required")
+        header = {key: value for key, value in scenario.items() if key != "records"}
+        entries = [("Planning_Scenario_Manifest", 1, header)] + [
+            ("Planning_Scenario", row["source_row"], row) for row in scenario["records"]]
+        expected = {}
+        for sheet, row_number, value in entries:
+            text = canonical(value)
+            expected[sheet, row_number] = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            c.execute("""insert into private.unified_source_rows(source_hash,sheet,source_row,payload,row_sha256)
+                values(%s,%s,%s,%s::jsonb,%s) on conflict do nothing""",
+                (self.source_hash, sheet, row_number, text, expected[sheet, row_number]))
+        actual = {(r["sheet"], r["source_row"]): r["row_sha256"] for r in c.execute(
+            """select sheet,source_row,row_sha256 from private.unified_source_rows
+               where source_hash=%s and sheet in ('Planning_Scenario','Planning_Scenario_Manifest')""", (self.source_hash,))}
+        if actual != expected:
+            raise ValueError("unified_scenario_persisted_hash_mismatch")
+        return {"scenario_hash": scenario["scenario_hash"], "rows": len(entries), "observed_facts_mutated": False}
+
     def _profiles(self, c, records, approved_profiles):
         if not self.local_rehearsal:
             raise ValueError("unified_local_profiles_only")

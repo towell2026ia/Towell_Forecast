@@ -11,7 +11,7 @@ import { planningXlsx } from "../../lib/planning-xlsx";
 import { emptyFilters, type CommercialClassification, type Filters, type ForecastReadRepository, type HistoricalRow, type Product } from "../../lib/supabase/types";
 import { ForecastFiltersContext, GlobalFilters } from "../../app/forecast-towell-app";
 import { ForecastPeriodsView } from "../../app/forecast-periods-view";
-import { unifiedMasterSha } from "../../lib/official-sales-source";
+import { forecastHistoryAvailable, forecastSourceAvailable, officialSourceKey, unifiedMasterSha } from "../../lib/official-sales-source";
 import { PeriodsComparisonChart } from "../../components/forecast/periods-comparison-chart";
 import { RailwayPreviewClient } from "../../lib/forecast-preview";
 import { SupabaseReportReader } from "../../lib/forecast-report-repository";
@@ -50,6 +50,49 @@ describe("Pedido and inventory at a pinned local source", () => {
     expect(sheets.find(sh => sh.name === "Cálculos almacenados")?.rows.at(-1)).toContain(144);
     expect(d.matrix.rows[0].adopted).toBeNull();
     expect(matchesOfficialSource({ ...context, planning_start: "2026-10" }, context)).toBe(false);
+  });
+  it("uses the December scenario in the chart, annual matrix and XLSX, keeping the last complete real separate", () => {
+    const s = snapshot();
+    const context = { ...orderContext, generation: 6, forecast_contract: "pedido-unificado-v1", target_sheet: "Base_2024_2026",
+      target_file_sha256: unifiedMasterSha, last_period: "2026-12", training_cutoff: "2026-12", observed_cutoff: "2026-09",
+      planning_basis: "OBSERVED_AND_COMMERCIAL_CLOSE", scenario_hash: "b".repeat(64), planning_start: "2027-01", planning_end: "2027-12",
+      forecast_available: true, forecast_block_code: null } as const;
+    s.sourceContext = context;
+    s.calculations[0] = { ...s.calculations[0], objective: "Pedido", issue_period: "2026-12",
+      input_snapshot: { source_context: context, bridge_horizons: [] } };
+    s.horizons = s.horizons.map(h => ({ ...h, target_period: addReportMonth("2026-12", h.horizon), ensemble_value: h.horizon * 12 }));
+    const data = [history("2026-09", 8, { ORDER: 20 }), history("2026-10", 9, { ORDER: 7 })];
+    const d = periodsDashboard(s, data, emptyReportChoice, [null, null]);
+    expect(d.cutoff).toBe("2026-12");
+    expect(d.points.slice(-3).map(p => [p.period, p.horizon, p.values.ENSEMBLE])).toEqual([
+      ["2027-01",1,12], ["2027-02",2,24], ["2027-03",3,36]]);
+    expect(d.points.find(p => p.period === "2026-10")).toMatchObject({ partialOrder: true, values: { order: 7 } });
+    expect(d.points.find(p => p.period === "2026-12")!.values.order).toBeNull();
+    expect(d.kpis.orders).toBe(20);
+    const trace = operationalPeriodsSheets(s, d, data, [])[0].rows;
+    expect(trace).toContainEqual(["Corte del cálculo","2026-12"]); expect(trace).toContainEqual(["Cierre de Pedido","2026-09"]);
+    expect(trace).toContainEqual(["Distancia desde el cierre · 2027-01",1]); expect(trace).toContainEqual(["Distancia desde el cierre · 2027-12",12]);
+    const changed = { ...context, scenario_hash: "c".repeat(64) };
+    expect(officialSourceKey(context)).not.toEqual(officialSourceKey(changed));
+    expect(matchesOfficialSource(changed, context)).toBe(false);
+    expect(forecastSourceAvailable({ ...context, planning_basis: undefined })).toBe(false);
+    expect(forecastSourceAvailable({ ...context, observed_cutoff: context.training_cutoff })).toBe(false);
+    const unavailable = { ...context, forecast_block_code: "PLANNING_SOURCE_UNAVAILABLE", forecast_available: false };
+    expect(forecastSourceAvailable(unavailable)).toBe(false); expect(forecastHistoryAvailable(unavailable)).toBe(true);
+    const reportedContext = { ...context, fulfillment_source: "ESTADISTICA_BAASE_REPORTED", fulfillment_mode: "REPORTED_PERCENTAGE",
+      fulfillment_file_sha256: "f".repeat(64), fulfillment_report_sha256: "a".repeat(64), fulfillment_available: true } as const;
+    const single = { ...s, sourceContext: reportedContext, calculations: [], horizons: [] };
+    const ratio = { chain_id: "c", product_id: "p", period: "2026-09", format: "format", upc: "0001", purchase_type: "RS",
+      order_text: null, delivery_text: null, source_sha256: reportedContext.fulfillment_file_sha256, source_reference: "BAASE!S18",
+      order_source_reference: null, delivery_source_reference: null, partial_period: false, reported_fill_rate_pct: 87.5, reported_fill_rate_pct_text: "87.5" };
+    const singleProduct = periodsDashboard(single, data, emptyReportChoice, [null,null], [], [ratio]);
+    expect(singleProduct.points.find(p => p.period === ratio.period)?.fillRate).toMatchObject({ value: 87.5, ordered: null, delivered: null });
+    expect(singleProduct.kpis.fillRate).toBeNull();
+    const combined = { ...single, products: [...single.products, { ...product, id: "other" }] };
+    const aggregated = periodsDashboard(combined, data, emptyReportChoice, [null, null], [], [ratio, { ...ratio, product_id: "other" }]);
+    expect(aggregated.points.find(p => p.period === ratio.period)?.fillRate?.value).toBeNull();
+    s.calculations[0].input_snapshot.bridge_horizons = [{ target_period: "2027-01", statistical_value: 999, ensemble_value: 999 }];
+    expect(() => buildForecastMatrix(s, emptyReportChoice, [null, null])).toThrow("report_horizon_lineage");
   });
   it("exports observed orders before closure, preserves inventory zero and leaves horizons unassigned", () => {
     const s = { ...snapshot(), sourceContext: orderContext };

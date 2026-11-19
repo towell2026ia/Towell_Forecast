@@ -18,7 +18,7 @@ import uuid
 
 from .auth import ADMIN, READ, AuthFailure, authorize
 from .persistence import LocalPersistenceProvider, content_hash
-from .supabase_access import PreviewError, require_sales_context, uuid_value
+from .supabase_access import COMMERCIAL_CLOSE_BASIS, PreviewError, matches_source, observed_cutoff, require_sales_context, uuid_value
 
 FAMILIES = frozenset({"STATISTICAL", "ML", "ENSEMBLE", "COMMERCIAL_PLAN"})
 
@@ -78,9 +78,14 @@ class LocalChampionService:
                     or context.get("planning_start") != f"{run['planning_year']}-01"
                     or context.get("planning_end") != f"{run['planning_year']}-12"):
                 raise ValueError()
+            if context.get("planning_basis") == COMMERCIAL_CLOSE_BASIS and (
+                    run.get("planning_basis") != COMMERCIAL_CLOSE_BASIS
+                    or run.get("observed_cutoff") != context["observed_cutoff"]
+                    or run.get("model_cutoff") != context["training_cutoff"]):
+                raise ValueError()
             emitted = datetime.fromisoformat(run["emitted_at"].replace("Z", "+00:00"))
             if (emitted.tzinfo is None or emitted > datetime.now(timezone.utc)
-                    or emitted.strftime("%Y-%m") <= run["cutoff"]):
+                    or emitted.strftime("%Y-%m") <= observed_cutoff(context)):
                 raise ValueError()
             return run
         except (OSError, ValueError, TypeError, KeyError, AttributeError):
@@ -161,9 +166,14 @@ class LocalChampionService:
             if len(found) != 1 or found[0].get("chain_id") != chain_id:
                 raise PreviewError("CHAMPION_CANDIDATE_INELIGIBLE", 409)
             product = found[0]
+            if context.get("planning_basis") == COMMERCIAL_CLOSE_BASIS and not matches_source(
+                    (product.get("input_snapshot") or {}).get("source_context"), context):
+                raise PreviewError("CHAMPION_CANDIDATE_INELIGIBLE", 409)
             candidates = product.get("candidates")
             candidate = candidates.get(request["candidate_family"]) if isinstance(candidates, dict) else None
             if not manual_champion_candidate(candidate, request["candidate_family"], run["planning_year"], run["cutoff"]):
+                raise PreviewError("CHAMPION_CANDIDATE_INELIGIBLE", 409)
+            if context.get("planning_basis") == COMMERCIAL_CLOSE_BASIS and candidate.get("evaluation_target_basis") != "OBSERVED_ONLY":
                 raise PreviewError("CHAMPION_CANDIDATE_INELIGIBLE", 409)
             curve = self._curve(candidate, run["planning_year"], run["cutoff"])
             if request["candidate_family"] == "COMMERCIAL_PLAN" and not candidate.get("source_reference"):

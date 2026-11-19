@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
-from functools import lru_cache
 import hashlib
 import json
 import math
@@ -10,12 +9,11 @@ from pathlib import Path
 from uuid import UUID, uuid5
 
 from .persistence import content_hash
-from .supabase_access import PreviewError, matches_source, require_sales_context
+from .supabase_access import COMMERCIAL_CLOSE_BASIS, PreviewError, matches_source, require_sales_context
 from .local_champion import manual_champion_candidate
 
 
-@lru_cache(maxsize=1)
-def _read(path, expected_sha, file_stamp):
+def _read(path, expected_sha):
     raw = path.read_bytes()
     if hashlib.sha256(raw).hexdigest() != expected_sha:
         raise ValueError("planning_file_changed")
@@ -33,11 +31,15 @@ def pinned_run(reference, context):
         path = Path(reference["path"])
         if not path.is_absolute():
             raise ValueError("planning_path")
-        stat = path.stat()
-        run = _read(path, reference["sha256"], (stat.st_ino, stat.st_size, stat.st_mtime_ns))
+        run = _read(path, reference["sha256"])
         if (not matches_source(run.get("source_context"), context) or run["objective"] != "Pedido"
                 or run["cutoff"] != context["training_cutoff"] or run["planning_year"] != 2027):
             raise ValueError("planning_source_mismatch")
+        if context.get("planning_basis") == COMMERCIAL_CLOSE_BASIS and (
+                run.get("planning_basis") != COMMERCIAL_CLOSE_BASIS
+                or run.get("observed_cutoff") != context["observed_cutoff"]
+                or run.get("model_cutoff") != context["training_cutoff"]):
+            raise ValueError("planning_observed_basis_mismatch")
         return run
     except (KeyError, TypeError, OSError, ValueError, AttributeError) as error:
         raise PreviewError("PLANNING_RUN_UNAVAILABLE", 409) from error
@@ -58,18 +60,23 @@ def product_rows(run, product):
     calculation_id = str(uuid5(run_id, product_id))
     identity = {"product_id": product_id, "chain_id": product["chain_id"]}
     families = product["candidates"]
+    context = run["source_context"]
+    if not matches_source(product.get("input_snapshot", {}).get("source_context"), context):
+        raise ValueError("planning_product_source_mismatch")
     metrics = {}
     values = {}
     for name in ("STATISTICAL", "ML", "ENSEMBLE"):
         candidate = families.get(name)
         if candidate is None:
             continue
+        if context.get("planning_basis") == COMMERCIAL_CLOSE_BASIS and candidate.get("evaluation_target_basis") != "OBSERVED_ONLY":
+            raise ValueError("planning_evaluation_basis_mismatch")
         curve = {}
         for row in candidate["horizons"]:
             index = row["horizon"]
             if (type(index) is not int or index not in range(1, 13) or index in curve
                     or row["target_period"] != f"{run['planning_year']}-{index:02}"
-                    or row["forecast_distance"] != index + 3):
+                    or row["forecast_distance"] != (run["planning_year"] - int(run["cutoff"][:4])) * 12 + index - int(run["cutoff"][5:7])):
                 raise ValueError("planning_calendar")
             curve[index] = {**row, "value": _number(row["value"])}
         if set(curve) != set(range(1, 13)):

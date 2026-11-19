@@ -4,6 +4,7 @@ Statistical methods, ML factories, features and Ensemble selection are the
 existing implementations. No historical forecast, stock or commercial proposal
 is accepted as a training observation. Nothing here writes to a database.
 """
+
 from __future__ import annotations
 
 from collections import defaultdict
@@ -15,17 +16,30 @@ from pathlib import Path
 import uuid
 
 from services.forecast_engine.engine import (
-    ENGINE_VERSION, ForecastPolicy, add_month, month_distance,
-    normalize_retrospective_dataset, _metrics,
+    ENGINE_VERSION,
+    ForecastPolicy,
+    add_month,
+    month_distance,
+    normalize_retrospective_dataset,
+    RetrospectiveProductSeries,
+    _feature,
+    _metrics,
 )
-from services.forecast_engine.retrospective import forecast_chain
+from services.forecast_engine.retrospective import forecast_chain, identities_at
 from services.forecast_engine.selection_policy import evaluation_signature
 from services.assistant_api.forecast_execution import execute_forecast
 from .unified_source import MASTER_SHA256, CONTRACT
 
 DISTANCES = tuple(range(1, 16))
 PLAN_DISTANCES = tuple(range(4, 16))
-GROUP_FIELDS = ("chain_id", "account", "format", "model", "presentation", "commercial_code")
+GROUP_FIELDS = (
+    "chain_id",
+    "account",
+    "format",
+    "model",
+    "presentation",
+    "commercial_code",
+)
 FAMILY_KEYS = {"statistical": "STATISTICAL", "ml": "ML", "ensemble": "ENSEMBLE"}
 
 
@@ -33,12 +47,15 @@ def canonical(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
+
 def digest(value):
     return hashlib.sha256(canonical(value).encode("utf-8")).hexdigest()
 
 
+
 def exact(value):
     return None if value is None else str(Decimal(str(value)))
+
 
 
 def validate_input(rows, source_context):
@@ -65,14 +82,16 @@ def validate_input(rows, source_context):
         raise ValueError("UNIFIED_PLANNING_EMPTY")
 
 
-def evaluation_origins(cutoff="2026-09"):
+
+def evaluation_origins(cutoff="2026-09", distances=PLAN_DISTANCES):
     # All three origins can observe the entire distance4..15 window by cutoff.
     # This calendar depends on dates, never on quantities or model scores.
-    last = add_month(cutoff, -max(PLAN_DISTANCES))
+    last = add_month(cutoff, -max(distances))
     return tuple(add_month(last, offset) for offset in (-2, -1, 0))
 
 
-def _candidate(raw, family, product_id, forecast_rows, pairs):
+
+def _candidate(raw, family, product_id, forecast_rows, pairs, *, distances=PLAN_DISTANCES, cutoff="2026-09"):
     selected = next((c for c in raw["model_audit"]["product_candidates"]
                      if c["product_id"] == product_id and c["family"] == family), None)
     by_distance = {r["horizon"]: r for r in selected["horizons"]} if selected else {}
@@ -113,14 +132,14 @@ def _candidate(raw, family, product_id, forecast_rows, pairs):
                "windows": len({r["origin"] for r in evidence})}
     signature = evaluation_signature(chain_id=forecast_rows[0]["chain_id"],
         category_id=forecast_rows[0]["category"], product_id=product_id, objective="Pedido",
-        issue_period="2026-09", evaluation_mode="RETROSPECTIVE_TRAINING", rows=evidence) if evidence else None
+        issue_period=cutoff, evaluation_mode="RETROSPECTIVE_TRAINING", rows=evidence) if evidence else None
     horizons = []
-    for index, distance in enumerate(PLAN_DISTANCES, 1):
+    for index, distance in enumerate(distances, 1):
         row = by_distance.get(distance)
         supported = any(r["horizon"] == distance for r in evidence)
         value = row["value"] if row is not None and current_history else None
         horizons.append({"horizon": index, "planning_horizon": index,
-            "forecast_distance": distance, "target_period": add_month("2026-09", distance),
+            "forecast_distance": distance, "target_period": add_month(cutoff, distance),
             "value": exact(value), "status": "AVAILABLE" if value is not None and supported else
                 "PROVISIONAL_WITHOUT_EVALUATION" if value is not None else "SIN_COBERTURA",
             "reason": None if value is not None and supported else "NO_COMPARABLE_LONG_DISTANCE_EVIDENCE" if value is not None
@@ -145,6 +164,7 @@ def _candidate(raw, family, product_id, forecast_rows, pairs):
         "horizons": horizons}
 
 
+
 def _pair_prediction(row, family):
     stat = row["statistical"].get(row["selected_statistical_model"])
     if family == "STATISTICAL":
@@ -154,6 +174,7 @@ def _pair_prediction(row, family):
     weight = row.get("ensemble_statistical_weight")
     ml = row["ml"].get(row.get("ensemble_ml_model"))
     return stat * weight + ml * (1 - weight) if weight is not None and stat is not None and ml is not None else None
+
 
 
 def _bridge(raw, product_id, forecast):
@@ -183,6 +204,7 @@ def _bridge(raw, product_id, forecast):
     return result
 
 
+
 def aggregate_models(products, paired_evidence):
     groups = defaultdict(list)
     for product in products:
@@ -201,7 +223,7 @@ def aggregate_models(products, paired_evidence):
                     context.prec = 100
                     total = str(sum((Decimal(v) for v in values), Decimal(0))) if values else None
                 horizons.append({"horizon": index + 1, "planning_horizon": index + 1,
-                    "forecast_distance": index + 4, "target_period": rows[0]["target_period"],
+                    "forecast_distance": rows[0]["forecast_distance"], "target_period": rows[0]["target_period"],
                     "value": total, "covered_variants": len(values), "expected_variants": len(rows),
                     "status": "COMPLETE" if len(values) == len(rows) else "TOTAL_PARCIAL"})
             # Model metrics compare sums on identical origin/target/member sets.
@@ -209,8 +231,9 @@ def aggregate_models(products, paired_evidence):
             paired_groups = defaultdict(list)
             pairs = []
             methods = {p["product_id"]: p["candidates"][family]["model"] for p in members}
+            evaluated_distances = {h["forecast_distance"] for p in members for h in p["candidates"][family]["horizons"]}
             for row in paired_evidence:
-                if row["product_id"] not in ids or row["horizon"] not in PLAN_DISTANCES:
+                if row["product_id"] not in ids or row["horizon"] not in evaluated_distances:
                     continue
                 prediction = _pair_prediction(row, "STATISTICAL" if family == "ENSEMBLE" and
                                               methods[row["product_id"]] == "Estadístico solo" else family)
@@ -229,6 +252,7 @@ def aggregate_models(products, paired_evidence):
                 "metric_basis": "MODEL_SUM_COMMON_ORIGIN_TARGET_COMPLETE_VARIANTS", "published": False}
         result.append(record)
     return result
+
 
 
 def reproject_saved_run(directory, output_dir):
@@ -261,9 +285,13 @@ def reproject_saved_run(directory, output_dir):
     return result
 
 
-def run_planning(rows, metadata, source_context, *, output_dir=None, on_stage=None):
+
+def run_planning(rows, metadata, source_context, *, output_dir=None, on_stage=None, observed_records=None):
     """Compute one immutable planning run from only sealed unified ORDER rows."""
     rows = list(rows)
+    if source_context.get("planning_basis") == "OBSERVED_AND_COMMERCIAL_CLOSE":
+        return run_commercial_close(rows, metadata, source_context, output_dir=output_dir,
+                                    on_stage=on_stage, observed_records=observed_records)
     validate_input(rows, source_context)
     metadata = list(metadata.values()) if isinstance(metadata, dict) else list(metadata)
     by_id = {row["product_id"]: row for row in metadata}
@@ -345,4 +373,352 @@ def run_planning(rows, metadata, source_context, *, output_dir=None, on_stage=No
     result["content_digest"] = digest(result)
     if directory:
         (directory / "planning_run.json").write_text(canonical(result), encoding="utf-8")
+    return result
+
+
+
+class CommercialScenarioSeries(RetrospectiveProductSeries):
+    """Forecast context can contain explicit commercial zeroes, never fake actuals."""
+
+    observed_cutoff = "2026-09"
+
+    def history(self, issue_period):
+        if issue_period <= self.observed_cutoff:
+            return super().history(issue_period)
+        values, periods = [], []
+        period = issue_period
+        while (
+            item := self.observations.get(period)
+        ) is not None and item.value is not None:
+            values.append(item.value)
+            periods.append(period)
+            period = add_month(period, -1)
+        values.reverse()
+        periods.reverse()
+        first = next((i for i, value in enumerate(values) if value > 0), None)
+        if first is not None:
+            return values[first:]
+        # Explicit zero commercial inputs remain zero, not a missing series.
+        return [
+            value
+            for period, value in zip(periods, values)
+            if period > self.observed_cutoff
+        ]
+
+
+def scenario_products(rows, cutoff="2026-12"):
+    result = normalize_retrospective_dataset(rows, cutoff, objective="Pedido")
+    for item in result:
+        item.__class__ = CommercialScenarioSeries
+    return result
+
+
+def validate_scenario_input(rows, context, observed_records):
+    expected = {
+        "forecast_contract": CONTRACT,
+        "target_file_sha256": MASTER_SHA256,
+        "target_sheet": "Base_2024_2026",
+        "target_metric": "ORDER",
+        "objective": "Pedido",
+        "training_cutoff": "2026-12",
+        "observed_cutoff": "2026-09",
+        "planning_start": "2027-01",
+        "planning_end": "2027-12",
+        "planning_basis": "OBSERVED_AND_COMMERCIAL_CLOSE",
+    }
+    if any(
+        context.get(key) != value for key, value in expected.items()
+    ) or not context.get("scenario_hash"):
+        raise ValueError("COMMERCIAL_CLOSE_CONTEXT_UNACCREDITED")
+    if observed_records is None:
+        raise ValueError("COMMERCIAL_CLOSE_OBSERVED_DTO_REQUIRED")
+    authoritative = {}
+    for row in observed_records:
+        key = row["chain_id"], row["product_id"], row["period"]
+        if (
+            key in authoritative
+            or row.get("basis", "OBSERVED") != "OBSERVED"
+            or row.get("metric_code") != "ORDER"
+            or row.get("objective") != "Pedido"
+            or row.get("source_file_sha256") != MASTER_SHA256
+            or row["period"] > "2026-09"
+        ):
+            raise ValueError("COMMERCIAL_CLOSE_OBSERVED_DTO_INVALID")
+        authoritative[key] = row
+    represented = set()
+    keys = set()
+    for row in rows:
+        basis, period = row.get("basis"), row.get("period", "")
+        if (
+            row.get("objective") != "Pedido"
+            or row.get("metric_code") != "ORDER"
+            or row.get("source_file_sha256") != MASTER_SHA256
+            or row.get("target_sheet") != "Base_2024_2026"
+            or row.get("training_eligible") is not True
+            or not row.get("source_reference")
+            or basis not in {"OBSERVED", "COMMERCIAL_CLOSE"}
+            or not "2024-01" <= period <= "2026-12"
+            or basis == "OBSERVED"
+            and period > "2026-09"
+        ):
+            raise ValueError("COMMERCIAL_CLOSE_ROW_UNACCREDITED")
+        amount = Decimal(str(row["value"]))
+        if not amount.is_finite() or amount < 0:
+            raise ValueError("COMMERCIAL_CLOSE_QUANTITY_INVALID")
+        key = row["chain_id"], row["product_id"], period
+        if key in keys:
+            raise ValueError("COMMERCIAL_CLOSE_DUPLICATE")
+        if basis == "COMMERCIAL_CLOSE" and key in authoritative:
+            raise ValueError("COMMERCIAL_CLOSE_CANNOT_REPLACE_OBSERVED")
+        if basis == "OBSERVED":
+            original = authoritative.get(key)
+            if (
+                original is None
+                or Decimal(str(original["value"])) != amount
+                or original.get("source_reference") != row.get("source_reference")
+            ):
+                raise ValueError("COMMERCIAL_CLOSE_OBSERVED_LINK_INVALID")
+            represented.add(key)
+        keys.add(key)
+    if represented != set(authoritative):
+        raise ValueError("COMMERCIAL_CLOSE_OBSERVED_MEMBERSHIP_CHANGED")
+    if not rows:
+        raise ValueError("COMMERCIAL_CLOSE_EMPTY")
+
+
+def run_commercial_close(
+    rows,
+    metadata,
+    source_context,
+    *,
+    output_dir=None,
+    on_stage=None,
+    observed_records=None,
+):
+    """Final models use December scenario; folds and ML targets use observed only.
+
+    Commercial quantities influence the final statistical fit and ML prediction
+    lags. They never enter a validation actual or an ML target. The globally fit
+    ML coefficients therefore remain grounded in observed labelled examples.
+    """
+    rows = list(rows)
+    validate_scenario_input(rows, source_context, observed_records)
+    metadata = list(metadata.values()) if isinstance(metadata, dict) else list(metadata)
+    by_id = {m["product_id"]: m for m in metadata}
+    if len(by_id) != len(metadata) or any(r["product_id"] not in by_id for r in rows):
+        raise ValueError("COMMERCIAL_CLOSE_METADATA_UNACCREDITED")
+    cutoff, observed_cutoff, distances = "2026-12", "2026-09", tuple(range(1, 13))
+    observed_rows = [r for r in rows if r["basis"] == "OBSERVED"]
+    evaluation = normalize_retrospective_dataset(
+        observed_rows, observed_cutoff, objective="Pedido"
+    )
+    observed_by_chain = defaultdict(list)
+    for item in evaluation:
+        observed_by_chain[item.chain_id].append(item)
+    scopes = defaultdict(list)
+    for item in scenario_products(rows, cutoff):
+        scopes[item.chain_id].append(item)
+    directory = Path(output_dir) if output_dir else None
+    if directory:
+        directory.mkdir(parents=True, exist_ok=False)
+    products, all_pairs, audits = [], [], []
+    emitted = datetime.now(timezone.utc).isoformat()
+    run_id = str(uuid.uuid4())
+    for chain, current in sorted(scopes.items()):
+        if on_stage:
+            on_stage({"chain_id": chain, "stage": "START", "products": len(current)})
+        real = observed_by_chain[chain]
+        available = {p for item in real for p in item.observations}
+        origins = tuple(
+            p for p in evaluation_origins(observed_cutoff, distances) if p in available
+        )
+        raw = forecast_chain(
+            current,
+            cutoff,
+            ForecastPolicy(),
+            None,
+            horizons=distances,
+            evaluation_horizons=distances,
+            max_folds=36,
+            evaluation_origins=origins or None,
+            evaluation_products=real,
+            observed_cutoff=observed_cutoff,
+            retain_pairs=True,
+            on_stage=(lambda stage: on_stage({"chain_id": chain, "stage": stage}))
+            if on_stage
+            else None,
+        )
+        pairs = raw.pop("paired_evidence", [])
+        if any(p["target_period"] > observed_cutoff for p in pairs):
+            raise ValueError("COMMERCIAL_CLOSE_IN_EVALUATION_ACTUALS")
+        all_pairs.extend(pairs)
+        identities = identities_at(real, observed_cutoff)
+        for item in current:
+            pid = item.product_id
+            meta = by_id[pid]
+            forecast = [r for r in raw["forecast_towell"] if r["product_id"] == pid]
+            source_rows = sorted(
+                [r for r in rows if r["product_id"] == pid], key=lambda r: r["period"]
+            )
+            real_history = next(
+                (r.history(observed_cutoff) for r in real if r.product_id == pid), []
+            )
+            real_total = sum(r["product_id"] == pid for r in observed_rows)
+            own = {
+                FAMILY_KEYS[f]: _candidate(
+                    raw, f, pid, forecast, pairs, distances=distances, cutoff=cutoff
+                )
+                for f in FAMILY_KEYS
+            }
+            for candidate in own.values():
+                candidate.update(
+                    calculable=all(
+                        h["value"] is not None for h in candidate["horizons"]
+                    ),
+                    evaluation_target_basis="OBSERVED_ONLY",
+                    observed_cutoff=observed_cutoff,
+                    commercial_base_only=real_total == 0,
+                    observed_history_months=len(real_history),
+                    observed_numeric_months=real_total,
+                )
+            products.append(
+                {
+                    **meta,
+                    "product_id": pid,
+                    "chain_id": chain,
+                    "model_group_key": canonical([meta.get(k) for k in GROUP_FIELDS]),
+                    "candidates": own,
+                    "bridge_horizons": [],
+                    "input_snapshot": {
+                        "source_context": source_context,
+                        "objective": "Pedido",
+                        "training_cutoff": cutoff,
+                        "observed_cutoff": observed_cutoff,
+                        "commercial_history": [
+                            {
+                                k: r.get(k)
+                                for k in (
+                                    "period",
+                                    "value",
+                                    "basis",
+                                    "source_reference",
+                                    "source_id",
+                                )
+                            }
+                            for r in source_rows
+                        ],
+                        "observed_history_months": len(real_history),
+                        "observed_numeric_months": real_total,
+                        "current_history_months": len(item.history(cutoff)),
+                        "ml_target_basis": "OBSERVED_ONLY",
+                        "ml_feature_origin": cutoff,
+                        "ml_prediction_features": [
+                            {
+                                "target_period": add_month(cutoff, h),
+                                "forecast_distance": h,
+                                "values": _feature(
+                                    item, cutoff, add_month(cutoff, h), identities
+                                ),
+                            }
+                            for h in distances
+                        ]
+                        if item.history(cutoff)
+                        else [],
+                        "ml_feature_names_ref": "Scope_"
+                        + chain
+                        + ".json/model_audit/feature_names",
+                        "base_restriction": "INSUFFICIENT_OBSERVED_HISTORY"
+                        if len(real_history) < ForecastPolicy().min_product_observations
+                        else None,
+                    },
+                }
+            )
+        audits.append(
+            {
+                "chain_id": chain,
+                "model_audit": raw["model_audit"],
+                "selection": raw["selection"],
+                "evaluation_origins": origins,
+            }
+        )
+        if directory:
+            (directory / f"Scope_{chain}.json").write_text(
+                canonical(raw), encoding="utf-8"
+            )
+            (directory / f"Pairs_{chain}.json").write_text(
+                canonical(pairs), encoding="utf-8"
+            )
+        if on_stage:
+            on_stage({"chain_id": chain, "stage": "DONE"})
+    covered = {p["product_id"] for p in products}
+    empty = {"model_audit": {"product_candidates": []}}
+    for pid, meta in by_id.items():
+        if pid in covered:
+            continue
+        products.append(
+            {
+                **meta,
+                "product_id": pid,
+                "model_group_key": canonical([meta.get(k) for k in GROUP_FIELDS]),
+                "candidates": {
+                    FAMILY_KEYS[f]: _candidate(
+                        empty, f, pid, [], [], distances=distances, cutoff=cutoff
+                    )
+                    for f in FAMILY_KEYS
+                },
+                "bridge_horizons": [],
+                "input_snapshot": {
+                    "source_context": source_context,
+                    "training_cutoff": cutoff,
+                    "observed_cutoff": observed_cutoff,
+                    "base_restriction": "NO_OBSERVED_OR_COMMERCIAL_BASE",
+                },
+            }
+        )
+    result = {
+        "schema": "unified-planning-run-1",
+        "run_id": run_id,
+        "source_context": dict(source_context),
+        "objective": "Pedido",
+        "planning_year": 2027,
+        "cutoff": cutoff,
+        "observed_cutoff": observed_cutoff,
+        "model_cutoff": cutoff,
+        "planning_basis": "OBSERVED_AND_COMMERCIAL_CLOSE",
+        "emitted_at": emitted,
+        "engine_version": ENGINE_VERSION,
+        "method_selection_version": "CURRENT_CONTEXT_ELIGIBILITY_V1",
+        "training_fingerprint": digest(rows),
+        "observed_training_fingerprint": digest(observed_rows),
+        "evaluation_mode": "RETROSPECTIVE_TRAINING",
+        "evaluation_origins": list(evaluation_origins(observed_cutoff, distances)),
+        "forecast_distances": list(distances),
+        "planning_distances": list(distances),
+        "champion_published": False,
+        "products": products,
+        "models": aggregate_models(products, all_pairs),
+        "audits": audits,
+        "coverage": {"products": len(products), "scopes": len(scopes)},
+        "restrictions": [
+            "NOT_WAPE_LIVE",
+            "NO_AUTOMATIC_CHAMPION",
+            "OBSERVED_ONLY_BACKTEST_TARGETS",
+            "OBSERVED_ONLY_ML_TRAINING_TARGETS",
+            "COMMERCIAL_CLOSE_IN_PREDICTION_FEATURES",
+            "NO_2027_PLAN_IN_TRAINING",
+        ],
+    }
+    if directory:
+        (directory / "Paired_Evidence.json").write_text(
+            canonical(all_pairs), encoding="utf-8"
+        )
+        result["artifacts_sha256"] = {
+            p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(directory.glob("*.json"))
+        }
+    result["content_digest"] = digest(result)
+    if directory:
+        (directory / "planning_run.json").write_text(
+            canonical(result), encoding="utf-8"
+        )
     return result

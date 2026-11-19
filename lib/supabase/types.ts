@@ -10,7 +10,9 @@ export const emptyFilters: Filters = { chainId: null, productId: null, categoryI
 export type OperationalReadContext = { source_hash: string; generation: number; first_period: string; last_period: string;
   forecast_contract?: "pedido-towell-v1" | "pedido-unificado-v1"; planning_start?: string; planning_end?: string; objective?: "Pedido"; target_metric?: "ORDER"; target_sheet?: "Pedidos" | "Base_2024_2026"; target_file_sha256?: string;
   training_cutoff?: string | null; forecast_available?: boolean; target_source_available?: boolean; forecast_block_code?: string | null; forecast_unavailable_reason?: string | null; unit?: "PIEZAS";
-  fulfillment_source?: "ESTADISTICA_BAASE"; fulfillment_file_sha256?: string; fulfillment_available?: boolean;
+  planning_basis?: "OBSERVED_AND_COMMERCIAL_CLOSE"; observed_cutoff?: string; scenario_hash?: string;
+  fulfillment_source?: "ESTADISTICA_BAASE" | "ESTADISTICA_BAASE_REPORTED"; fulfillment_file_sha256?: string; fulfillment_available?: boolean;
+  fulfillment_mode?: "REPORTED_PERCENTAGE"; fulfillment_report_sha256?: string;
   sales_source?: "TOWELL"; inventory_source?: "ESTADISTICA"; sales_available?: boolean;
   sales_unavailable_reason?: "Sin cálculo: fuente de ventas no disponible";
   sales_training_cutoff?: string;
@@ -19,7 +21,7 @@ export type OperationalMetric = "SALES_CLIENTE" | "SALES" | "ORDER" | "DELIVERY"
 export type OperationalInventory = { chain_id: string; product_id: string; period: string; format: string; upc: string; purchase_type: string; quantity_text: string };
 export type OperationalFulfillment = { chain_id: string; product_id: string; period: string; format: string; upc: string; purchase_type: string;
   order_text: string | null; delivery_text: string | null; source_reference: string; order_source_reference: string | null; delivery_source_reference: string | null;
-  source_sha256: string; partial_period: boolean };
+  source_sha256: string; partial_period: boolean; reported_fill_rate_pct?: number | null; reported_fill_rate_pct_text?: string | null };
 export type Cursor = { chain_id: string; product_id: string; period: string; context?: OperationalReadContext };
 export type HistoricalRow = Cursor & { product: Product; chain: string; SALES: number | null; ORDER: number | null; DELIVERY: number | null; availability: string;
   exact?: Partial<Record<OperationalMetric, string>>;

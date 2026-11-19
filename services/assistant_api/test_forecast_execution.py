@@ -24,24 +24,25 @@ def observations(product, *, gap=False):
 
 
 class ForecastExecutionTests(unittest.TestCase):
-    def test_recovers_only_the_proven_method_failure_and_keeps_other_product(self):
+    def test_current_method_eligibility_retains_both_products_without_retry(self):
         rows = observations("short", gap=True) + observations("complete")
-        choose_window = lambda candidate: (candidate["model"] != "Media móvil 12",
-                                            candidate.get("retrospective_wape") or 0)
+        def choose_window(candidate):
+            return candidate["model"] != "Media móvil 12", candidate.get("retrospective_wape") or 0
         before = list(rows)
         with patch.object(retrospective, "order", choose_window), patch.dict(retrospective.MODEL_FACTORIES, {}, clear=True):
             result, exclusions = execute_forecast(
                 rows, "2026-10", compute=forecast_dataset, chain_id="chain", objective="Venta",
                 policy=ForecastPolicy(), evidence_mode="RETROSPECTIVE_TRAINING")
         self.assertEqual(rows, before)
-        excluded, = exclusions
-        self.assertEqual((excluded["product_id"], excluded["model"], excluded["available_history"],
-                          excluded["required_history"], excluded["horizon"]),
-                         ("short", "Media móvil 12", 9, 12, 1))
-        self.assertEqual(excluded["reason"], "MODEL_CURRENT_HISTORY_INSUFFICIENT")
-        self.assertEqual((excluded["history_periods"][0], excluded["history_periods"][-1]), ("2026-02", "2026-10"))
-        self.assertEqual({r["product_id"] for r in result["chains"][0]["forecast_towell"]}, {"complete"})
-        self.assertEqual(len(result["chains"][0]["forecast_towell"]), 12)
+        self.assertEqual(exclusions, [])
+        chain = result["chains"][0]
+        self.assertEqual({r["product_id"] for r in chain["forecast_towell"]}, {"complete", "short"})
+        self.assertEqual(len(chain["forecast_towell"]), 24)
+        invalid = next(row for row in chain["model_audit"]["candidate_models"]
+            if row["product_id"] == "short" and row["model"] == "Media móvil 12")
+        self.assertFalse(invalid["calculable"])
+        self.assertFalse(invalid["selected"])
+        self.assertEqual(invalid["reason"], "REQUIRES_12_PERIODS")
 
     def test_unknown_value_error_is_propagated_without_retry_or_exclusion(self):
         compute = Mock(side_effect=ValueError("unrelated error"))

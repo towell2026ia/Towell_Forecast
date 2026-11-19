@@ -29,11 +29,27 @@ SALES_SOURCE_FIELDS = ("source_hash", "generation", "first_period", "last_period
     "sales_source", "sales_sheet", "sales_file_sha256", "sales_training_cutoff", "authorized_source_hash", "inventory_source")
 ORDER_SOURCE_FIELDS = ("source_hash", "generation", "first_period", "last_period", "forecast_contract", "objective",
     "target_metric", "target_sheet", "target_file_sha256", "training_cutoff", "authorized_source_hash", "inventory_source", "unit", "forecast_block_code",
-    "fulfillment_source", "fulfillment_file_sha256", "planning_start", "planning_end")
+    "fulfillment_source", "fulfillment_file_sha256", "fulfillment_mode", "fulfillment_report_sha256", "planning_start", "planning_end",
+    "planning_basis", "observed_cutoff", "scenario_hash")
 
 UNIFIED_CONTRACT = "pedido-unificado-v1"
 UNIFIED_MASTER_SHA256 = "29cac8aebab869e1ded099fa93382046bdbafbaaf4c0156664d52c9488a47c5d"
+COMMERCIAL_CLOSE_BASIS = "OBSERVED_AND_COMMERCIAL_CLOSE"
 ORDER_SHEETS = {"pedido-towell-v1": "Pedidos", UNIFIED_CONTRACT: "Base_2024_2026"}
+
+
+def valid_fulfillment_context(context):
+    if not any(key in context for key in ("fulfillment_source", "fulfillment_file_sha256", "fulfillment_available", "fulfillment_mode", "fulfillment_report_sha256")):
+        return True
+    if (not re.fullmatch(r"[0-9a-f]{64}", str(context.get("fulfillment_file_sha256", "")))
+            or type(context.get("fulfillment_available")) is not bool):
+        return False
+    if context.get("fulfillment_source") == "ESTADISTICA_BAASE_REPORTED":
+        return (context.get("fulfillment_mode") == "REPORTED_PERCENTAGE"
+            and bool(re.fullmatch(r"[0-9a-f]{64}", str(context.get("fulfillment_report_sha256", "")))))
+    return (context.get("fulfillment_source") == "ESTADISTICA_BAASE"
+        and context.get("fulfillment_available") is True
+        and not any(key in context for key in ("fulfillment_mode", "fulfillment_report_sha256")))
 
 
 def forecast_objective(context):
@@ -42,6 +58,11 @@ def forecast_objective(context):
 
 def forecast_cutoff(context):
     return context.get("training_cutoff") if forecast_objective(context) == "Pedido" else context.get("sales_training_cutoff")
+
+
+def observed_cutoff(context):
+    """Commercial closing inputs do not become observations or evaluation actuals."""
+    return context.get("observed_cutoff") if isinstance(context, dict) and context.get("planning_basis") == COMMERCIAL_CLOSE_BASIS else forecast_cutoff(context)
 
 
 def accredited_context(context):
@@ -54,15 +75,17 @@ def require_sales_context(context, *, required=False, for_training=True):
         contract = context["forecast_contract"]
         if not isinstance(contract, str) or contract not in ORDER_SHEETS:
             raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 503)
-        if contract == UNIFIED_CONTRACT and (
-                context.get("target_file_sha256") != UNIFIED_MASTER_SHA256
-                or context.get("training_cutoff") != "2026-09"
-                or (context.get("planning_start"), context.get("planning_end")) != ("2027-01", "2027-12")):
-            raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 503)
-        if any(key in context for key in ("fulfillment_source", "fulfillment_file_sha256", "fulfillment_available")) and (
-                context.get("fulfillment_source") != "ESTADISTICA_BAASE"
-                or not re.fullmatch(r"[0-9a-f]{64}", str(context.get("fulfillment_file_sha256", "")))
-                or context.get("fulfillment_available") is not True):
+        if contract == UNIFIED_CONTRACT:
+            commercial = any(key in context for key in ("planning_basis", "observed_cutoff", "scenario_hash"))
+            if (context.get("target_file_sha256") != UNIFIED_MASTER_SHA256
+                    or (context.get("planning_start"), context.get("planning_end")) != ("2027-01", "2027-12")
+                    or not commercial and context.get("training_cutoff") != "2026-09"
+                    or commercial and (context.get("planning_basis") != COMMERCIAL_CLOSE_BASIS
+                        or context.get("observed_cutoff") != "2026-09" or context.get("training_cutoff") != "2026-12"
+                        or type(context.get("generation")) is not int or context["generation"] < 6
+                        or not re.fullmatch(r"[0-9a-f]{64}", str(context.get("scenario_hash", ""))))):
+                raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 503)
+        if not valid_fulfillment_context(context):
             raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 503)
         if (context.get("objective") != "Pedido" or context.get("target_metric") != "ORDER"
                 or context.get("target_sheet") != ORDER_SHEETS[contract] or context.get("unit") != "PIEZAS"
@@ -85,6 +108,8 @@ def require_sales_context(context, *, required=False, for_training=True):
         if for_training and not context["target_source_available"]:
             raise PreviewError("ORDER_SOURCE_UNAVAILABLE", 503)
         if for_training and not context["forecast_available"]:
+            if context.get("planning_basis") == COMMERCIAL_CLOSE_BASIS:
+                raise PreviewError("PLANNING_SOURCE_UNAVAILABLE", 503)
             raise PreviewError("ORDER_CLOSURE_UNVERIFIED", 409)
         return context
     if not required and not accredited_context(context):
@@ -151,7 +176,7 @@ class SupabaseReadClient:
                     code = response.json().get("code")
                 except (ValueError, AttributeError):
                     code = None
-                if code in {"SALES_SOURCE_UNAVAILABLE", "ORDER_SOURCE_UNAVAILABLE", "ORDER_CLOSURE_UNVERIFIED", "OFFICIAL_SOURCE_MISMATCH", "REPLACED_SOURCE_AUDIT_ONLY"}:
+                if code in {"SALES_SOURCE_UNAVAILABLE", "ORDER_SOURCE_UNAVAILABLE", "ORDER_CLOSURE_UNVERIFIED", "PLANNING_SOURCE_UNAVAILABLE", "FILL_RATE_REPORT_UNAVAILABLE", "OFFICIAL_SOURCE_MISMATCH", "REPLACED_SOURCE_AUDIT_ONLY"}:
                     raise PreviewError(code, response.status_code)
                 if response.status_code == 403:
                     raise PreviewError("SCOPE_FORBIDDEN", 403)

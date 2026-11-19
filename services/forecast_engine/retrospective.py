@@ -63,7 +63,7 @@ def order(candidate):
 def forecast_chain(products, issue, policy, incumbent, on_stage=None, *,
                    horizons=HORIZONS, evaluation_horizons=None,
                    max_folds=MAX_FOLDS, retain_pairs=False,
-                   evaluation_origins=None):
+                   evaluation_origins=None, evaluation_products=None, observed_cutoff=None):
     """Use literal distances from the real cutoff, including an isolated plan.
 
     Defaults retain the existing twelve-month contract. The optional calendar
@@ -77,28 +77,32 @@ def forecast_chain(products, issue, policy, incumbent, on_stage=None, *,
         raise ValueError("invalid_forecast_calendar")
     def calendar_score(data, family, model):
         return scored(data, family, model, horizons=evaluation_horizons)
+    evaluation_products = products if evaluation_products is None else evaluation_products
+    evaluation_cutoff = observed_cutoff or issue
+    if evaluation_cutoff > issue:
+        raise ValueError("observed_cutoff_after_model_cutoff")
     chain = products[0].chain_id
     if on_stage:
         on_stage("STATISTICAL")
     # All statistical candidate forecasts use only the contiguous tail at origin.
     # Like stat.backtest, H6/H12 require a 12-period train; H1/H3 require six.
-    periods = sorted({period for item in products for period in item.observations if period < issue})
-    origins = [period for period in periods if any(len(item.history(period)) >= 6 for item in products)][-max_folds:]
+    periods = sorted({period for item in evaluation_products for period in item.observations if period < evaluation_cutoff})
+    origins = [period for period in periods if any(len(item.history(period)) >= 6 for item in evaluation_products)][-max_folds:]
     if evaluation_origins is not None:
         requested = tuple(evaluation_origins)
         if (len(set(requested)) != len(requested) or not requested
-                or any(period >= issue or period not in periods for period in requested)):
+                or any(period >= evaluation_cutoff or period not in periods for period in requested)):
             raise ValueError("invalid_evaluation_origins")
-        origins = [period for period in requested if any(len(item.history(period)) >= 6 for item in products)]
+        origins = [period for period in requested if any(len(item.history(period)) >= 6 for item in evaluation_products)]
     rows, fold_audit = [], []
     for origin in origins:
-        for item in products:
+        for item in evaluation_products:
             history = item.history(origin)
             allowed = stat.allowed_models(stat.classify(history)[0]) if history else []
             for h in evaluation_horizons:
                 target = add_month(origin, h)
                 observed = item.observations.get(target)
-                if target > issue or observed is None or observed.value is None or len(history) < (12 if h >= 6 else 6):
+                if target > evaluation_cutoff or observed is None or observed.value is None or len(history) < (12 if h >= 6 else 6):
                     continue
                 predictions = {}
                 for name in allowed:
@@ -118,7 +122,8 @@ def forecast_chain(products, issue, policy, incumbent, on_stage=None, *,
         classification = stat.classify(history)[0] if history else "Sin historial"
         allowed = stat.allowed_models(classification) if history else []
         relevant = [row for row in rows if row["product_id"] == item.product_id]
-        evaluated = [name for name in stat.MODELS if name in allowed and any(name in r["statistical"] for r in relevant)]
+        evaluated = [name for name in stat.MODELS if name in allowed and len(history) >= REQUIREMENTS.get(name, 1)
+                     and any(name in r["statistical"] for r in relevant)]
         # Models compared for selection share exactly the same origin/target set.
         common = [row for row in relevant if all(name in row["statistical"] for name in evaluated)] if evaluated else []
         local = []
@@ -127,18 +132,37 @@ def forecast_chain(products, issue, policy, incumbent, on_stage=None, *,
                       f"REQUIRES_{REQUIREMENTS.get(name, 1)}_PERIODS" if len(history) < REQUIREMENTS.get(name, 1)
                       else "NO_COMPARABLE_ROLLING_ORIGINS")
             metrics = calendar_score(common if name in evaluated else [], "statistical", name)
-            valid = metrics["retrospective_wape"] is not None
+            calculable = name in allowed and len(history) >= REQUIREMENTS.get(name, 1)
+            valid = calculable and metrics["retrospective_wape"] is not None
             if metrics["observations"] and not valid:
                 reason = "ZERO_ACTUAL_DENOMINATOR"
             candidate = {"family": "statistical", "model": name, "product_id": item.product_id,
                          "classification": classification, "evaluation_mode": EVALUATION_MODE,
                          "status": "EVALUATED" if valid else "NOT_APPLICABLE", "reason": None if valid else reason,
-                         "available": valid, **metrics}
+                         "available": calculable, "calculable": calculable, "evidence_available": metrics["retrospective_wape"] is not None, **metrics}
             local.append(candidate)
         valid = sorted([c for c in local if c["status"] == "EVALUATED"], key=order)
-        choices[item.product_id] = valid[0]["model"] if valid else "Naive"
+        # A historical score never overrides current requirements/fit support.
+        # Try evaluated candidates in the original score order, then calculable
+        # methods in the existing registry order. Isolate a failing method,
+        # rather than dropping the product or fabricating its curve.
+        ranked = valid + [c for c in local if c["calculable"] and c not in valid]
+        chosen = None
+        for candidate in ranked:
+            try:
+                curve = stat.MODELS[candidate["model"]](history, max(horizons))
+                if len(curve) < max(horizons) or any(not math.isfinite(float(v)) for v in curve):
+                    raise ValueError("invalid_current_statistical_curve")
+                chosen = candidate
+                break
+            except (ValueError, IndexError, ZeroDivisionError, OverflowError) as error:
+                candidate.update(available=False, calculable=False, status="NOT_APPLICABLE",
+                    reason="CURRENT_FIT_FAILED", current_error=type(error).__name__)
+        choices[item.product_id] = chosen["model"] if chosen else None
         for candidate in local:
-            candidate["selected"] = candidate["model"] == choices[item.product_id]
+            candidate["selected"] = candidate is chosen
+            if candidate is chosen:
+                candidate["selection_basis"] = "EVALUATED_CURRENTLY_CALCULABLE" if candidate["status"] == "EVALUATED" else "CALCULABLE_WITHOUT_EVALUATION"
         stat_candidates.extend(local)
 
     if on_stage:
@@ -150,13 +174,13 @@ def forecast_chain(products, issue, policy, incumbent, on_stage=None, *,
         test = [row for row in rows if row["origin"] == origin]
         if not test:
             continue
-        identities = identities_at(products, origin)
-        x, y = _training_samples(products, origin, identities, horizons=horizons)
+        identities = identities_at(evaluation_products, origin)
+        x, y = _training_samples(evaluation_products, origin, identities, horizons=horizons)
         if len(x) < policy.min_train_observations:
             continue
         fold_audit.append({"origin": origin, "train_target_max": origin, "training_samples": len(x),
                            "test_target_min": min(row["target_period"] for row in test)})
-        by_id = {item.product_id: item for item in products}
+        by_id = {item.product_id: item for item in evaluation_products}
         vectors = [_feature(by_id[row["product_id"]], origin, row["target_period"], identities) for row in test]
         for name, factory in MODEL_FACTORIES.items():
             try:
@@ -171,8 +195,8 @@ def forecast_chain(products, issue, policy, incumbent, on_stage=None, *,
                 for row in test:
                     row["ml"].pop(name, None)
                 ml_failures.append({"model": name, "error": type(exc).__name__})
-    identities = identities_at(products, issue)
-    current_x, current_y = _training_samples(products, issue, identities, horizons=horizons)
+    identities = identities_at(evaluation_products, evaluation_cutoff)
+    current_x, current_y = _training_samples(evaluation_products, evaluation_cutoff, identities, horizons=horizons) if evaluation_products else ([], [])
     trainable = len(current_x) >= policy.min_train_observations
     evaluated_ml = [name for name in MODEL_FACTORIES if any(name in row["ml"] for row in rows)]
     common_ml = [row for row in rows if all(name in row["ml"] for name in evaluated_ml)
@@ -243,6 +267,8 @@ def forecast_chain(products, issue, policy, incumbent, on_stage=None, *,
     product_ml_forecasts = {}
     for item in products:
         history = item.history(issue)
+        if choices[item.product_id] is None or not history:
+            continue
         for h in horizons:
             target = add_month(issue, h)
             statistical = predict(choices[item.product_id], history, h) if history else 0.0
@@ -367,7 +393,10 @@ def forecast_chain(products, issue, policy, incumbent, on_stage=None, *,
                             "certified_wape": None, "certified_bias": None, "certification_status": "PROVISIONAL_TEMPORAL_UNKNOWN",
                             "origins": {"selection": len(origins), "certification": 0}, "folds": fold_audit,
                             "evaluation_horizons": list(evaluation_horizons), "max_folds": max_folds,
-                            "training_samples": len(current_x), "training_products": sum(bool(p.history(issue)) for p in products),
+                            "training_samples": len(current_x), "training_products": sum(bool(p.history(evaluation_cutoff)) for p in evaluation_products),
+                            "method_selection_version": "CURRENT_CONTEXT_ELIGIBILITY_V1",
+                            "unavailable_products": [{"product_id": p.product_id, "reason": "NO_CALCULABLE_CURRENT_METHOD" if p.history(issue) else "NO_CURRENT_CONTIGUOUS_HISTORY"} for p in products if choices[p.product_id] is None],
+                            "model_cutoff": issue, "observed_cutoff": evaluation_cutoff, "ml_target_basis": "OBSERVED_ONLY",
                             "feature_names": feature_names(identities), "ml_candidates": ml_candidates,
                             "available_statistical_candidates": list(stat.MODELS), "available_ml_candidates": list(MODEL_FACTORIES),
                             "retrospective_statistical_metrics": _metrics(stat_pairs), "retrospective_ml_metrics": _metrics(ml_pairs),

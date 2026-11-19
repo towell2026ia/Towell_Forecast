@@ -114,6 +114,7 @@ export interface PreviewClient {
 export class PreviewReadError extends Error { constructor(public code: string) { super(code); } }
 const safeCodes = new Set(["AUTH_REQUIRED", "SCOPE_FORBIDDEN", "REQUEST_001", "PREVIEW_DISABLED", "SALES_PERIOD_NOT_CLOSED", "FORECAST_PERIOD_NOT_CLOSED", "ORDER_PERIOD_NOT_CLOSED", "FORECAST_SOURCE_UNAVAILABLE", "ORDER_SOURCE_UNAVAILABLE", "OFFICIAL_SOURCE_MISMATCH", "EXACT_SELECTION_REQUIRED", "DUPLICATE_OBSERVATION_CONFLICT", "NO_ELIGIBLE_PRODUCTS", "INSUFFICIENT_HISTORY", "DATA_READ_FAILED", "TEMPORAL_METADATA_MISSING", "DATA_LEAKAGE_DETECTED", "STATISTICAL_FAILED", "ML_FAILED", "ENSEMBLE_FAILED", "PREVIEW_NOT_FOUND", "PREVIEW_NOT_READY", "RATE_001", "VINTAGE_PERSISTENCE_DISABLED", "OFFICIAL_PUBLICATION_DISABLED", "CHAMPION_PUBLICATION_DISABLED", "REQUIRED_SECRET_MISSING", "VINTAGE_WRITE_FAILED", "DATA_QUALITY_BLOCKED", "LINEAGE_MISMATCH", "HASH_MISMATCH"]);
 safeCodes.add("ORDER_CLOSURE_UNVERIFIED");
+safeCodes.add("PLANNING_SOURCE_UNAVAILABLE");
 export class RailwayPreviewClient implements PreviewClient {
   private controller = new AbortController();
   readonly rsAssistant?: RsAssistantClient;
@@ -185,7 +186,10 @@ export class RailwayPreviewClient implements PreviewClient {
   async createSelection(selection: ExactPreviewSelection) {
     const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     if (forecastSourceState(selection.source_context) === "INVALID") throw new PreviewReadError("OFFICIAL_SOURCE_MISMATCH");
-    if (!forecastSourceAvailable(selection.source_context)) throw new PreviewReadError(selection.source_context.forecast_block_code === "ORDER_CLOSURE_UNVERIFIED" ? "ORDER_CLOSURE_UNVERIFIED" : "ORDER_SOURCE_UNAVAILABLE");
+    if (!forecastSourceAvailable(selection.source_context)) {
+      const code = selection.source_context.forecast_block_code;
+      throw new PreviewReadError(code === "ORDER_CLOSURE_UNVERIFIED" || code === "PLANNING_SOURCE_UNAVAILABLE" ? code : "ORDER_SOURCE_UNAVAILABLE");
+    }
     if (!selection.chain_ids.length || !selection.product_ids.length || selection.chain_ids.length > 100 || selection.product_ids.length > 2000
       || [...selection.chain_ids, ...selection.product_ids].some(id => !uuid.test(id))
       || new Set(selection.chain_ids).size !== selection.chain_ids.length || new Set(selection.product_ids).size !== selection.product_ids.length

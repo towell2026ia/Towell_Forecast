@@ -181,7 +181,7 @@ class SupabaseDataProvider(DataProvider):
 
     def records(self, *, chain_id: str, product_id: str | None = None, objective: str | None = None,
                 issue_period: str | None = None, mode: str = "RETROSPECTIVE_TRAINING") -> list[dict[str, Any]]:
-        from .supabase_access import PreviewError, uuid_value, forecast_objective, forecast_cutoff
+        from .supabase_access import PreviewError, uuid_value, forecast_objective, forecast_cutoff, observed_cutoff
         from services.forecast_engine.engine import month_end
         if not self.client:
             raise PreviewError("AUTH_REQUIRED", 401)
@@ -199,6 +199,10 @@ class SupabaseDataProvider(DataProvider):
             if issue_period and issue_period > training_cutoff:
                 raise PreviewError("SALES_PERIOD_NOT_CLOSED", 409)
             issue_period = issue_period or training_cutoff
+        if context.get("planning_basis") == "OBSERVED_AND_COMMERCIAL_CLOSE":
+            # Q4 commercial closing inputs belong to the sealed scenario, never
+            # physical actuals or WAPE/Bias evaluation targets.
+            issue_period = min(issue_period or observed_cutoff(context), observed_cutoff(context))
         params = {"select": "*", "chain_id": f"eq.{chain_id}", "metric_code": f"eq.{metric}",
                   "order": "product_id.asc,period.asc"}
         if product_id:

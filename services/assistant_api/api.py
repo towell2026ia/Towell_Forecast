@@ -186,6 +186,8 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
             content["message"] = "Sin cálculo: fuente de pedidos no disponible"
         if exc.code == "ORDER_CLOSURE_UNVERIFIED":
             content["message"] = "Sin cálculo: cierre de Pedido no acreditado"
+        if exc.code == "PLANNING_SOURCE_UNAVAILABLE":
+            content["message"] = "Sin cálculo: cierre comercial no disponible"
         return JSONResponse(status_code=exc.status, content=content)
 
     @app.middleware("http")
@@ -294,6 +296,13 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
     def ready():
         if config.operational_preview_enabled:
             providers = {"data": data.health(), "persistence": storage.health(), "auth": identity.health()}
+            if local_database and local_database.sales_policy.config.get("planning_basis") == "OBSERVED_AND_COMMERCIAL_CLOSE":
+                try:
+                    local_database.validate_planning()
+                    providers["planning"] = {"status": "healthy", "provider": "sealed-unified-plan"}
+                except (PreviewError, ValueError, OSError):
+                    providers["planning"] = {"status": "not_ready", "provider": "sealed-unified-plan",
+                                             "error_code": "PLANNING_SOURCE_UNAVAILABLE"}
             if config.vintage_persistence_enabled:
                 providers["vintage_write"] = {"status": "healthy" if config.supabase_service_role_key else "not_ready",
                     "provider": "SupabaseForecastWriteRepository",

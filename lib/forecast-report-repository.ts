@@ -4,7 +4,7 @@ import { emptyFilters } from "./supabase/types";
 import type { CustomerForecast, DatabasePage, DatabaseSection, ReportCalculation, ReportDecision, ReportHorizon, ReportLive, ReportSnapshot } from "./forecast-reporting";
 import { addReportMonth, forecastTargetMonth, amount, matchesOfficialSource } from "./forecast-reporting";
 import { attachCommercial, filteredProducts, hasCommercialFilters, selectedScopeIds } from "./commercial-filters";
-import { forecastSourceAvailable, forecastHistoryAvailable, forecastObjective, sourceReadMessage } from "./official-sales-source";
+import { forecastSourceAvailable, forecastHistoryAvailable, forecastObjective, sourceReadMessage, validFulfillmentSource } from "./official-sales-source";
 import { actualMetrics, combineObservations, observationFields, observationScope, operationalArguments } from "./forecast-data";
 import { verifiedLocalChampions } from "./local-champion";
 
@@ -146,7 +146,8 @@ export class SupabaseReportReader {
   async fulfillment(filters: Filters, context: OperationalReadContext) {
     this.ensureOpen();
     if (context.fulfillment_available !== true) return [];
-    if (context.fulfillment_source !== "ESTADISTICA_BAASE" || !/^[0-9a-f]{64}$/.test(context.fulfillment_file_sha256 ?? "")) throw new Error("fulfillment_source_invalid");
+    if (!validFulfillmentSource(context)) throw new Error("fulfillment_source_invalid");
+    const percentageOnly = context.fulfillment_mode === "REPORTED_PERCENTAGE";
     const products = await filteredProducts(this.repository, filters);
     const byId = new Map(products.map(product => [product.id, product.chain_id]));
     const output: OperationalFulfillment[] = [], seen = new Set<string>();
@@ -155,8 +156,10 @@ export class SupabaseReportReader {
     for (let start = 0; start < products.length; start += 80) {
       const ids = products.slice(start, start + 80).map(product => product.id);
       for (let offset = 0; ; offset += 500) {
-        let query = this.client.rpc("operational_read_fulfillment", { ...operationalArguments(context), ...observationScope(filters, ids), p_purchase_type: filters.purchaseType ?? "RS" })
-          .select("chain_id,product_id,period,format,upc,purchase_type,order_text,delivery_text,source_reference,order_source_reference,delivery_source_reference,source_sha256,partial_period")
+        const rpc = this.client.rpc("operational_read_fulfillment", { ...operationalArguments(context), ...observationScope(filters, ids), p_purchase_type: filters.purchaseType ?? "RS" });
+        const columns = "chain_id,product_id,period,format,upc,purchase_type,order_text,delivery_text,source_reference,order_source_reference,delivery_source_reference,source_sha256,partial_period";
+        const projection = percentageOnly ? rpc.select(`${columns},reported_fill_rate_pct,reported_fill_rate_pct_text` as const) : rpc.select(columns);
+        let query = projection
           .in("product_id", ids).order("chain_id").order("product_id").order("period").range(offset, offset + 499);
         if (filters.periodRange[0]) query = query.gte("period", `${filters.periodRange[0]}-01`);
         if (filters.periodRange[1]) query = query.lte("period", `${filters.periodRange[1]}-01`);
@@ -170,7 +173,9 @@ export class SupabaseReportReader {
             || !/^20\d{2}-(0[1-9]|1[0-2])$/.test(period) || period < context.first_period || period > context.last_period
             || row.purchase_type !== (filters.purchaseType ?? "RS") || row.source_sha256 !== context.fulfillment_file_sha256
             || !decimal(row.order_text) || !decimal(row.delivery_text) || typeof row.partial_period !== "boolean" || typeof row.format !== "string" || !reference(row.upc)
-            || !reference(row.source_reference) || row.order_text !== null && !reference(row.order_source_reference) || row.delivery_text !== null && !reference(row.delivery_source_reference))
+            || !reference(row.source_reference) || row.order_text !== null && !reference(row.order_source_reference) || row.delivery_text !== null && !reference(row.delivery_source_reference)
+            || percentageOnly && (row.order_text !== null || row.delivery_text !== null || !decimal(row.reported_fill_rate_pct_text ?? null)
+              || !row.reported_fill_rate_pct_text || !(Number(row.reported_fill_rate_pct_text) > 0) || Number(row.reported_fill_rate_pct_text) !== row.reported_fill_rate_pct))
             throw new Error("fulfillment_lineage_invalid");
           seen.add(key);
           if (context.forecast_contract === "pedido-unificado-v1") {

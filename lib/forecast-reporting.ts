@@ -37,6 +37,7 @@ export function matchesOfficialSource(value: unknown, context: Pick<OperationalR
 function compatibleForecastCut(issue: string, context?: OperationalReadContext, cutoffAt?: string) {
   if (!context?.forecast_contract && context?.sales_contract !== "towell-sales-v1") return true;
   const period = issue.slice(0, 7);
+  if (context.planning_basis && period !== context.training_cutoff) return false;
   return /^20\d{2}-(0[1-9]|1[0-2])$/.test(period) && period >= context.first_period && period <= (forecastTrainingCutoff(context) ?? "")
     && (!cutoffAt || cutoffAt.slice(0, 7) === period);
 }
@@ -141,7 +142,10 @@ export function buildForecastMatrix(snapshot: ReportSnapshot, choice: ReportChoi
     }
     if (calculation && snapshot.sourceContext?.forecast_contract === "pedido-unificado-v1") {
       const bridge = calculation.input_snapshot.bridge_horizons;
-      if (!Array.isArray(bridge) || bridge.length !== 3) throw new Error("report_horizon_lineage");
+      const [year, month] = calculation.issue_period.slice(0, 7).split("-").map(Number);
+      const [startYear, startMonth] = snapshot.sourceContext.planning_start!.split("-").map(Number);
+      const bridgeLength = (startYear - year) * 12 + startMonth - month - 1;
+      if (!Array.isArray(bridge) || bridge.length !== bridgeLength) throw new Error("report_horizon_lineage");
       for (const [i, h] of bridge.entries()) {
         const period = addReportMonth(calculation.issue_period, i + 1);
         if (h?.target_period !== period || amount(h.statistical_value) === null || amount(h.ensemble_value) === null

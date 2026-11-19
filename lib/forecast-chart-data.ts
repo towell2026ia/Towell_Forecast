@@ -140,7 +140,7 @@ export function storedCommercialScope(snapshot: ReportSnapshot, filters: Filters
   const singleStat = products.length === 1 ? statCandidates[0] : undefined;
   const singleMl = products.length === 1 ? candidates.find(c => c.family === "ml") : undefined;
   return { ...source, chain_id: presentationChain, chain_name: filters.chainId ? snapshot.chains.find(chain => chain.id === filters.chainId)?.name : `${chainIds.length} cadenas autorizadas`, objective: forecastObjective(snapshot.sourceContext) ?? undefined,
-    status: "PREVIEW", issue_period: issue, latest_actual_period: snapshot.sourceContext.last_period,
+    status: "PREVIEW", issue_period: issue, latest_actual_period: snapshot.sourceContext.observed_cutoff ?? snapshot.sourceContext.last_period,
     engine_version: selected?.engine_version ?? source?.engine_version, mode: "RETROSPECTIVE_TRAINING", evaluation_mode: "RETROSPECTIVE_EVALUATION",
     source_context: snapshot.sourceContext, provisional_cold_start: undefined, products, aggregates,
     commercial_projection: { filter_key: commercialScopeKey(filters), chain_ids: chainIds, product_ids: products.map(p => p.product_id).sort(), products: products.length, statistical, ml, ensemble: statistical,

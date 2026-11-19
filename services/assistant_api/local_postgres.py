@@ -21,7 +21,8 @@ import httpx
 from .auth import AuthFailure
 from .local_hosted_auth import HostedAuthVerifier
 from .local_sales_policy import LocalSalesPolicy
-from .supabase_access import PreviewError, UNIFIED_CONTRACT
+from .reported_fulfillment import REPORTED_COLUMNS, reported_fulfillment
+from .supabase_access import COMMERCIAL_CLOSE_BASIS, PreviewError, UNIFIED_CONTRACT, require_sales_context
 from .unified_plan_reader import pinned_run, report_records
 
 NAME = re.compile(r"[a-z][a-z0-9_]*\Z")
@@ -92,6 +93,24 @@ class LocalPostgresGateway:
         self.transport = LocalSQLTransport(self)
         with self.connect():
             pass
+        self.validate_planning()
+
+    def validate_planning(self):
+        """Startup/use proof for G6; no commercial rows or permissions bypass."""
+        if self.sales_policy.config.get("planning_basis") != COMMERCIAL_CLOSE_BASIS:
+            return None
+        with self.connect() as connection, connection.transaction():
+            connection.execute("set transaction read only")
+            actual = connection.execute("""select source_hash,generation,
+                to_char(first_period,'YYYY-MM') first_period,to_char(last_period,'YYYY-MM') last_period
+                from public.official_source_current where singleton""").fetchall()
+            if len(actual) != 1:
+                raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 503)
+            context = self.sales_policy.context(actual[0])
+            require_sales_context(context, required=True)
+            run = pinned_run(self.config.get("local_champion_planning_run"), context)
+            return {"source_hash": context["source_hash"], "generation": context["generation"],
+                    "scenario_hash": context["scenario_hash"], "planning_run_id": run["run_id"]}
 
     def connect(self):
         import psycopg
@@ -148,6 +167,8 @@ class LocalPostgresGateway:
                 "message": "Sin cálculo: fuente de ventas no disponible" if exc.code == "SALES_SOURCE_UNAVAILABLE"
                 else "Sin cálculo: fuente de pedidos no disponible" if exc.code == "ORDER_SOURCE_UNAVAILABLE"
                 else "Sin cálculo: cierre de Pedido no acreditado" if exc.code == "ORDER_CLOSURE_UNVERIFIED"
+                else "Sin cálculo: cierre comercial no disponible" if exc.code == "PLANNING_SOURCE_UNAVAILABLE"
+                else "Porcentaje reportado de Fill Rate no disponible" if exc.code == "FILL_RATE_REPORT_UNAVAILABLE"
                 else "Fuente anterior excluida; se requiere la fuente de ventas autorizada"})
         except Exception as exc:
             import psycopg
@@ -209,7 +230,14 @@ class LocalPostgresGateway:
             projection = sql.SQL("*") if fields == ["*"] else sql.SQL(",").join(map(sql.Identifier, fields))
             conditions = []
             result_table = resource in {"forecast_calculations", "forecast_calculation_horizons"}
-            if result_table and sales_context and sales_context.get("forecast_contract") == UNIFIED_CONTRACT:
+            if (resource == "rpc/operational_read_fulfillment" and sales_context
+                    and sales_context.get("fulfillment_mode") == "REPORTED_PERCENTAGE"):
+                visible = c.execute("select * from public.operational_read_catalog(%s,%s)",
+                    (sales_context["source_hash"], sales_context["generation"])).fetchall()
+                records = reported_fulfillment(self.sales_policy.config, sales_context, supplied, visible)
+                origin = sql.SQL("(select * from jsonb_to_recordset(%s::jsonb) as r({}))").format(sql.SQL(REPORTED_COLUMNS))
+                values = [json.dumps(records, allow_nan=False)]
+            elif result_table and sales_context and sales_context.get("forecast_contract") == UNIFIED_CONTRACT:
                 # This read is inside the same read-only, authenticated RLS
                 # transaction. A browser filter can narrow, never grant, access.
                 requested = params.get("product_id", "")
