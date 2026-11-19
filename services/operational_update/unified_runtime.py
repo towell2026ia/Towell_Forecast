@@ -26,6 +26,21 @@ def uid(seed):
     return str(uuid5(NAMESPACE_URL, "towell-unified:" + seed))
 
 
+def catalog_origin_batch(connection, *, chain_id, file_sha256, candidate_id, profile_version_id, actor):
+    """One original file/chain provenance survives a new planning scenario."""
+    previous = connection.execute("""select id::text,filename from public.import_batches
+        where chain_id=%s and sha256=%s""", (chain_id, file_sha256)).fetchone()
+    if previous:
+        if previous["filename"] != "unified-catalog-local-bootstrap":
+            raise ValueError("unified_catalog_existing_origin_not_accredited")
+        return previous["id"]
+    connection.execute("""insert into public.import_batches
+        (id,chain_id,profile_version_id,filename,sha256,period,uploaded_by)
+        values(%s,%s,%s,'unified-catalog-local-bootstrap',%s,'2024-01-01',%s)""",
+        (candidate_id, chain_id, profile_version_id, file_sha256, actor))
+    return candidate_id
+
+
 def commercial_attributes(row, existing=None):
     """Apply only approved generic prefixes and presentation equivalences."""
     original = row["modelo"]

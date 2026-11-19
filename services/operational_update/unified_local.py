@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 
 from services.operational_versions.official_source import AuthorizedOfficialConnection, COMMERCIAL_FIELDS, validate_package
-from .unified_runtime import uid, norm
+from .unified_runtime import uid, norm, catalog_origin_batch
 
 
 def build_payload(runtime, previous, installed_sources, *, source_periods):
@@ -123,10 +123,9 @@ class UnifiedLocalWriter(AuthorizedOfficialConnection):
             mapping = {"scope":scope,"products":list(mapped.values()),"contract":"pedido-unificado-v1","source_file_sha256":document["source"]["sha256"]}
             c.execute("""insert into public.import_profile_versions(id,profile_id,chain_id,version,mapping_json,required_columns,created_by)
                 values(%s,%s,%s,(select coalesce(max(version),0)+1 from public.import_profile_versions where profile_id=%s),%s::jsonb,'[]'::jsonb,%s) on conflict(id) do nothing""",(version_id,profile_id,chain,profile_id,json.dumps(mapping,ensure_ascii=False),actor))
-            bootstrap_batch = uid("catalog-bootstrap-batch:" + payload["source_hash"] + ":" + chain)
-            c.execute("""insert into public.import_batches(id,chain_id,profile_version_id,filename,sha256,period,uploaded_by)
-                values(%s,%s,%s,'unified-catalog-local-bootstrap',%s,'2024-01-01',%s) on conflict(id) do nothing""",
-                (bootstrap_batch,chain,version_id,document["source"]["sha256"],actor))
+            bootstrap_batch = catalog_origin_batch(c, chain_id=chain, file_sha256=document["source"]["sha256"],
+                candidate_id=uid("catalog-bootstrap-batch:" + payload["source_hash"] + ":" + chain),
+                profile_version_id=version_id, actor=actor)
             for identity in identities:
                 if identity["state"] != "NEW_LOCAL_SOURCE_IDENTITY":
                     continue

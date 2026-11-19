@@ -3,6 +3,7 @@ import unittest
 
 from services.operational_update.unified_scenario import build_close_runtime, validate_scenario
 from services.operational_update.unified_source import CONTRACT, MASTER_SHA256
+from services.operational_update.unified_runtime import catalog_origin_batch
 
 
 def fixture(period="2026-09", observed="0", definitive="99", proposal="88", complete=True):
@@ -90,6 +91,41 @@ class UnifiedScenarioTests(unittest.TestCase):
         document["rows"].append(deepcopy(document["rows"][0]))
         with self.assertRaisesRegex(ValueError, "DUPLICATE_PRODUCT_MONTH"):
             build_close_runtime(document, bindings)
+
+
+class CatalogOriginRegressionTests(unittest.TestCase):
+    class Connection:
+        def __init__(self, previous):
+            self.previous, self.calls = previous, []
+        def execute(self, statement, parameters):
+            self.calls.append((statement, parameters))
+            return self
+        def fetchone(self):
+            return self.previous
+
+    def call(self, connection):
+        return catalog_origin_batch(connection, chain_id="CHAIN", file_sha256="a" * 64,
+            candidate_id="NEW_G6_ID", profile_version_id="NEW_G6_PROFILE", actor="ADMIN")
+
+    def test_same_master_chain_reuses_original_g5_batch_without_mutating_it(self):
+        c = self.Connection({"id": "ORIGINAL_G5_ID", "filename": "unified-catalog-local-bootstrap"})
+        self.assertEqual(self.call(c), "ORIGINAL_G5_ID")
+        self.assertEqual(len(c.calls), 1)
+        self.assertTrue(c.calls[0][0].strip().startswith("select"))
+        self.assertEqual(c.calls[0][1], ("CHAIN", "a" * 64))
+
+    def test_unrelated_original_batch_is_a_contradiction_not_an_implicit_rebind(self):
+        c = self.Connection({"id": "UNRELATED", "filename": "OTHER_UPLOAD.xlsx"})
+        with self.assertRaisesRegex(ValueError, "existing_origin_not_accredited"):
+            self.call(c)
+        self.assertEqual(len(c.calls), 1)
+
+    def test_first_import_creates_one_batch_with_original_file_provenance(self):
+        c = self.Connection(None)
+        self.assertEqual(self.call(c), "NEW_G6_ID")
+        self.assertEqual(len(c.calls), 2)
+        self.assertIn("insert into public.import_batches", c.calls[1][0])
+        self.assertEqual(c.calls[1][1], ("NEW_G6_ID", "CHAIN", "NEW_G6_PROFILE", "a" * 64, "ADMIN"))
 
 
 if __name__ == "__main__":
