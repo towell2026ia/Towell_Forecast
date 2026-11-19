@@ -20,6 +20,7 @@ import type { VintageCapabilities, VintageDetail, VintageSummary } from "@/lib/f
 import { forecastObjective, forecastSourceAvailable, forecastTrainingCutoff, forecastUnavailableMessage, isOrderSource, officialSourceKey, salesUnavailableMessage, sourceReadMessage } from "@/lib/official-sales-source";
 import { buildForecastMatrix, emptyReportChoice } from "@/lib/forecast-reporting";
 import { localChampionSelection } from "@/lib/local-champion";
+import { championPublicationEnabled } from "@/lib/hosted-g6";
 
 const safeError = (error: unknown) => error instanceof PreviewReadError ? error.code : "DATA_READ_FAILED";
 const operationalErrorMessage = (code: string) => ({
@@ -66,7 +67,7 @@ export function ForecastEnginesView({ scope, onVisit }: { scope: string; onVisit
   const [localVisibility, setLocalVisibility] = useState<SeriesVisibility>({ ...defaultVisibility });
   const [tab, setTab] = useState<EngineTab>("summary");
   const [e4Capabilities, setE4Capabilities] = useState<VintageCapabilities | null>(null);
-  const championSelection = useMemo(() => scopeSnapshot && e4Capabilities?.local_champion_publication ? localChampionSelection(scopeSnapshot) : null, [scopeSnapshot, e4Capabilities?.local_champion_publication]);
+  const championSelection = useMemo(() => scopeSnapshot && championPublicationEnabled(e4Capabilities) ? localChampionSelection(scopeSnapshot) : null, [scopeSnapshot, e4Capabilities]);
   const boundedPreview = Boolean(client?.createSelection && e4Capabilities?.local_bounded_preview && isOrderSource(stored.data?.sourceContext));
   const aggregateReadOnly = commercialMode && !boundedPreview;
   const calculationReadOnly = readOnly && !boundedPreview;

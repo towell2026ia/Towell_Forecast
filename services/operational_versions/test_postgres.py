@@ -360,8 +360,11 @@ class GateBPostgres(unittest.TestCase):
         self.assertEqual(hashlib.sha256((REPO / retrospective_path).read_text(encoding='utf-8').encode()).hexdigest(), reviewed_calendar_sha256)
         approved_pedido = {engine_path, retrospective_path, 'lib/statistical-preview-data.ts',
                            'lib/local-champion.ts'}
+        # FT-PUBLICAR-G6-01 authorizes only this explicit hosted read/Champion
+        # transport selector; no engine or production migration is excepted.
+        approved_hosted_g6 = {'lib/hosted-g6.ts'}
         after_gateb=subprocess.check_output(['git','diff','--name-only',gateb,'--',*prefixes],cwd=REPO,text=True)
-        self.assertEqual(set(after_gateb.splitlines()) - approved_prd3a9 - approved_portal_rs - approved_rs_assistant - approved_localhost - approved_hybrid_auth - approved_stored_scope_reads - approved_towell_sales - approved_pedido,set())
+        self.assertEqual(set(after_gateb.splitlines()) - approved_prd3a9 - approved_portal_rs - approved_rs_assistant - approved_localhost - approved_hybrid_auth - approved_stored_scope_reads - approved_towell_sales - approved_pedido - approved_hosted_g6,set())
         private=os.environ.get('GATEB_PRIVATE_CANDIDATE')
         if private:
             identities=json.loads((Path(private)/'Identidades.json').read_text(encoding='utf-8'))

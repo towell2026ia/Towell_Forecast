@@ -51,7 +51,7 @@ export function operationalPeriodsSheets(snapshot: ReportSnapshot, dashboard: Re
           const key = `Champion local · ${row.product.chain_id}/${row.product.product_id}`;
           return [[`${key} · ID`, row.id], [`${key} · Corrida`, row.run_id], [`${key} · Año`, row.planning_year],
             [`${key} · Alternativa`, championFamilyNames[row.candidate_family]], [`${key} · Método`, row.product.model], [`${key} · Origen`, row.product.origin],
-            [`${key} · Publicación oficial`, "No; elección operativa local"],
+            [`${key} · Publicación oficial`, row.publication_scope],
             [`${key} · Elegibilidad técnica`, row.product.technical_eligible === true ? "Sí" : row.product.technical_eligible === false ? "No" : "Sin dato"],
             [`${key} · Estado técnico`, row.product.technical_status ?? null], [`${key} · Motivo técnico`, row.product.technical_reason ?? null],
             [`${key} · Fuente SHA-256`, row.source_context.source_hash], [`${key} · Actualización`, row.source_context.generation],

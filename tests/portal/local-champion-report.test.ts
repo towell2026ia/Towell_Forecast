@@ -94,6 +94,7 @@ describe("One pinned Champion read for Períodos and XLSX", () => {
     expect(trace.rows).toContainEqual(["Distancia desde el cierre · 2027-12", 15]);
     expect(trace.rows).toContainEqual([`Champion local · ${chain}/${alpha} · 2027-01`, "80.22"]);
     expect(trace.rows).toContainEqual([`Champion local · ${chain}/${alpha} · Usuario`, "synthetic-publisher"]);
+    expect(trace.rows).toContainEqual([`Champion local · ${chain}/${alpha} · Publicación oficial`, "LOCAL_OPERATIONAL"]);
     expect(trace.rows).toContainEqual(["Champion local · cobertura", "1/2"]);
     expect(planningXlsx(sheets).length).toBeGreaterThan(1000);
     expect(f.promoteChampion).not.toHaveBeenCalled();

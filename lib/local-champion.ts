@@ -1,6 +1,7 @@
 import type { ChampionFamily, LocalChampions, LocalChampionQuery } from "./forecast-preview";
 import { chooseCalculations, emptyReportChoice, matchesOfficialSource, type ReportSnapshot } from "./forecast-reporting";
 import { forecastSourceState } from "./official-sales-source";
+import { championPublicationOrigin } from "./hosted-g6";
 
 export const championFamilies: ChampionFamily[] = ["STATISTICAL", "ML", "ENSEMBLE", "COMMERCIAL_PLAN"];
 export const championFamilyNames: Record<ChampionFamily, string> = { STATISTICAL: "Estadístico", ML: "Machine Learning", ENSEMBLE: "Ensemble", COMMERCIAL_PLAN: "Plan comercial" };
@@ -20,8 +21,8 @@ export function verifiedLocalChampions(snapshot: ReportSnapshot, result: LocalCh
   const byPeriod = new Map(snapshot.horizons.map(row => [`${row.calculation_id}/${row.horizon}`, row]));
   for (const row of result.products) {
     const product = row.product;
-    if (!row.id || !row.run_id || row.objective !== "Pedido" || row.environment !== "localhost" || row.status !== "ACTIVE"
-      || row.publication_scope !== "LOCAL_OPERATIONAL" || row.official_publication !== false
+    if (!row.id || !row.run_id || row.objective !== "Pedido" || !championPublicationOrigin(row) || row.status !== "ACTIVE"
+      || row.official_publication !== false
       || row.unit !== "PIEZAS" || row.cutoff !== source.training_cutoff || row.planning_year !== result.planning_year
       || !sha(row.run_content_digest) || !sha(row.run_file_sha256) || !row.selected_by
       || !Number.isFinite(Date.parse(row.selected_at)) || !Number.isFinite(Date.parse(row.run_emitted_at))

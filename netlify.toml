@@ -6,6 +6,8 @@
 [build.environment]
   NODE_VERSION = "22"
   NEXT_PUBLIC_SITE_URL = "https://towell-forecastia.netlify.app"
+  NEXT_PUBLIC_HOSTED_G6_ENABLED = "true"
+  NEXT_PUBLIC_LOCAL_POSTGRES_ENABLED = "false"
 
 # Netlify's automatically managed Next/OpenNext adapter handles SSR and routes.
 # Supabase public URL/key are configured by the owner in Netlify, not committed.

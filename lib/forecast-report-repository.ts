@@ -7,6 +7,7 @@ import { attachCommercial, filteredProducts, hasCommercialFilters, selectedScope
 import { forecastSourceAvailable, forecastHistoryAvailable, forecastObjective, sourceReadMessage, validFulfillmentSource } from "./official-sales-source";
 import { actualMetrics, combineObservations, observationFields, observationScope, operationalArguments } from "./forecast-data";
 import { verifiedLocalChampions } from "./local-champion";
+import { championPublicationEnabled, hostedG6Enabled, operationalTable } from "./hosted-g6";
 
 const calculationFields = "id,chain_id,product_id,objective,calculation_no,calculation_code,issue_period,cutoff_at,status,created_at,created_by,preview_id,data_snapshot_hash,content_hash,input_snapshot,candidate_metrics,research_snapshot,suggested_reference,scope_leader,evidence_mode,engine_version,git_sha,recalculation_reason";
 const horizonFields = "id,calculation_id,chain_id,product_id,horizon,target_period,statistical_value,ml_value,ensemble_value,ensemble_ml_component,statistical_model,ml_model,ensemble_ml_model,statistical_weight,ml_weight,p10,p50,p90,p95,band_basis,band_observations,band_status";
@@ -20,6 +21,7 @@ export class SupabaseReportReader {
     return includeForecasts ? query : query.in("metric_code", actualMetrics);
   }
   private async read<T>(table: string, fields: string, filters: Filters, products?: Product[], pin?: { context: OperationalReadContext; includeForecasts: boolean }) {
+    if (hostedG6Enabled() && ["forecast_selection_events", "forecast_live_evaluations", "forecast_learning_events"].includes(table)) return [] as T[];
     if (pin && !forecastHistoryAvailable(pin.context)) return [] as T[];
     this.ensureOpen();
     const output: T[] = [];
@@ -29,7 +31,7 @@ export class SupabaseReportReader {
     const chunks = products ? Array.from({ length: Math.ceil(products.length / 80) }, (_, i) => products.slice(i * 80, i * 80 + 80).map(p => p.id)) : [null];
     for (const ids of chunks) {
       for (let offset = 0; offset < 100000; offset += 500) {
-        let query = (pin ? this.observations(pin.context, fields, pin.includeForecasts, filters, ids ?? undefined) : this.client.from(table).select(fields))
+        let query = (pin ? this.observations(pin.context, fields, pin.includeForecasts, filters, ids ?? undefined) : this.client.from(operationalTable(table)).select(fields))
           .order(pin ? "observation_id" : "id").range(offset, offset + 499);
         if (scopes) query = query.in("chain_id", scopes);
         if (ids) query = query.in("product_id", ids);
@@ -84,7 +86,7 @@ export class SupabaseReportReader {
       }
     }
     const customers: CustomerForecast[] = [];
-    const provisionals = forecastSourceAvailable(context) && this.repository.previews?.provisionalForecasts && products.length ?
+    const provisionals = !hostedG6Enabled() && forecastSourceAvailable(context) && this.repository.previews?.provisionalForecasts && products.length ?
       (await Promise.all((scopes ?? [null]).map(id => this.repository.previews!.provisionalForecasts!(id, filters.productId, context)))).flat() : [];
     const allowed = new Map(products.map(p => [p.id, p.chain_id]));
     for (const row of [...calculations, ...horizons, ...decisions, ...live, ...customers]) {
@@ -92,7 +94,7 @@ export class SupabaseReportReader {
     }
     const snapshot: ReportSnapshot = { products, chains, categories, calculations, horizons, decisions, live, customers, sourceContext: context,
       provisionals: provisionals.filter(p => allowed.get(p.product_id) === p.chain_id && matchesOfficialSource(p.source_context, context)), capabilities };
-    if (context.forecast_contract === "pedido-unificado-v1" && forecastSourceAvailable(context) && capabilities.local_champion_publication) {
+    if (context.forecast_contract === "pedido-unificado-v1" && forecastSourceAvailable(context) && championPublicationEnabled(capabilities)) {
       if (!this.repository.previews?.currentChampion) throw new Error("champion_reader_unavailable");
       const year = Number(context.planning_start?.slice(0, 4));
       const current = products.length ? await this.repository.previews.currentChampion({ source_context: context, planning_year: year,

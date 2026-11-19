@@ -3,6 +3,7 @@ import { assistantScopeIsValid, parseRsAssistantResponse, type RsAssistantClient
 import type { OperationalReadContext } from "./supabase/types";
 import { matchesOfficialSource } from "./forecast-reporting";
 import { forecastObjective, forecastSourceAvailable, forecastSourceState, forecastTrainingCutoff, isOrderSource, type ForecastObjective } from "./official-sales-source";
+import { assertHostedG6Context, championPublicationEnabled, championPublicationOrigin, hostedG6Enabled } from "./hosted-g6";
 export type PreviewHorizon = { horizon: number; target_period: string; statistical_value: number; ml_value: number | null; forecast_towell: number; p10: number | null; p50: number | null; p90: number | null; p95: number | null;
   statistical_model?: string; ml_model?: string | null; ensemble_ml_model?: string | null; ensemble_ml_component?: number | null; statistical_weight?: number | null; ml_weight?: number | null;
   model_strategy?: string; classification?: string; forecast_status?: string; certification_status?: string; confidence?: string; band_basis?: "PRODUCT" | "CATEGORY" | "CHAIN" | "INSUFFICIENT"; band_observations?: number; band_status?: "AVAILABLE" | "INSUFFICIENT_BAND_EVIDENCE" };
@@ -52,13 +53,13 @@ export type VintageDetail = { vintage: VintageSummary; run: { id: string; chain_
   inputs: { id: string; monthly_observation_id: string | null; evidence_mode: string }[];
   gates: { id: string; gate_type: string; status: string; policy_version: string; observed: number | null; target: number | null }[] };
 export type VintageCapabilities = { vintage_persistence: boolean; official_publication: boolean; champion_publication: boolean;
-  forecast_calculation_history?: boolean; forecast_selection?: boolean; capture_center?: boolean; live_learning?: boolean; local_bounded_preview?: boolean; local_champion_publication?: boolean };
+  forecast_calculation_history?: boolean; forecast_selection?: boolean; capture_center?: boolean; live_learning?: boolean; local_bounded_preview?: boolean; local_champion_publication?: boolean; hosted_champion_publication?: boolean };
 export type ChampionFamily = "STATISTICAL" | "ML" | "ENSEMBLE" | "COMMERCIAL_PLAN";
 export type LocalChampionQuery = { source_context: OperationalReadContext; planning_year: number; chain_ids: string[]; product_ids: string[] };
 export type LocalChampionRequest = LocalChampionQuery & { run_id: string; candidate_family: ChampionFamily; confirm: true; comment: string };
 export type LocalChampionRecord = { id: string; run_id: string; candidate_family: ChampionFamily; source_context: OperationalReadContext;
-  planning_year: number; selected_by: string; selected_at: string; objective: "Pedido"; environment: "localhost"; status: "ACTIVE";
-  publication_scope: "LOCAL_OPERATIONAL"; official_publication: false;
+  planning_year: number; selected_by: string; selected_at: string; objective: "Pedido"; environment: "localhost" | "hosted"; status: "ACTIVE";
+  publication_scope: "LOCAL_OPERATIONAL" | "HOSTED_OPERATIONAL"; official_publication: false;
   run_content_digest: string; run_file_sha256: string; run_emitted_at: string; cutoff: string; unit: "PIEZAS";
   product: { product_id: string; chain_id: string; candidate_family: ChampionFamily; model: string; origin: string;
     technical_eligible?: boolean; technical_status?: string | null; technical_reason?: string | null; technical_metrics?: Record<string, unknown> | null;
@@ -119,7 +120,7 @@ export class RailwayPreviewClient implements PreviewClient {
   private controller = new AbortController();
   readonly rsAssistant?: RsAssistantClient;
   get readOnly() {
-    return process.env.NODE_ENV === "development" && process.env.NEXT_PUBLIC_LOCAL_POSTGRES_ENABLED === "true";
+    return hostedG6Enabled() || process.env.NODE_ENV === "development" && process.env.NEXT_PUBLIC_LOCAL_POSTGRES_ENABLED === "true";
   }
   private requireWritable() {
     this.apiOrigin();
@@ -149,6 +150,7 @@ export class RailwayPreviewClient implements PreviewClient {
     if (error && ["SALES_SOURCE_UNAVAILABLE", "FORECAST_SOURCE_UNAVAILABLE", "ORDER_SOURCE_UNAVAILABLE", "OFFICIAL_SOURCE_MISMATCH"].includes(error.code)) throw new PreviewReadError(error.code);
     if (error || !source || !/^[0-9a-f]{64}$/.test(source.source_hash) || !Number.isSafeInteger(source.generation)) throw new PreviewReadError("DATA_READ_FAILED");
     if (forecastSourceState(source) === "INVALID") throw new PreviewReadError("OFFICIAL_SOURCE_MISMATCH");
+    try { assertHostedG6Context(source); } catch { throw new PreviewReadError("OFFICIAL_SOURCE_MISMATCH"); }
     if (context && !matchesOfficialSource(source, context)) throw new PreviewReadError("DATA_READ_FAILED");
     return source;
   }
@@ -269,15 +271,16 @@ export class RailwayPreviewClient implements PreviewClient {
     const origin = this.apiOrigin();
     const response = await fetch(origin + "/api/ready", { method: "GET", credentials: "omit", cache: "no-store", signal: this.controller.signal });
     const result = await response.json() as Partial<VintageCapabilities>;
-    return { vintage_persistence: response.ok && result.vintage_persistence === true,
-      official_publication: response.ok && result.official_publication === true,
-      champion_publication: response.ok && result.champion_publication === true,
+    return { vintage_persistence: !hostedG6Enabled() && response.ok && result.vintage_persistence === true,
+      official_publication: !hostedG6Enabled() && response.ok && result.official_publication === true,
+      champion_publication: !hostedG6Enabled() && response.ok && result.champion_publication === true,
       forecast_calculation_history: response.ok && result.forecast_calculation_history === true,
-      local_bounded_preview: response.ok && result.local_bounded_preview === true,
-      local_champion_publication: response.ok && result.local_champion_publication === true,
-      forecast_selection: response.ok && result.forecast_selection === true,
-      capture_center: response.ok && result.capture_center === true,
-      live_learning: response.ok && result.live_learning === true };
+      local_bounded_preview: !hostedG6Enabled() && response.ok && result.local_bounded_preview === true,
+      local_champion_publication: !hostedG6Enabled() && response.ok && result.local_champion_publication === true,
+      hosted_champion_publication: hostedG6Enabled() && response.ok && result.hosted_champion_publication === true,
+      forecast_selection: !hostedG6Enabled() && response.ok && result.forecast_selection === true,
+      capture_center: !hostedG6Enabled() && response.ok && result.capture_center === true,
+      live_learning: !hostedG6Enabled() && response.ok && result.live_learning === true };
   }
   private async e4<T>(path: string, body?: unknown, idempotencyKey?: string, signal?: AbortSignal): Promise<T> {
     const origin = this.apiOrigin();
@@ -300,6 +303,7 @@ export class RailwayPreviewClient implements PreviewClient {
   }
   async provisionalForecasts(chainId: string | null, productId: string | null, context?: OperationalReadContext) {
     const source = await this.officialSource(context);
+    if (hostedG6Enabled()) return [];
     if (!forecastSourceAvailable(source)) return [];
     const rows: import("./forecast-reporting").ProvisionalForecast[] = [];
     for (let offset = 0; offset < 10000; offset += 100) {
@@ -328,6 +332,7 @@ export class RailwayPreviewClient implements PreviewClient {
     return result.selection_event_id;
   }
   async currentSelection(chainId: string, productId: string) {
+    if (hostedG6Enabled()) return null;
     const result = await this.e4<{ selection: (SelectionEvent & { calculation_code: string; issue_period: string }) | null }>(
       `/api/forecast/current-selection?chain_id=${encodeURIComponent(chainId)}&product_id=${encodeURIComponent(productId)}`);
     return result.selection;
@@ -375,7 +380,10 @@ export class RailwayPreviewClient implements PreviewClient {
   freezeVintage(vintageId: string) { return this.writeVintage(`/api/forecast/vintages/${encodeURIComponent(vintageId)}/freeze`, {}); }
   publishVintage(vintageId: string, comment: string) { return this.writeVintage(`/api/forecast/vintages/${encodeURIComponent(vintageId)}/publish`, { confirm: true, comment }); }
   private localChampionScope(query: LocalChampionQuery) {
-    if (!this.readOnly || this.apiOrigin() !== "http://127.0.0.1:8000") throw new PreviewReadError("LOCAL_CHAMPION_DISABLED");
+    if (hostedG6Enabled()) {
+      if (!this.readOnly || this.apiOrigin() !== "https://towellforecast-production.up.railway.app") throw new PreviewReadError("HOSTED_CHAMPION_DISABLED");
+      try { assertHostedG6Context(query.source_context); } catch { throw new PreviewReadError("CHAMPION_SOURCE_INELIGIBLE"); }
+    } else if (!this.readOnly || this.apiOrigin() !== "http://127.0.0.1:8000") throw new PreviewReadError("LOCAL_CHAMPION_DISABLED");
     if (query.source_context.forecast_contract !== "pedido-unificado-v1" || !forecastSourceAvailable(query.source_context)
       || forecastSourceState(query.source_context) !== "AVAILABLE") throw new PreviewReadError("CHAMPION_SOURCE_INELIGIBLE");
     const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -391,12 +399,14 @@ export class RailwayPreviewClient implements PreviewClient {
     const source = await this.officialSource(query.source_context);
     const params = new URLSearchParams({ planning_year: String(query.planning_year) });
     query.chain_ids.forEach(id => params.append("chain_ids", id));
+    if (hostedG6Enabled()) query.product_ids.forEach(id => params.append("product_ids", id));
     const result = await this.e4<LocalChampions>(`/api/forecast/champion?${params}`);
     if (!matchesOfficialSource(result.source_context, source) || result.planning_year !== query.planning_year
       || !Array.isArray(result.products) || result.covered !== result.products.length || !Number.isSafeInteger(result.eligible) || result.eligible < query.product_ids.length
+      || hostedG6Enabled() && (result.eligible !== query.product_ids.length || result.products.some(row => !query.product_ids.includes(row.product?.product_id)))
       || new Set(result.products.map(row => row.product?.product_id)).size !== result.products.length
-      || result.products.some(row => !row.id || !row.run_id || row.objective !== "Pedido" || row.environment !== "localhost"
-        || row.status !== "ACTIVE" || row.publication_scope !== "LOCAL_OPERATIONAL" || row.official_publication !== false
+      || result.products.some(row => !row.id || !row.run_id || row.objective !== "Pedido" || !championPublicationOrigin(row)
+        || row.status !== "ACTIVE" || row.official_publication !== false
         || row.planning_year !== query.planning_year || !matchesOfficialSource(row.source_context, source)
         || !query.chain_ids.includes(row.product?.chain_id)
         || !Array.isArray(row.product.horizons) || row.product.horizons.length !== 12
@@ -413,7 +423,7 @@ export class RailwayPreviewClient implements PreviewClient {
     if (request.confirm !== true || !["STATISTICAL", "ML", "ENSEMBLE", "COMMERCIAL_PLAN"].includes(request.candidate_family)
       || !request.run_id || !request.comment.trim() || !idempotencyKey) throw new PreviewReadError("REQUEST_001");
     const source = await this.officialSource(request.source_context);
-    if (!(await this.vintageCapabilities()).local_champion_publication) throw new PreviewReadError("LOCAL_CHAMPION_DISABLED");
+    if (!championPublicationEnabled(await this.vintageCapabilities())) throw new PreviewReadError(hostedG6Enabled() ? "HOSTED_CHAMPION_DISABLED" : "LOCAL_CHAMPION_DISABLED");
     const payload: LocalChampionRequest = { source_context: source, planning_year: request.planning_year, run_id: request.run_id,
       candidate_family: request.candidate_family, chain_ids: request.chain_ids, product_ids: request.product_ids,
       confirm: true, comment: request.comment };

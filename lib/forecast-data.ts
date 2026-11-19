@@ -9,6 +9,7 @@ import { attachCommercial, filteredProducts, hasCommercialFilters, matchesChainS
 import { forecastHistoryAvailable, forecastSourceState } from "./official-sales-source";
 import { leafScopeIds, matchesOfficialSource } from "./forecast-reporting";
 import { exactQuantity } from "./periods-dashboard";
+import { assertHostedG6Context, operationalTable } from "./hosted-g6";
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 type ProductMapping = { id: string; identifier_mappings?: [string | null, string | null][] };
@@ -93,6 +94,7 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
     if (error || !context || !/^[0-9a-f]{64}$/.test(context.source_hash) || !Number.isSafeInteger(context.generation) || context.generation < 0
         || !/^20\d{2}-(0[1-9]|1[0-2])$/.test(context.first_period) || !/^20\d{2}-(0[1-9]|1[0-2])$/.test(context.last_period) || context.first_period > context.last_period) throw new Error("official_source_unavailable");
     if (forecastSourceState(context) === "INVALID") throw new Error("OFFICIAL_SOURCE_MISMATCH");
+    assertHostedG6Context(context);
     return context;
   }
   private async currentContext(context?: OperationalReadContext) {
@@ -150,7 +152,7 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
   }
   private async loadMappings() {
     if (this.metadata) return this.metadata;
-    const versions = await this.rows<{ chain_id: string; mapping_json: Mapping }[]>(this.client.from("import_profile_versions").select("chain_id,mapping_json").order("version", { ascending: false }).limit(1000).abortSignal(this.controller.signal), "getProducts", "import_profile_versions");
+    const versions = await this.rows<{ chain_id: string; mapping_json: Mapping }[]>(this.client.from(operationalTable("import_profile_versions")).select("chain_id,mapping_json").order("version", { ascending: false }).limit(1000).abortSignal(this.controller.signal), "getProducts", "import_profile_versions");
     const mapping = new Map<string, Mapping>();
     for (const version of versions) if (!mapping.has(version.chain_id)) mapping.set(version.chain_id, version.mapping_json);
     this.metadata = mapping; return mapping;
@@ -166,7 +168,7 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
     return task;
   }
   private async loadChains(context: OperationalReadContext) {
-    const masters = await this.rows<Omit<Chain, "has_history" | "parentId" | "scopeType">[]>(this.client.from("chains").select("id,code,name,status").order("name").limit(1000).abortSignal(this.controller.signal), "getVisibleChains", "chains");
+    const masters = await this.rows<Omit<Chain, "has_history" | "parentId" | "scopeType">[]>(this.client.from(operationalTable("chains")).select("id,code,name,status").order("name").limit(1000).abortSignal(this.controller.signal), "getVisibleChains", "chains");
     const mappings = await this.getMappings();
     const result: Chain[] = [];
     // HEAD counts, not raw facts; no per-product query or invented has_history column.
@@ -192,7 +194,7 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
     return result;
   }
   async getCategories(chainId?: string | null) {
-    let query = this.client.from("categories").select("id,chain_id,name").order("name").limit(1000);
+    let query = this.client.from(operationalTable("categories")).select("id,chain_id,name").order("name").limit(1000);
     if (chainId) query = query.eq("chain_id", chainId);
     return this.rows<Category[]>(query.abortSignal(this.controller.signal), "getCategories", "categories");
   }
@@ -203,7 +205,7 @@ export class SupabaseForecastReadRepository implements ForecastReadRepository {
       const catalog: Product[] = [];
       // Small RLS catalog only; facts are never preloaded into browser memory.
       for (let offset = 0; ; offset += 250) {
-        const page = await this.rows<Omit<Product, "identifiers">[]>(this.client.from("products").select("id,chain_id,category_id,product_code,variant_code,description").order("id").range(offset, offset + 249).abortSignal(this.controller.signal), "getProducts", "products", "catalog_page");
+        const page = await this.rows<Omit<Product, "identifiers">[]>(this.client.from(operationalTable("products")).select("id,chain_id,category_id,product_code,variant_code,description").order("id").range(offset, offset + 249).abortSignal(this.controller.signal), "getProducts", "products", "catalog_page");
         catalog.push(...page.map(p => ({ ...p, identifiers: identifiers.get(p.id)?.identifier_mappings ?? [] })));
         if (page.length < 250) break;
       }
