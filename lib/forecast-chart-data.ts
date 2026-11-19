@@ -270,7 +270,7 @@ export function exactSelectionScope(job: PreviewJob, snapshot: ReportSnapshot, f
   const trainingProducts = trainingCounts.every((count, index) => Number.isSafeInteger(count) && count! >= 0 && count! <= snapshot.products.filter(product => product.chain_id === job.scopes[index].chain_id).length)
     ? trainingCounts.reduce<number>((sum, count) => sum + count!, 0) : undefined;
   return { chain_id: presentationChain, chain_name: filters.chainId ? snapshot.chains.find(chain => chain.id === filters.chainId)?.name : `${chainIds.length} cadenas autorizadas`,
-    objective: job.objective, status: "PREVIEW", issue_period: issue, latest_actual_period: context.last_period, mode: job.mode, evaluation_mode: "RETROSPECTIVE_EVALUATION",
+    objective: job.objective, status: "PREVIEW", issue_period: issue, latest_actual_period: context.observed_cutoff ?? context.last_period, mode: job.mode, evaluation_mode: "RETROSPECTIVE_EVALUATION",
     engine_version: job.engine_version, source_context: context, products: members, aggregates,
     commercial_projection: { filter_key: commercialScopeKey(filters), chain_ids: chainIds, product_ids: [...expected.keys()].sort(), products: expected.size,
       statistical: stat, ml, ensemble: stat, ml_models: mlCandidates.map(c => c.model), source: "EXACT_SELECTION" },

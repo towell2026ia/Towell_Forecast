@@ -1,6 +1,7 @@
 """Project a sealed annual run into the existing report reader's two row types."""
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import date, timedelta
 import hashlib
 import json
@@ -9,7 +10,7 @@ from pathlib import Path
 from uuid import UUID, uuid5
 
 from .persistence import content_hash
-from .supabase_access import COMMERCIAL_CLOSE_BASIS, PreviewError, matches_source, require_sales_context
+from .supabase_access import COMMERCIAL_CLOSE_BASIS, PreviewError, matches_source, observed_cutoff, require_sales_context
 from .local_champion import manual_champion_candidate
 
 
@@ -107,6 +108,26 @@ def product_rows(run, product):
     snap = {**product["input_snapshot"], "planning_run_id": str(run_id),
         "product": {"offline_provenance": {"emitted_at": run["emitted_at"]}},
         "champion_eligible": [name for name, c in families.items() if manual_champion_candidate(c, name, run["planning_year"], run["cutoff"])]}
+    if "bridge_horizons" in product:
+        bridge = product["bridge_horizons"]
+        start = context["planning_start"]
+        length = (int(start[:4]) - int(run["cutoff"][:4])) * 12 + int(start[5:7]) - int(run["cutoff"][5:7]) - 1
+        if not isinstance(bridge, list) or len(bridge) != length:
+            raise ValueError("planning_bridge_lineage_mismatch")
+        if "bridge_horizons" in snap and snap["bridge_horizons"] != bridge:
+            raise ValueError("planning_bridge_lineage_mismatch")
+        for index, row in enumerate(bridge, 1):
+            month = int(run["cutoff"][5:7]) - 1 + index
+            period = f"{int(run['cutoff'][:4]) + month // 12}-{month % 12 + 1:02}"
+            if (not isinstance(row, dict) or row.get("target_period") != period
+                    or _number(row.get("statistical_value")) is None or _number(row.get("ensemble_value")) is None):
+                raise ValueError("planning_bridge_lineage_mismatch")
+            _number(row.get("ml_value"))
+        # This copies only the explicit sealed origin, never synthesizes a
+        # bridge from commercial inputs or from missing forecast quantities.
+        snap["bridge_horizons"] = deepcopy(bridge)
+    elif context.get("planning_basis") == COMMERCIAL_CLOSE_BASIS and "bridge_horizons" not in snap:
+        raise ValueError("planning_bridge_lineage_mismatch")
     cutoff = date.fromisoformat(run["cutoff"] + "-01")
     month_end = (cutoff.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
     header = {**identity, "id": calculation_id, "objective": run["objective"], "calculation_no": 1,
@@ -141,7 +162,7 @@ def annual_preview(run, selected):
     for sku in sorted(selected, key=lambda row: (row["chain_id"], row["product_id"])):
         chain = sku["chain_id"]
         scope = scopes.setdefault(chain, {"chain_id": chain, "objective": "Pedido", "issue_period": run["cutoff"],
-            "latest_actual_period": run["cutoff"], "source_context": run["source_context"], "status": "PREVIEW",
+            "latest_actual_period": observed_cutoff(run["source_context"]), "source_context": run["source_context"], "status": "PREVIEW",
             "mode": run["evaluation_mode"], "engine_version": run["engine_version"], "planning_run_id": run["run_id"],
             "products": [], "selection": {"product_candidates": [], "suggested_references": {}},
             "dataset_hash": run["training_fingerprint"], "aggregates": []})

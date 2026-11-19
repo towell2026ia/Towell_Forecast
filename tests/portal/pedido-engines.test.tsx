@@ -7,7 +7,7 @@ import { ForecastEnginesView } from "../../app/operational-engines-view";
 import { RailwayPreviewClient, type PreviewClient, type PreviewJob, type ProductCandidate } from "../../lib/forecast-preview";
 import { addMonth, exactSelectionScope, scopeHorizons, storedCommercialScope } from "../../lib/forecast-chart-data";
 import type { ReportSnapshot } from "../../lib/forecast-reporting";
-import { forecastHistoryAvailable, forecastObjective, forecastSourceAvailable, forecastSourceState, forecastTrainingCutoff } from "../../lib/official-sales-source";
+import { forecastHistoryAvailable, forecastObjective, forecastSourceAvailable, forecastSourceState, forecastTrainingCutoff, unifiedMasterSha } from "../../lib/official-sales-source";
 import { emptyFilters, type Filters, type ForecastReadRepository, type OperationalReadContext } from "../../lib/supabase/types";
 
 vi.mock("../../components/forecast/forecast-trader-chart", () => ({ ForecastTraderChart: ({ points }: { points: unknown }) => <output data-testid="exact-points">{JSON.stringify(points)}</output> }));
@@ -28,20 +28,21 @@ function snapshot(source = closed): ReportSnapshot {
     categories: [], calculations: [], horizons: [], decisions: [], live: [], provisionals: [], customers: [], sourceContext: source,
     capabilities: { vintage_persistence: false, official_publication: false, champion_publication: false } };
 }
-function mlCandidate(productId: string, value: number, model = "Individual ML"): ProductCandidate {
+function mlCandidate(productId: string, value: number, model = "Individual ML", issue = "2026-10"): ProductCandidate {
   return { product_id: productId, family: "ml", model, strategy: "synthetic", wape: 10, bias: 0, mae: 1, rmse: 1, observations: 20,
     windows: 6, evaluation_signature: "synthetic", evidence_mode: "RETROSPECTIVE_TRAINING", by_horizon: [],
-    horizons: Array.from({ length: 12 }, (_, i) => ({ horizon: i + 1, target_period: addMonth("2026-10", i + 1), value })) };
+    horizons: Array.from({ length: 12 }, (_, i) => ({ horizon: i + 1, target_period: addMonth(issue, i + 1), value })) };
 }
 function job(source = closed): PreviewJob {
+  const issue = source.training_cutoff ?? "2026-10";
   return { job_id: "synthetic-exact-job", status: "READY_PREVIEW", mode: "RETROSPECTIVE_TRAINING", engine_version: "synthetic-operational-preview-4-e4-snapshot",
     objective: "Pedido", chain_ids: chains, requested_product_ids: ids, scopes: chains.map((chain_id, index) => ({ chain_id,
-      chain_name: `Chain ${index}`, objective: "Pedido", status: "PREVIEW", issue_period: "2026-10", source_context: source,
+      chain_name: `Chain ${index}`, objective: "Pedido", status: "PREVIEW", issue_period: issue, source_context: source,
       engine_version: "synthetic-operational-preview-4-e4-snapshot", evaluation_mode: "RETROSPECTIVE_EVALUATION",
       selection: { published_champion: null, preview_leader: null, preview_challenger: null, no_degradation: null, automatic_promotion: false,
-        product_candidates: [mlCandidate(ids[index], index ? 1.42 : 1.41)] },
+        product_candidates: [mlCandidate(ids[index], index ? 1.42 : 1.41, "Individual ML", issue)] },
       products: [{ product_id: ids[index], product_code: `P${index}`, description: `Variant ${index}`, category_id: null, forecast_status: "ACTIVE",
-        horizons: Array.from({ length: 12 }, (_, i) => ({ horizon: i + 1, target_period: addMonth("2026-10", i + 1), statistical_value: index ? 1.02 : 1.01,
+        horizons: Array.from({ length: 12 }, (_, i) => ({ horizon: i + 1, target_period: addMonth(issue, i + 1), statistical_value: index ? 1.02 : 1.01,
           ml_value: index ? 1.42 : 1.41, forecast_towell: index ? 1.22 : 1.21, p10: null, p50: index ? 1.22 : 1.21, p90: null, p95: null, statistical_model: "SBA" })) }] })) };
 }
 function repository(source = closed) {
@@ -57,6 +58,17 @@ function panel(repo: ForecastReadRepository, selection = filters) {
 }
 
 describe("Pedido objective and bounded model selection", () => {
+  it("preserves the last observed order month when projecting an exact preview", () => {
+    const source: OperationalReadContext = { ...closed, generation: 6, forecast_contract: "pedido-unificado-v1",
+      target_sheet: "Base_2024_2026", target_file_sha256: unifiedMasterSha, last_period: "2026-12",
+      training_cutoff: "2026-12", observed_cutoff: "2026-09", planning_basis: "OBSERVED_AND_COMMERCIAL_CLOSE",
+      scenario_hash: "b".repeat(64), planning_start: "2027-01", planning_end: "2027-12" };
+    const result = exactSelectionScope(job(source), snapshot(source), filters);
+    expect(result.issue_period).toBe(source.training_cutoff);
+    expect(result.latest_actual_period).toBe(source.observed_cutoff);
+    expect(scopeHorizons(result, filters)[0].target_period).toBe("2027-01");
+  });
+
   it("projects only seven accredited individual ML alternatives from ten raw global components and preserves Ensemble", async () => {
     const selectedIds = Array.from({ length: 10 }, (_, i) => `33333333-3333-4333-8333-${String(i).padStart(12, "0")}`);
     const data = snapshot();

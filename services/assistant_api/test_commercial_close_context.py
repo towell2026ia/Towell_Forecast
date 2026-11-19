@@ -40,6 +40,7 @@ def run():
         evaluation_mode="RETROSPECTIVE_TRAINING", engine_version="synthetic-scenario-1",
         emitted_at="2026-10-01T00:00:00+00:00", training_fingerprint="e" * 64)
     for product in result["products"]:
+        product["bridge_horizons"] = []
         product["input_snapshot"] = {"source_context": current, "bridge_horizons": [],
             "commercial_history": [{"period": "2026-10", "basis": "COMMERCIAL_CLOSE", "value": "12.50"}]}
         for candidate in product["candidates"].values():
@@ -57,6 +58,33 @@ class CommercialCloseContextTests(unittest.TestCase):
         self.folder = Path(self.temp.name)
         self.storage = LocalPersistenceProvider(self.folder / "synthetic.sqlite")
         self.ref = base.save_run(self.folder, run())
+
+    def test_real_dto_shape_projects_explicit_sealed_empty_bridge_without_mutating_origin(self):
+        payload = run()
+        for product in payload["products"]:
+            product["input_snapshot"].pop("bridge_horizons")
+        payload["content_digest"] = content_hash(payload)
+        before = deepcopy(payload)
+        header, = report_records(payload, "forecast_calculations", {(base.PRODUCT, base.CHAIN)})
+        self.assertEqual(header["input_snapshot"]["bridge_horizons"], [])
+        self.assertEqual(payload, before)
+        scope, = annual_preview(payload, base.catalogue()[:1])
+        self.assertEqual(scope["issue_period"], "2026-12")
+        self.assertEqual(scope["latest_actual_period"], "2026-09")
+
+    def test_missing_or_conflicting_bridge_origin_cannot_be_filled_or_hidden(self):
+        for mode in ("missing_both", "wrong_geometry", "conflicting_snapshot"):
+            payload = run()
+            product = payload["products"][0]
+            if mode == "missing_both":
+                product.pop("bridge_horizons")
+                product["input_snapshot"].pop("bridge_horizons")
+            elif mode == "wrong_geometry":
+                product["bridge_horizons"] = [{"target_period": "2026-12"}]
+            else:
+                product["input_snapshot"]["bridge_horizons"] = None
+            with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, "planning_bridge_lineage_mismatch"):
+                report_records(payload, "forecast_calculations", {(base.PRODUCT, base.CHAIN)})
 
     def test_explicit_scenario_pin_does_not_relabel_the_observed_cutoff(self):
         current = context()

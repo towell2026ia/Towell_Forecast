@@ -72,6 +72,15 @@ describe("Pedido and inventory at a pinned local source", () => {
     const trace = operationalPeriodsSheets(s, d, data, [])[0].rows;
     expect(trace).toContainEqual(["Corte del cálculo","2026-12"]); expect(trace).toContainEqual(["Cierre de Pedido","2026-09"]);
     expect(trace).toContainEqual(["Distancia desde el cierre · 2027-01",1]); expect(trace).toContainEqual(["Distancia desde el cierre · 2027-12",12]);
+    // The DTO boundary must carry an explicit empty bridge for December. A
+    // missing/null field is still malformed, even though no bridge is needed.
+    for (const invalidBridge of [undefined, null]) {
+      const malformed = { ...s, calculations: s.calculations.map(c => ({ ...c,
+        input_snapshot: { ...c.input_snapshot, bridge_horizons: invalidBridge } })) };
+      expect(() => periodsDashboard(malformed, data, emptyReportChoice, [null, null])).toThrow("report_horizon_lineage");
+    }
+    expect(s.calculations[0].input_snapshot.bridge_horizons).toEqual([]);
+    expect(d.matrix.periods).toEqual(Array.from({ length: 12 }, (_, i) => addReportMonth("2026-12", i + 1)));
     const changed = { ...context, scenario_hash: "c".repeat(64) };
     expect(officialSourceKey(context)).not.toEqual(officialSourceKey(changed));
     expect(matchesOfficialSource(changed, context)).toBe(false);
