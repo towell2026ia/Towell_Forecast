@@ -54,6 +54,7 @@ class HostedRollingInputLoader:
         baseline = {(row["chain_id"], row["product_id"], row["period"]): row for row in observed}
         fit = deepcopy(observed)
         seen = set(baseline)
+        commercial_count = 0
         for product in run["products"]:
             pid, chain = product["product_id"], product["chain_id"]
             snapshot = product.get("input_snapshot") or {}
@@ -80,12 +81,15 @@ class HostedRollingInputLoader:
                 if basis != "COMMERCIAL_CLOSE" or period <= context["observed_cutoff"] or key in seen:
                     raise PreviewError("LINEAGE_MISMATCH", 409)
                 seen.add(key)
+                commercial_count += 1
                 meta = metadata[pid]
                 fit.append({**deepcopy(row), "chain_id": chain, "product_id": pid, "objective": "Pedido",
                     "metric_code": "ORDER", "source_file_sha256": context["target_file_sha256"],
                     "category": meta.get("product_type") or meta.get("category_id") or "UNCLASSIFIED",
                     "category_id": meta.get("category_id"), "product_code": meta.get("upc") or meta.get("product_code"),
                     "variant": meta.get("color") or "", "description": meta.get("product_description") or meta.get("description")})
+        if commercial_count == 0:
+            raise PreviewError("PLANNING_SOURCE_UNAVAILABLE", 503)
         return {"rows": fit, "observed_records": observed, "metadata": metadata,
                 "input_hashes": {"source_hash": context["source_hash"], "scenario_hash": context["scenario_hash"],
                     "parent_run_content_digest": run["content_digest"], "parent_run_file_sha256": run["file_sha256"]}}

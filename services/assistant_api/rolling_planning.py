@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from dataclasses import asdict
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 import hashlib
@@ -11,7 +12,8 @@ from pathlib import Path
 import re
 import threading
 
-from services.forecast_engine.engine import add_month
+from services.forecast_engine.engine import ForecastPolicy, add_month
+from .cold_start import ColdStartPolicy
 from .auth import ADMIN, EXECUTE, READ, AuthFailure, authorize
 from .persistence import content_hash
 from .rolling_store import RollingPlanningStore, RollingWriterLease, now
@@ -118,11 +120,12 @@ class LocalRollingInputLoader:
 
 
 class RollingPlanningService:
-    def __init__(self, persistence, input_loader, *, compute=None, concurrency=1, hosted=False):
+    def __init__(self, persistence, input_loader, *, compute=None, concurrency=1, hosted=False, git_sha="unknown"):
         if not 1 <= concurrency <= 2:
             raise ValueError("rolling_concurrency_invalid")
         self.lease = RollingWriterLease(persistence.path) if hosted else None
         self.hosted = hosted
+        self.git_sha = git_sha
         self.store = RollingPlanningStore(persistence)
         self.store.interrupted()
         self.input_loader, self.compute = input_loader, compute
@@ -186,6 +189,8 @@ class RollingPlanningService:
                 {"source_context": deepcopy(context), "request": deepcopy(request), "inputs": inputs,
                  "issue_period": cutoff, "observed_cutoff": observed, "window_start": add_month(cutoff, 1),
                  "window_end": add_month(cutoff, 12), "product_ids": sorted(selected), "chain_ids": sorted(request["chain_ids"]),
+                 "parameters": {"forecast_policy": asdict(ForecastPolicy()), "cold_start_policy": asdict(ColdStartPolicy()),
+                                "revision_cadence_months": 2}, "git_sha": self.git_sha,
                  "input_digest": content_hash(inputs)})
         except ValueError:
             self.slots.release()
@@ -213,6 +218,8 @@ class RollingPlanningService:
             result = compute(deepcopy(inputs["rows"]), deepcopy(inputs["metadata"]), deepcopy(frozen["source_context"]),
                 requested_product_ids=frozen["product_ids"], observed_records=deepcopy(inputs["observed_records"]),
                 model_cutoff=frozen["issue_period"], observed_cutoff=frozen["observed_cutoff"], run_id=run_id,
+                policy=ForecastPolicy(**frozen["parameters"]["forecast_policy"]),
+                cold_start_policy=ColdStartPolicy(**frozen["parameters"]["cold_start_policy"]),
                 emitted_at=datetime.now(timezone.utc).isoformat())
             result = self._validate_run(result, frozen)
             self._current(provider, frozen["source_context"])
@@ -249,6 +256,7 @@ class RollingPlanningService:
         result = {**deepcopy(result), "window_start": frozen["window_start"], "window_end": frozen["window_end"],
                   "planning_start": frozen["window_start"], "planning_end": frozen["window_end"],
                   "creator_id": frozen["creator_id"], "input_digest": frozen["input_digest"],
+                  "parameters": deepcopy(frozen["parameters"]), "git_sha": frozen["git_sha"],
                   "automatic_promotion": False, "champion_changed": False}
         result.pop("content_digest", None)
         result["content_digest"] = content_hash(result)

@@ -35,7 +35,9 @@ begin
  then raise exception 'PLANNING_SOURCE_UNAVAILABLE' using errcode='23514'; end if;
  select coalesce(jsonb_agg(jsonb_build_object('product_id',p.product_id,'chain_id',p.chain_id,
   'input_snapshot',jsonb_build_object('source_context',r.context,
-   'commercial_history',p.payload->'input_snapshot'->'commercial_history')) order by p.product_id),'[]'::jsonb)
+   'commercial_history',(select coalesce(jsonb_agg(jsonb_build_object('period',h->'period','value',h->'value',
+      'basis',h->'basis','source_reference',h->'source_reference','source_id',h->'source_id')),'[]'::jsonb)
+     from jsonb_array_elements(p.payload->'input_snapshot'->'commercial_history') h))) order by p.product_id),'[]'::jsonb)
  into products from private.ft_g6_product p where p.run_id=r.run_id and p.product_id=any(p_product_ids)
   and p.chain_id=any(p_chain_ids) and private.can_chain(p.chain_id,'view');
  return jsonb_build_object('transport','SUPABASE_SEALED_ROLLING_SCENARIO','source_context',r.context,

@@ -1,6 +1,7 @@
 import { addReportMonth, buildForecastMatrix, emptyReportChoice, matchesOfficialSource, type ForecastMatrixRow, type ReportSnapshot } from "./forecast-reporting";
 import type { PlanningSheet } from "./planning-results";
 import { verifiedLocalChampions } from "./local-champion";
+import { modelKey } from "./commercial-filters";
 
 type Cell = PlanningSheet["rows"][number][number];
 type Family = "CHAMPION" | "STATISTICAL" | "ML" | "ENSEMBLE" | "COLD_START" | "COMMERCIAL_PLAN";
@@ -98,11 +99,15 @@ function curve(snapshot: ReportSnapshot, row: ForecastMatrixRow, months: string[
   return result;
 }
 
-function groupIdentity(row: ForecastMatrixRow) {
+function groupIdentity(row: ForecastMatrixRow, commercialUnit: boolean) {
   const c = row.product.commercial;
-  // Missing model/presentation never merges unrelated products.
-  return [row.product.chain_id, c?.format ?? `Producto ${row.product.id}`, c?.model ?? `Producto ${row.product.id}`,
-    c?.size ?? (c?.not_applicable?.includes("size") ? "No aplica" : `Producto ${row.product.id}`), c?.product_type ?? "", row.product.category_id ?? ""];
+  // An accredited commercial-unit UUID already separates its chain/format.
+  // Parent scopes with missing format, or missing model/presentation, cannot
+  // merge unrelated identities. Normalization is exact NFC/case/whitespace.
+  return [row.product.chain_id, c?.format ? modelKey(c.format) : commercialUnit ? "" : `Producto ${row.product.id}`,
+    c?.model ? modelKey(c.model) : `Producto ${row.product.id}`,
+    c?.size ? modelKey(c.size) : c?.not_applicable?.includes("size") ? "No aplica" : `Producto ${row.product.id}`,
+    c?.product_type ? modelKey(c.product_type) : "", row.product.category_id ?? ""];
 }
 
 /** A directorial projection of frozen quantities. It never executes or adopts a forecast. */
@@ -122,7 +127,8 @@ export function operationalPlanSheets(snapshot: ReportSnapshot, selectedRows: Fo
   const champions = snapshot.localChampions ? verifiedLocalChampions(snapshot, snapshot.localChampions).products : [];
   const horizons = indexHorizons(snapshot);
   const groups = new Map<string, ForecastMatrixRow[]>();
-  for (const row of rows) { const key = JSON.stringify(groupIdentity(row)); groups.set(key, [...(groups.get(key) ?? []), row]); }
+  const commercialUnits = new Set(snapshot.chains.filter(chain => chain.scopeType === "COMMERCIAL_UNIT").map(chain => chain.id));
+  for (const row of rows) { const key = JSON.stringify(groupIdentity(row, commercialUnits.has(row.product.chain_id))); groups.set(key, [...(groups.get(key) ?? []), row]); }
   const identityHeaders = ["Cadena", "Formato", "Modelo", "Presentación", "Línea", "Familia / categoría", "Plan", "Estado", "Corrida", "Emisión", "Fuente SHA-256", "Productos esperados"];
   const monthly: Cell[][] = [], bimonthly: Cell[][] = [], details: Cell[][] = [];
   const bimesters = Array.from({ length: 6 }, (_, index) => `${months[index * 2]} / ${months[index * 2 + 1]}`);

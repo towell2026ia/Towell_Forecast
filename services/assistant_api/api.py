@@ -166,7 +166,8 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
         from .rolling_inputs import HostedRollingInputLoader
         input_loader = HostedRollingInputLoader() if config.hosted_unified_planning_enabled else LocalRollingInputLoader(local_database.sales_policy)
         rolling_planning = RollingPlanningService(storage, input_loader,
-                                                  concurrency=config.max_forecast_runs, hosted=config.hosted_unified_planning_enabled)
+                                                  concurrency=config.max_forecast_runs, hosted=config.hosted_unified_planning_enabled,
+                                                  git_sha=config.git_sha)
     app.state.rolling_planning = rolling_planning
     from .rolling_api import mount_rolling_routes
     mount_rolling_routes(app, config, identity, data, rolling_planning, rate_limiter)

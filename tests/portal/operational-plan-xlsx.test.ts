@@ -204,4 +204,50 @@ describe("Directorial twelve-month and six-bimester export", () => {
       if (revoke) Object.defineProperty(URL, "revokeObjectURL", revoke); else Reflect.deleteProperty(URL, "revokeObjectURL");
     }
   });
+
+  it("loads only the explicitly chosen earlier run for comparison, never all revisions or G6 by default", async () => {
+    const base = fixture(), current = fixture("2027-03"), prior = fixture();
+    const previousRun = "00000000-0000-4000-8000-000000000015";
+    const runMeta = { run_id: run, window_start: "2027-03", window_end: "2028-02", issue_period: "2027-02", created_at: "2027-03-01T00:00:00Z", source_hash: source.source_hash, generation: source.generation, status: "READY" as const };
+    const priorMeta = { ...runMeta, run_id: previousRun, window_start: "2027-01", window_end: "2027-12", issue_period: "2026-12", created_at: "2027-01-01T00:00:00Z" };
+    for (const [f, meta] of [[current, runMeta], [prior, priorMeta]] as const) {
+      f.snapshot.planningRun = meta;
+      f.snapshot.calculations.forEach(c => { c.issue_period = meta.issue_period; c.cutoff_at = `${meta.issue_period}-01T00:00:00Z`; c.input_snapshot.planning_run_id = meta.run_id; });
+    }
+    const planningRun = vi.fn(async (id: string) => id === run ? runMeta : priorMeta);
+    const planningReport = vi.fn(async (id: string) => {
+      const f = id === run ? current : prior;
+      return { run_id: id, window_start: f.months[0], window_end: f.months[11], source_context: source,
+        products: f.snapshot.products.map(p => ({ product_id: p.id, chain_id: p.chain_id })), calculations: f.snapshot.calculations, horizons: f.snapshot.horizons, provisionals: [] };
+    });
+    const repository = { openOperationalRead: vi.fn(async () => source), getReportSnapshot: vi.fn(async () => base.snapshot),
+      getReportHistory: vi.fn(async () => []), getReportInventory: vi.fn(async () => []), previews: { planningRun, planningReport } };
+    let downloaded: ReturnType<typeof operationalPeriodsSheets> = [];
+    const original = xlsxModule.planningXlsx;
+    vi.spyOn(xlsxModule, "planningXlsx").mockImplementation(sheets => { downloaded = sheets; return original(sheets); });
+    const create = Object.getOwnPropertyDescriptor(URL, "createObjectURL"), revoke = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+    Object.defineProperty(URL, "createObjectURL", { value: vi.fn(() => "blob:comparison"), configurable: true });
+    Object.defineProperty(URL, "revokeObjectURL", { value: vi.fn(), configurable: true });
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    try {
+      render(createElement(ForecastFiltersContext.Provider, { value: { repository: repository as unknown as ForecastReadRepository,
+        filters: emptyFilters, setFilters: vi.fn(), profile: { id: "viewer", full_name: "Synthetic", global_role: "VIEWER", status: "ACTIVE" },
+        planningRunId: run, planningRuns: [runMeta, priorMeta] } }, createElement(ForecastPeriodsView)));
+      const select = await screen.findByRole("combobox", { name: "Comparar exportación con" });
+      expect((select as HTMLSelectElement).value).toBe("");
+      expect(planningRun).toHaveBeenCalledTimes(1); expect(planningReport).toHaveBeenCalledTimes(1);
+      fireEvent.change(select, { target: { value: previousRun } });
+      expect(planningRun).toHaveBeenCalledTimes(1); expect(planningReport).toHaveBeenCalledTimes(1);
+      fireEvent.click(screen.getByRole("button", { name: "Descargar XLSX de Períodos" }));
+      await waitFor(() => expect(downloaded.some(sheet => sheet.name === "Comparación versiones")).toBe(true));
+      expect(planningRun.mock.calls.map(call => call[0])).toEqual([run, previousRun]);
+      expect(planningReport.mock.calls.map(call => call[0])).toEqual([run, previousRun]);
+      const comparison = downloaded.find(sheet => sheet.name === "Comparación versiones")!;
+      expect(comparison.rows.every(row => row[6] >= "2027-03" && row[6] <= "2027-12")).toBe(true);
+      expect(comparison.rows.some(row => row[7] === previousRun && row[8] === run)).toBe(true);
+    } finally {
+      if (create) Object.defineProperty(URL, "createObjectURL", create); else Reflect.deleteProperty(URL, "createObjectURL");
+      if (revoke) Object.defineProperty(URL, "revokeObjectURL", revoke); else Reflect.deleteProperty(URL, "revokeObjectURL");
+    }
+  });
 });

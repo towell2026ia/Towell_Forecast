@@ -89,6 +89,20 @@ por JWT/RLS y referencias comerciales por la RPC de corrida G6 sellada. No
 descarga el archivo completo, no usa service_role ni duplica referencias como
 reales. Una discrepancia en observados/escenario bloquea el cálculo.
 
+Para una generación posterior con cierre comercial mayor al observado usa la
+RPC separada `operational_read_rolling_scenario`, propuesta en
+`scripts/publication_12m/rolling_scenario_read.sql`; no flexibiliza el lector G6.
+Devuelve sólo celdas de historia sellada de los IDs/cadenas solicitados, con
+contexto/hash exactos. Debe instalarse con autorización posterior, tras la regla
+de calendario de la nueva fuente. Si observado y modelo tienen el mismo cierre,
+no necesita escenario: usa solamente la lectura observada acreditada.
+
+El campo de compatibilidad `run_file_sha256` de elecciones nuevas representa
+los bytes UTF-8 canónicos reales de `rolling_runs.payload`, no el maestro ni un
+archivo de escenario. `run_artifact` identifica almacenamiento, codificación y
+SHA. Cada lectura comprueba ese artefacto y el `content_digest` de la corrida
+antes de devolver cantidades; la copia de seguridad SQLite conserva esos bytes.
+
 Para activarlo en el futuro se requiere autorización independiente y comprobar:
 
 1. `PERSISTENCE_MODE=hosted-volume`, `STATE_DIR` y `SQLITE_PATH` dentro del mismo
