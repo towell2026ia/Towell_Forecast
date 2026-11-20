@@ -47,6 +47,11 @@ describe("Hosted G6 transport and manual Champion", () => {
     for (const table of tables) expect(operationalTable(table)).toBe(`ft_g6_${table}`);
     expect(operationalTable("profiles")).toBe("profiles");
     expect(() => assertHostedG6Context(source)).not.toThrow();
+    const later = { ...source, generation: 7, observed_cutoff: "2027-02", training_cutoff: "2027-02", last_period: "2027-02",
+      planning_start: "2027-03", planning_end: "2028-02" };
+    expect(() => assertHostedG6Context(later)).not.toThrow();
+    expect(() => assertHostedG6Context({ ...later, planning_start: "2027-01" })).toThrow("OFFICIAL_SOURCE_MISMATCH");
+    expect(() => assertHostedG6Context({ ...later, observed_cutoff: "2027-03" })).toThrow("OFFICIAL_SOURCE_MISMATCH");
     for (const changed of [{ generation: 5 }, { objective: "Venta" }, { observed_cutoff: "2026-12" }, { training_cutoff: "2026-09" }])
       expect(() => assertHostedG6Context({ ...source, ...changed } as OperationalReadContext)).toThrow("OFFICIAL_SOURCE_MISMATCH");
     expect(championPublicationEnabled({ hosted_champion_publication: true })).toBe(true);

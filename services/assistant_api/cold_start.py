@@ -92,18 +92,29 @@ def _backtest(peers: list[dict[str, Any]], age: int, method: str) -> dict[str, A
 
 
 def launch_forecast(rows: list[dict[str, Any]], issue: str, target: dict[str, Any],
-                    policy: ColdStartPolicy | None = None) -> dict[str, Any] | None:
+                    policy: ColdStartPolicy | None = None, *, objective: str | None = None,
+                    observed_cutoff: str | None = None,
+                    comparable_product_ids: set[str] | None = None) -> dict[str, Any] | None:
     """Return a distinct provisional result or None when comparable evidence is absent.
 
     Rows must already be limited to one authorized chain and to periods <= issue.
     Original availability remains unknown; no point-in-time claim is made.
     """
+    objectives = {row.get("objective") for row in rows}
+    objective = objective or target.get("objective") or (
+        next(iter(objectives)) if len(objectives) == 1 else "Venta")
+    if objective == "Pedido":
+        return _launch_order_forecast(rows, issue, target, policy or ColdStartPolicy(),
+            observed_cutoff=observed_cutoff or issue,
+            comparable_product_ids=comparable_product_ids)
+    if objective != "Venta":
+        raise ValueError("cold_start_unsupported_objective")
     policy = policy or ColdStartPolicy()
     product_id, chain_id = target["id"], target["chain_id"]
     category = target.get("category_id")
     if not category or any(row["chain_id"] != chain_id or row["period"] > issue for row in rows):
         return None
-    series = normalize_retrospective_dataset(rows, issue, chain_id=chain_id)
+    series = normalize_retrospective_dataset(rows, issue, chain_id=chain_id, objective=objective)
     own = next((item for item in series if item.product_id == product_id), None)
     observed = own.history(issue) if own else []
     age = len(observed)
@@ -148,3 +159,120 @@ def launch_forecast(rows: list[dict[str, Any]], issue: str, target: dict[str, An
             "official_publication": False, "champion_eligible": False,
             "horizons": [{"horizon": h, "target_period": add_month(issue, h), "value": round(value, 2)}
                          for h, value in enumerate(values, 1)]}
+
+
+def _numeric_tail(item, issue):
+    """Preserve explicit zeroes. A gap ends the tail; it is never filled."""
+    values = []
+    period = issue
+    while (point := item.observations.get(period)) is not None and point.value is not None:
+        values.append(point.value)
+        period = add_month(period, -1)
+    return list(reversed(values))
+
+
+def _calendar_analog(peers, issue, method):
+    """Same-calendar seasonal analogue, not the first twelve launch months."""
+    curves = []
+    for peer in peers:
+        history = _numeric_tail(peer, issue)
+        if len(history) < 12:
+            raise ValueError("cold_start_peer_tail_short")
+        level = statistics.fmean(history[-3:])
+        annual_level = statistics.fmean(history[-12:])
+        curve = []
+        for horizon in range(1, 13):
+            if method == "peer_recent_level" or annual_level == 0:
+                value = level
+            else:
+                target_month = add_month(issue, horizon)[-2:]
+                seasonal = [point.value for period, point in peer.observations.items()
+                    if period <= issue and period[-2:] == target_month and point.value is not None]
+                value = level * statistics.fmean(seasonal) / annual_level
+            curve.append(max(0.0, value))
+        curves.append(curve)
+    return [statistics.median(values) for values in zip(*curves)]
+
+
+def _launch_order_forecast(rows, issue, target, policy, *, observed_cutoff,
+                           comparable_product_ids):
+    """Peer-only ORDER estimate; approval/effect remain explicit and separate.
+
+    The fit can use an accredited commercial scenario. Held-out validation uses
+    OBSERVED rows only, with peers frozen before each evaluation target. No
+    target-product WAPE is claimed when that product has no observations.
+    """
+    from services.forecast_engine.engine import _metrics
+
+    chain_id, product_id = target["chain_id"], target["id"]
+    category = target.get("category_id")
+    if (not category or observed_cutoff > issue or any(
+        row.get("chain_id") != chain_id or row["period"] > issue
+        or row.get("objective") != "Pedido" or row.get("metric_code", "ORDER") != "ORDER"
+        for row in rows)):
+        return None
+    series = normalize_retrospective_dataset(rows, issue, chain_id=chain_id, objective="Pedido")
+    own = next((item for item in series if item.product_id == product_id), None)
+    own_history = _numeric_tail(own, issue) if own else []
+    if len(own_history) > policy.maximum_target_months:
+        return None
+    allowed = comparable_product_ids
+    candidates = [item for item in series if item.product_id != product_id
+        and str(item.category).casefold() == str(category).casefold()
+        and (allowed is None or item.product_id in allowed)
+        and len(_numeric_tail(item, issue)) >= policy.minimum_comparable_months]
+    terms = _terms(target.get("description") or "")
+    candidates.sort(key=lambda item: (-len(terms & _terms(item.description)), item.product_id))
+    peers = candidates[:policy.maximum_comparables]
+    if len(peers) < policy.minimum_comparables:
+        return None
+    real_rows = [row for row in rows if row.get("basis", "OBSERVED") == "OBSERVED"
+                 and row["period"] <= observed_cutoff]
+    real = {item.product_id: item for item in normalize_retrospective_dataset(
+        real_rows, observed_cutoff, chain_id=chain_id, objective="Pedido")}
+    methods = ("peer_recent_level", "peer_calendar_seasonality")
+    validation = {method: [] for method in methods}
+    for origin in (add_month(observed_cutoff, -13), add_month(observed_cutoff, -12)):
+        for held_out in peers:
+            actual_peer = real.get(held_out.product_id)
+            training = [real[p.product_id] for p in peers if p.product_id != held_out.product_id
+                and p.product_id in real and len(_numeric_tail(real[p.product_id], origin)) >= 12]
+            actual = [actual_peer.observations.get(add_month(origin, h)) if actual_peer else None
+                      for h in range(1, 13)]
+            if len(training) < max(2, policy.minimum_comparables - 1) or any(
+                point is None or point.value is None for point in actual):
+                continue
+            for method in methods:
+                predicted = _calendar_analog(training, origin, method)
+                validation[method].extend({"product_id": held_out.product_id,
+                    "origin": origin, "target_period": add_month(origin, h), "horizon": h,
+                    "actual": point.value, "prediction": value, "basis": "OBSERVED"}
+                    for h, (point, value) in enumerate(zip(actual, predicted), 1))
+    metrics = {method: {**_metrics([(r["actual"], r["prediction"]) for r in pairs]),
+        "observations": len(pairs), "products": len({r["product_id"] for r in pairs}),
+        "windows": len({r["origin"] for r in pairs})} for method, pairs in validation.items()}
+    baseline = metrics[methods[0]]
+    valid = [name for name in methods if metrics[name]["wape"] is not None
+        and (baseline["bias"] is None or abs(metrics[name]["bias"]) <=
+             abs(baseline["bias"]) + policy.maximum_bias_deterioration_pp)]
+    winner = min(valid, key=lambda name: (metrics[name]["wape"], methods.index(name))) if valid else methods[0]
+    values = _calendar_analog(peers, issue, winner)
+    return {"status": "PROVISIONAL_COLD_START", "policy_version": "ORDER-COLD-START-2.0.0",
+        "objective": "Pedido", "metric_code": "ORDER", "product_id": product_id,
+        "chain_id": chain_id, "category_id": category, "issue_period": issue,
+        "observed_cutoff": observed_cutoff, "observed_months": len(own_history),
+        "model": winner, "confidence": "LOW", "target_wape": None,
+        "target_bias": None, "retrospective_peer_metrics": metrics,
+        "peer_validation_pairs": validation[winner], "evaluation_target_basis": "OBSERVED_ONLY",
+        "comparables": [{"product_id": peer.product_id, "chain_id": peer.chain_id,
+            "description": peer.description, "first_period": min(peer.observations),
+            "last_period": max(peer.observations), "current_tail_months": len(_numeric_tail(peer, issue)),
+            "recent_level": statistics.fmean(_numeric_tail(peer, issue)[-3:]),
+            "scale_basis": "MEDIAN_PEER_ABSOLUTE_PIECES"} for peer in peers],
+        "incremental_effect": {"status": "UNDETERMINED", "incremental_pieces": None,
+            "reason": "NO_ACCREDITED_LAUNCH_OR_SUBSTITUTION_EVIDENCE"},
+        "admission": {"status": "REQUIRES_EXPLICIT_ACCEPTANCE", "accepted": False},
+        "point_in_time_certified": False, "official_publication": False,
+        "champion_eligible": False, "research": {"status": "DISABLED"},
+        "horizons": [{"horizon": h, "target_period": add_month(issue, h), "value": round(value, 2)}
+            for h, value in enumerate(values, 1)]}

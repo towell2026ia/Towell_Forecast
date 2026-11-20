@@ -1,9 +1,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { assistantScopeIsValid, parseRsAssistantResponse, type RsAssistantClient } from "./rs-assistant";
 import type { OperationalReadContext } from "./supabase/types";
-import { matchesOfficialSource } from "./forecast-reporting";
+import { addReportMonth, matchesOfficialSource } from "./forecast-reporting";
 import { forecastObjective, forecastSourceAvailable, forecastSourceState, forecastTrainingCutoff, isOrderSource, type ForecastObjective } from "./official-sales-source";
 import { assertHostedG6Context, championPublicationEnabled, championPublicationOrigin, hostedG6Enabled } from "./hosted-g6";
+import { checkPlanningRun, type PlanningRun, type PlanningScope, type PlanningReport } from "./rolling-planning";
 export type PreviewHorizon = { horizon: number; target_period: string; statistical_value: number; ml_value: number | null; forecast_towell: number; p10: number | null; p50: number | null; p90: number | null; p95: number | null;
   statistical_model?: string; ml_model?: string | null; ensemble_ml_model?: string | null; ensemble_ml_component?: number | null; statistical_weight?: number | null; ml_weight?: number | null;
   model_strategy?: string; classification?: string; forecast_status?: string; certification_status?: string; confidence?: string; band_basis?: "PRODUCT" | "CATEGORY" | "CHAIN" | "INSUFFICIENT"; band_observations?: number; band_status?: "AVAILABLE" | "INSUFFICIENT_BAND_EVIDENCE" };
@@ -25,11 +26,14 @@ export type ProvisionalColdStart = { status: "PROVISIONAL_COLD_START"; observed_
   horizons: { horizon: number; target_period: string; value: number }[];
   research?: { status: "DISABLED" | "PENDING" | "COMPLETED" | "UNAVAILABLE"; reason?: string; summary?: string; sources?: { title: string; url: string }[] } };
 export type PreviewScope = { chain_id: string; chain_name?: string; objective?: ForecastObjective; status: string; error_code?: string; issue_period?: string; latest_actual_period?: string; engine_version?: string; mode?: string; preview_id?: string;
+  planning_window?: Pick<PlanningRun, "issue_period" | "window_start" | "window_end">;
   commercial_projection?: { filter_key: string; chain_ids?: string[]; product_ids?: string[]; products: number; statistical: number; ml: number; ensemble: number; ml_models: string[]; source: "STORED_CALCULATIONS" | "EXACT_SELECTION" };
-  stored_results?: { objective: string; issue_period: string; consolidated_metrics_status: "SINGLE_PRODUCT" | "NOT_ACCREDITED"; consolidated_reason: string;
+  stored_results?: { objective: string; issue_period: string; consolidated_metrics_status: "SINGLE_PRODUCT" | "NOT_ACCREDITED" | "COMMON_PAIRS"; consolidated_reason: string;
+    evaluation?: PlanningReport["evaluation"];
     products: { product_id: string; chain_id: string; description: string; calculation_id: string | null; calculation_code: string | null;
       created_at: string | null; emitted_at: string | null; cutoff_at: string | null; engine_version: string | null; evidence_mode: string | null; status: string;
       statistical_model: string | null; ml_model: string | null; candidates: ProductCandidate[]; suggested_reference: SuggestedReference | null;
+      cold_start?: { method: string; horizons: { horizon: number; target_period: string; value: number }[] };
       decision_history: { id: string; calculation_id: string; calculation_code: string; issue_period: string; selected_forecast: string; selected_model: string | null; reason: string | null; created_at: string; created_by: string }[];
       decision: { id: string; calculation_id: string; calculation_code: string; issue_period: string; selected_forecast: string; selected_model: string | null; reason: string | null; created_at: string; created_by: string } | null }[] };
   source_context?: Pick<OperationalReadContext, "source_hash" | "generation">;
@@ -53,18 +57,18 @@ export type VintageDetail = { vintage: VintageSummary; run: { id: string; chain_
   inputs: { id: string; monthly_observation_id: string | null; evidence_mode: string }[];
   gates: { id: string; gate_type: string; status: string; policy_version: string; observed: number | null; target: number | null }[] };
 export type VintageCapabilities = { vintage_persistence: boolean; official_publication: boolean; champion_publication: boolean;
-  forecast_calculation_history?: boolean; forecast_selection?: boolean; capture_center?: boolean; live_learning?: boolean; local_bounded_preview?: boolean; local_champion_publication?: boolean; hosted_champion_publication?: boolean };
-export type ChampionFamily = "STATISTICAL" | "ML" | "ENSEMBLE" | "COMMERCIAL_PLAN";
-export type LocalChampionQuery = { source_context: OperationalReadContext; planning_year: number; chain_ids: string[]; product_ids: string[] };
-export type LocalChampionRequest = LocalChampionQuery & { run_id: string; candidate_family: ChampionFamily; confirm: true; comment: string };
+  rolling_planning_execution?: boolean; forecast_calculation_history?: boolean; forecast_selection?: boolean; capture_center?: boolean; live_learning?: boolean; local_bounded_preview?: boolean; local_champion_publication?: boolean; hosted_champion_publication?: boolean };
+export type ChampionFamily = "STATISTICAL" | "ML" | "ENSEMBLE" | "COMMERCIAL_PLAN" | "COLD_START";
+export type LocalChampionQuery = { source_context: OperationalReadContext; planning_year: number; chain_ids: string[]; product_ids: string[]; run_id?: string; window_start?: string; window_end?: string };
+export type LocalChampionRequest = LocalChampionQuery & { run_id: string; candidate_family: ChampionFamily; confirm: true; comment: string; accept_cold_start?: boolean };
 export type LocalChampionRecord = { id: string; run_id: string; candidate_family: ChampionFamily; source_context: OperationalReadContext;
-  planning_year: number; selected_by: string; selected_at: string; objective: "Pedido"; environment: "localhost" | "hosted"; status: "ACTIVE";
+  planning_year: number; window_start?: string; window_end?: string; selected_by: string; selected_at: string; objective: "Pedido"; environment: "localhost" | "hosted"; status: "ACTIVE";
   publication_scope: "LOCAL_OPERATIONAL" | "HOSTED_OPERATIONAL"; official_publication: false;
   run_content_digest: string; run_file_sha256: string; run_emitted_at: string; cutoff: string; unit: "PIEZAS";
   product: { product_id: string; chain_id: string; candidate_family: ChampionFamily; model: string; origin: string;
     technical_eligible?: boolean; technical_status?: string | null; technical_reason?: string | null; technical_metrics?: Record<string, unknown> | null;
     horizons: { planning_horizon: number; horizon: number; target_period: string; forecast_distance: number; value: string }[] } };
-export type LocalChampions = { source_context: OperationalReadContext; planning_year: number; products: LocalChampionRecord[]; covered: number; eligible: number };
+export type LocalChampions = { source_context: OperationalReadContext; run_id?: string; window_start?: string; window_end?: string; planning_year: number; products: LocalChampionRecord[]; covered: number; eligible: number };
 export type CalculationSummary = { id: string; chain_id: string; product_id: string; calculation_no: number; calculation_code: string;
   issue_period: string; status: string; created_at: string; suggested_reference: SuggestedReference | null; recalculation_reason: string | null };
 export type CalculationHorizon = { horizon: number; target_period: string; statistical_value: number; ml_value: number | null;
@@ -79,6 +83,10 @@ export type CalculationDetail = CalculationSummary & { candidate_metrics: Record
   horizons: CalculationHorizon[]; selection_events: SelectionEvent[]; live_evaluations: Record<string, unknown>[];
   actual_sales?: { observation_id: string; period: string; value: number; version_no: number; available_at: string; source_batch_id: string }[] };
 export interface PreviewClient {
+  createPlanningRun?(selection: PlanningScope & { issue_period: string | null }, idempotencyKey: string): Promise<PlanningRun>;
+  planningRuns?(source: OperationalReadContext): Promise<PlanningRun[]>;
+  planningRun?(id: string): Promise<PlanningRun>;
+  planningReport?(id: string, selection: PlanningScope): Promise<PlanningReport>;
   readonly readOnly?: boolean;
   rsAssistant?: RsAssistantClient;
   commercialCatalog?(context?: OperationalReadContext): Promise<import("./supabase/types").CommercialClassification[]>;
@@ -272,6 +280,7 @@ export class RailwayPreviewClient implements PreviewClient {
     const response = await fetch(origin + "/api/ready", { method: "GET", credentials: "omit", cache: "no-store", signal: this.controller.signal });
     const result = await response.json() as Partial<VintageCapabilities>;
     return { vintage_persistence: !hostedG6Enabled() && response.ok && result.vintage_persistence === true,
+      rolling_planning_execution: response.ok && result.rolling_planning_execution === true,
       official_publication: !hostedG6Enabled() && response.ok && result.official_publication === true,
       champion_publication: !hostedG6Enabled() && response.ok && result.champion_publication === true,
       forecast_calculation_history: response.ok && result.forecast_calculation_history === true,
@@ -296,6 +305,28 @@ export class RailwayPreviewClient implements PreviewClient {
     const result = await response.json() as T & { error_code?: string };
     if (!response.ok) throw new PreviewReadError(result.error_code ?? "DATA_READ_FAILED");
     return result;
+  }
+  async createPlanningRun(selection: PlanningScope & { issue_period: string | null }, idempotencyKey: string) {
+    const source = await this.officialSource(selection.source_context);
+    if (source.objective !== "Pedido" || !selection.product_ids.length || !selection.chain_ids.length || !idempotencyKey) throw new PreviewReadError("REQUEST_001");
+    const result = await this.e4<PlanningRun>("/api/forecast/planning-runs", { ...selection, source_context: source, objective: "Pedido" }, idempotencyKey);
+    return checkPlanningRun(result, source);
+  }
+  async planningRuns(source: OperationalReadContext) {
+    const list = await this.e4<{ runs: PlanningRun[] }>("/api/forecast/planning-runs");
+    return list.runs.filter(r => r.source_hash === source.source_hash && r.generation === source.generation).map(r => checkPlanningRun(r,source));
+  }
+  async planningRun(id: string) {
+    const run = await this.e4<PlanningRun>(this.planningPath(id));
+    if (run.run_id !== id) throw new PreviewReadError("DATA_READ_FAILED");
+    return run;
+  }
+  async planningReport(id: string, selection: PlanningScope) {
+    return this.e4<PlanningReport>(this.planningPath(id) + "/report", selection, undefined, undefined, true);
+  }
+  private planningPath(id: string) {
+    if (!/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(id)) throw new PreviewReadError("REQUEST_001");
+    return "/api/forecast/planning-runs/" + id;
   }
   async calculations(chainId: string, productId: string) {
     const result = await this.e4<{ calculations: CalculationSummary[] }>(`/api/forecast/calculations?chain_id=${encodeURIComponent(chainId)}&product_id=${encodeURIComponent(productId)}`);
@@ -387,8 +418,11 @@ export class RailwayPreviewClient implements PreviewClient {
     if (query.source_context.forecast_contract !== "pedido-unificado-v1" || !forecastSourceAvailable(query.source_context)
       || forecastSourceState(query.source_context) !== "AVAILABLE") throw new PreviewReadError("CHAMPION_SOURCE_INELIGIBLE");
     const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    if (!Number.isSafeInteger(query.planning_year) || query.source_context.planning_start !== `${query.planning_year}-01`
-      || query.source_context.planning_end !== `${query.planning_year}-12` || !query.chain_ids.length || !query.product_ids.length
+    const rolling = query.window_start !== undefined || query.window_end !== undefined;
+    const validWindow = rolling ? Boolean(query.run_id && uuid.test(query.run_id) && /^20\d{2}-(0[1-9]|1[0-2])$/.test(query.window_start ?? "")
+      && Number(query.window_start!.slice(0,4)) === query.planning_year && addReportMonth(query.window_start!,11) === query.window_end)
+      : query.source_context.planning_start === `${query.planning_year}-01` && query.source_context.planning_end === `${query.planning_year}-12`;
+    if (!Number.isSafeInteger(query.planning_year) || !validWindow || !query.chain_ids.length || !query.product_ids.length
       || query.chain_ids.length > 100 || query.product_ids.length > 2000
       || [...query.chain_ids, ...query.product_ids].some(id => !uuid.test(id))
       || new Set(query.chain_ids).size !== query.chain_ids.length || new Set(query.product_ids).size !== query.product_ids.length)
@@ -397,6 +431,13 @@ export class RailwayPreviewClient implements PreviewClient {
   async currentChampion(query: LocalChampionQuery): Promise<LocalChampions> {
     this.localChampionScope(query);
     const source = await this.officialSource(query.source_context);
+    if (query.window_start && query.run_id) {
+      const response = await this.e4<LocalChampions>(this.planningPath(query.run_id) + "/champion",
+        { source_context: source, chain_ids: query.chain_ids, product_ids: query.product_ids, window_start: query.window_start, window_end: query.window_end }, undefined, undefined, true);
+      if (response.run_id !== query.run_id || response.window_start !== query.window_start || response.window_end !== query.window_end
+        || !matchesOfficialSource(response.source_context, source) || response.products.some(r => !query.product_ids.includes(r.product.product_id))) throw new PreviewReadError("DATA_READ_FAILED");
+      return response;
+    }
     const params = new URLSearchParams({ planning_year: String(query.planning_year) });
     query.chain_ids.forEach(id => params.append("chain_ids", id));
     if (hostedG6Enabled()) query.product_ids.forEach(id => params.append("product_ids", id));
@@ -422,10 +463,19 @@ export class RailwayPreviewClient implements PreviewClient {
   }
   async promoteChampion(request: LocalChampionRequest, idempotencyKey: string) {
     this.localChampionScope(request);
-    if (request.confirm !== true || !["STATISTICAL", "ML", "ENSEMBLE", "COMMERCIAL_PLAN"].includes(request.candidate_family)
+    if (request.confirm !== true || (!["STATISTICAL", "ML", "ENSEMBLE", "COMMERCIAL_PLAN"].includes(request.candidate_family)
+      && !(request.candidate_family === "COLD_START" && request.window_start && request.accept_cold_start === true))
       || !request.run_id || !request.comment.trim() || !idempotencyKey) throw new PreviewReadError("REQUEST_001");
     const source = await this.officialSource(request.source_context);
     if (!championPublicationEnabled(await this.vintageCapabilities())) throw new PreviewReadError(hostedG6Enabled() ? "HOSTED_CHAMPION_DISABLED" : "LOCAL_CHAMPION_DISABLED");
+    if (request.window_start) {
+      const result = await this.e4<{champion_id: string; status: string}>(this.planningPath(request.run_id) + "/champion/promote", {
+        source_context: source, chain_ids: request.chain_ids, product_ids: request.product_ids, window_start: request.window_start, window_end: request.window_end,
+        candidate_family: request.candidate_family, confirm: true, comment: request.comment, accept_cold_start: request.accept_cold_start === true,
+      }, idempotencyKey);
+      if (!result.champion_id || result.status !== "ACTIVE") throw new PreviewReadError("DATA_READ_FAILED");
+      return result.champion_id;
+    }
     const payload: LocalChampionRequest = { source_context: source, planning_year: request.planning_year, run_id: request.run_id,
       candidate_family: request.candidate_family, chain_ids: request.chain_ids, product_ids: request.product_ids,
       confirm: true, comment: request.comment };

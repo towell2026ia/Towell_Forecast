@@ -85,7 +85,10 @@ describe("One pinned Champion read for Períodos and XLSX", () => {
     const matrix = buildForecastMatrix(after, emptyReportChoice, [null, null]);
     expect(matrix.rows.every(row => row.adopted === null && row.values["2027-01"].TOWELL === null)).toBe(true);
     const sheets = operationalPeriodsSheets(after, dashboard, [], []);
-    expect(sheets.slice(1)).toEqual(beforeSheets.slice(1));
+    // Existing evidence and candidate worksheets remain frozen. The new
+    // directorial plan intentionally reflects the persisted human choice.
+    expect(sheets.slice(1, 7)).toEqual(beforeSheets.slice(1, 7));
+    expect(sheets.find(sheet => sheet.name === "Plan mensual")!.rows.some(row => row.includes("Champion elegido"))).toBe(true);
     const trace = sheets[0];
     expect(trace.headers).toEqual(["Campo", "Valor"]);
     expect(trace.rows).toContainEqual(["Horizonte del plan · 2027-01", "H1"]);

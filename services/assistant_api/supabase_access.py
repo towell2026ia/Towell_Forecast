@@ -38,6 +38,23 @@ COMMERCIAL_CLOSE_BASIS = "OBSERVED_AND_COMMERCIAL_CLOSE"
 ORDER_SHEETS = {"pedido-towell-v1": "Pedidos", UNIFIED_CONTRACT: "Base_2024_2026"}
 
 
+def _unified_calendar(context):
+    generation = context.get("generation")
+    if type(generation) is not int:
+        return False
+    start, end = context.get("planning_start"), context.get("planning_end")
+    if generation <= 6:
+        return (start, end) == ("2027-01", "2027-12")
+    cutoff, observed = context.get("training_cutoff"), context.get("observed_cutoff")
+    if not all(isinstance(p, str) and re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", p)
+               for p in (context.get("first_period"), observed, cutoff)):
+        return False
+    if not context["first_period"] <= observed <= cutoff:
+        return False
+    from services.forecast_engine.engine import add_month
+    return start == add_month(cutoff, 1) and end == add_month(cutoff, 12)
+
+
 def valid_fulfillment_context(context):
     if not any(key in context for key in ("fulfillment_source", "fulfillment_file_sha256", "fulfillment_available", "fulfillment_mode", "fulfillment_report_sha256")):
         return True
@@ -78,10 +95,10 @@ def require_sales_context(context, *, required=False, for_training=True):
         if contract == UNIFIED_CONTRACT:
             commercial = any(key in context for key in ("planning_basis", "observed_cutoff", "scenario_hash"))
             if (context.get("target_file_sha256") != UNIFIED_MASTER_SHA256
-                    or (context.get("planning_start"), context.get("planning_end")) != ("2027-01", "2027-12")
+                    or not _unified_calendar(context)
                     or not commercial and context.get("training_cutoff") != "2026-09"
                     or commercial and (context.get("planning_basis") != COMMERCIAL_CLOSE_BASIS
-                        or context.get("observed_cutoff") != "2026-09" or context.get("training_cutoff") != "2026-12"
+                        or context.get("generation") == 6 and (context.get("observed_cutoff") != "2026-09" or context.get("training_cutoff") != "2026-12")
                         or type(context.get("generation")) is not int or context["generation"] < 6
                         or not re.fullmatch(r"[0-9a-f]{64}", str(context.get("scenario_hash", ""))))):
                 raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 503)
@@ -215,7 +232,7 @@ class SupabaseReadClient:
 
     def read_rpc(self, name, arguments):
         """POST transports bounded read arrays without putting them in a URL."""
-        if not self.hosted_g6 or not self._token or name not in {"operational_read_planning_run", "operational_read_champions"}:
+        if not self.hosted_g6 or not self._token or name not in {"operational_read_planning_run", "operational_read_champions", "operational_read_rolling_scenario"}:
             raise PreviewError("AUTH_REQUIRED", 401)
         try:
             with httpx.Client(timeout=self.timeout, transport=self.transport, follow_redirects=False) as client:

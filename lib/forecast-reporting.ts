@@ -1,4 +1,5 @@
 import type { CalculationDetail, CalculationHorizon, LocalChampionRecord, LocalChampions, SelectionEvent, VintageCapabilities } from "./forecast-preview";
+import type { PlanningRun, PlanningReport } from "./rolling-planning";
 import type { Category, Chain, HistoricalRow, OperationalInventory, OperationalReadContext, Product } from "./supabase/types";
 import { forecastHistoryAvailable, forecastObjective, forecastTrainingCutoff, forecastSourceAvailable, forecastSourceIdentityFields, salesSourceIdentityFields, forecastSourceState } from "./official-sales-source";
 
@@ -13,7 +14,7 @@ export type ReportDecision = SelectionEvent & { chain_id: string; product_id: st
 export type ReportLive = { id: string; calculation_id: string; chain_id: string; product_id: string; horizon: number; target_period: string; candidate: string; forecast_value: number; actual_sale: number; sale_observation_id: string; sale_version_no: number; absolute_error: number; signed_error: number; evaluated_at: string };
 export type ProvisionalForecast = { job_id: string; chain_id: string; product_id: string; issue_period: string; created_at: string; engine_version: string; model: string; confidence: string; source_context?: Pick<OperationalReadContext, "source_hash" | "generation">; horizons: { horizon: number; target_period: string; value: number }[] };
 export type CustomerForecast = { id: string; chain_id: string; product_id: string; forecast_version_id: string; issue_period: string; version_no: number; target_period: string; value: number };
-export type ReportSnapshot = { products: Product[]; chains: Chain[]; categories: Category[]; calculations: ReportCalculation[]; horizons: ReportHorizon[]; decisions: ReportDecision[]; live: ReportLive[]; provisionals: ProvisionalForecast[]; customers: CustomerForecast[]; capabilities: VintageCapabilities; sourceContext?: OperationalReadContext; localChampions?: LocalChampions };
+export type ReportSnapshot = { products: Product[]; chains: Chain[]; categories: Category[]; calculations: ReportCalculation[]; horizons: ReportHorizon[]; decisions: ReportDecision[]; live: ReportLive[]; provisionals: ProvisionalForecast[]; customers: CustomerForecast[]; capabilities: VintageCapabilities; sourceContext?: OperationalReadContext; localChampions?: LocalChampions; planningRun?: PlanningRun; planningEvaluation?: PlanningReport["evaluation"] };
 export type ReportChoice = { version: string | null; issue: string | null; decision: "ALL" | "PENDING" | "ADOPTED"; calculationId?: string | null };
 export const emptyReportChoice: ReportChoice = { version: null, issue: null, decision: "ALL" };
 export function matchesOfficialSource(value: unknown, context: Pick<OperationalReadContext, "source_hash" | "generation"> & Partial<OperationalReadContext>) {
@@ -34,7 +35,10 @@ export function matchesOfficialSource(value: unknown, context: Pick<OperationalR
     source.source_hash === context.source_hash && source.generation === context.generation &&
     (source.sales_available === undefined || !("sales_available" in context) || source.sales_available === (context as OperationalReadContext).sales_available);
 }
-function compatibleForecastCut(issue: string, context?: OperationalReadContext, cutoffAt?: string) {
+type RunWindow = Pick<PlanningRun, "issue_period" | "window_start" | "window_end">;
+function compatibleForecastCut(issue: string, context?: OperationalReadContext, cutoffAt?: string, run?: RunWindow) {
+  if (run) return issue.slice(0, 7) === run.issue_period && (!cutoffAt || cutoffAt.slice(0, 7) === run.issue_period)
+    && run.window_start === addReportMonth(run.issue_period, 1) && run.window_end === addReportMonth(run.issue_period, 12);
   if (!context?.forecast_contract && context?.sales_contract !== "towell-sales-v1") return true;
   const period = issue.slice(0, 7);
   if (context.planning_basis && period !== context.training_cutoff) return false;
@@ -51,7 +55,12 @@ export function addReportMonth(issue: string, horizon: number) {
   return new Date(Date.UTC(year, month - 1 + horizon, 1)).toISOString().slice(0, 7);
 }
 /** The planning index and the statistical lead have distinct origins. */
-export function forecastTargetMonth(issue: string, horizon: number, context?: Partial<OperationalReadContext> | null) {
+export function forecastTargetMonth(issue: string, horizon: number, context?: Partial<OperationalReadContext> | null, run?: RunWindow) {
+  if (run) {
+    if (issue.slice(0, 7) !== run.issue_period || run.window_end !== addReportMonth(run.window_start, 11)
+      || run.window_start !== addReportMonth(issue, 1)) throw new Error("report_horizon_lineage");
+    return addReportMonth(run.window_start, horizon - 1);
+  }
   if (context?.forecast_contract === "pedido-unificado-v1") {
     if (forecastSourceState(context) !== "AVAILABLE" || issue.slice(0, 7) !== context.training_cutoff)
       throw new Error("report_horizon_lineage");
@@ -92,7 +101,8 @@ export function chooseCalculations(snapshot: ReportSnapshot, choice: ReportChoic
   if (!forecastSourceAvailable(snapshot.sourceContext)) return grouped;
   for (const calculation of snapshot.calculations) {
     if (snapshot.sourceContext && !matchesOfficialSource(calculation.input_snapshot?.source_context, snapshot.sourceContext)) continue;
-    if (!compatibleForecastCut(calculation.issue_period, snapshot.sourceContext, calculation.cutoff_at)) continue;
+    if (snapshot.planningRun && calculation.input_snapshot?.planning_run_id !== snapshot.planningRun.run_id) continue;
+    if (!compatibleForecastCut(calculation.issue_period, snapshot.sourceContext, calculation.cutoff_at, snapshot.planningRun)) continue;
     if (calculation.objective !== forecastObjective(snapshot.sourceContext) || !["READY_FOR_DECISION", "DECIDED", "SUPERSEDED"].includes(calculation.status) ||
       choice.calculationId && calculation.id !== choice.calculationId || choice.version && calculation.calculation_code !== choice.version || choice.issue && calculation.issue_period.slice(0, 7) !== choice.issue) continue;
     const key = `${calculation.chain_id}/${calculation.product_id}`;
@@ -109,19 +119,20 @@ export function validDecision(snapshot: ReportSnapshot, calculation: ReportCalcu
   const rows = snapshot.horizons.filter(h => h.calculation_id === calculation.id);
   const field = { STATISTICAL: "statistical_value", ML: "ml_value", ENSEMBLE: "ensemble_value" }[event.selected_candidate] as "statistical_value" | "ml_value" | "ensemble_value";
   if (!field || event.selected_curve.length !== 12 || new Set(event.selected_curve.map(h => h.horizon)).size !== 12 ||
-    event.selected_curve.some(h => h.target_period.slice(0, 7) !== forecastTargetMonth(calculation.issue_period, h.horizon, snapshot.sourceContext) ||
+    event.selected_curve.some(h => h.target_period.slice(0, 7) !== forecastTargetMonth(calculation.issue_period, h.horizon, snapshot.sourceContext, snapshot.planningRun) ||
       amount(h.value) === null || !rows.some(r => r.horizon === h.horizon && r.target_period.slice(0, 7) === h.target_period.slice(0, 7) && amount(r[field]) === Number(h.value)))) throw new Error("decision_lineage_invalid");
   return event;
 }
 export function buildForecastMatrix(snapshot: ReportSnapshot, choice: ReportChoice, periodRange: [string | null, string | null]) {
-  const provisionals = !forecastSourceAvailable(snapshot.sourceContext) ? [] : snapshot.sourceContext ? snapshot.provisionals.filter(row => matchesOfficialSource(row.source_context, snapshot.sourceContext!) && compatibleForecastCut(row.issue_period, snapshot.sourceContext)) : snapshot.provisionals;
+  const provisionals = !forecastSourceAvailable(snapshot.sourceContext) ? [] : snapshot.sourceContext ? snapshot.provisionals.filter(row => matchesOfficialSource(row.source_context, snapshot.sourceContext!) && compatibleForecastCut(row.issue_period, snapshot.sourceContext, undefined, snapshot.planningRun)
+    && (!snapshot.planningRun || row.job_id === snapshot.planningRun.run_id)) : snapshot.provisionals;
   let selected = chooseCalculations(snapshot, choice);
   const anchor = [...selected.values()].sort((a, b) => a.issue_period.localeCompare(b.issue_period) || a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id)).at(-1);
-  const issue = forecastSourceAvailable(snapshot.sourceContext) ? anchor?.issue_period.slice(0, 7) ?? choice.issue ?? provisionals.map(p => p.issue_period).sort().at(-1) ?? null : null;
+  const issue = forecastSourceAvailable(snapshot.sourceContext) ? snapshot.planningRun?.issue_period ?? anchor?.issue_period.slice(0, 7) ?? choice.issue ?? provisionals.map(p => p.issue_period).sort().at(-1) ?? null : null;
   // Product datasets and winners stay separate. Only compatible frozen curves
   // with the same objective, cut, engine and evidence mode may be consolidated.
   if (anchor) selected = chooseCalculations({ ...snapshot, calculations: snapshot.calculations.filter(c => c.objective === anchor.objective && c.issue_period.slice(0, 7) === issue && c.engine_version === anchor.engine_version && c.evidence_mode === anchor.evidence_mode) }, choice);
-  const months = issue ? Array.from({ length: 12 }, (_, i) => forecastTargetMonth(issue, i + 1, snapshot.sourceContext)) : [];
+  const months = issue ? Array.from({ length: 12 }, (_, i) => forecastTargetMonth(issue, i + 1, snapshot.sourceContext, snapshot.planningRun)) : [];
   const periods = months.filter(p => (!periodRange[0] || p >= periodRange[0]) && (!periodRange[1] || p <= periodRange[1]));
   const leaf = leafScopeIds(snapshot.chains, new Set(snapshot.products.map(p => p.chain_id)));
   const chains = new Map(snapshot.chains.map(c => [c.id, c.name])), categories = new Map(snapshot.categories.map(c => [c.id, c.name]));
@@ -140,7 +151,7 @@ export function buildForecastMatrix(snapshot: ReportSnapshot, choice: ReportChoi
       values[period] = { STATISTICAL: amount(h?.statistical_value), ML: amount(h?.ml_value), ENSEMBLE: amount(h?.ensemble_value),
         COLD_START: amount(provisional?.horizons.find(r => r.target_period.slice(0, 7) === period)?.value), TOWELL: amount(adopted?.selected_curve.find(r => r.target_period.slice(0, 7) === period)?.value) };
     }
-    if (calculation && snapshot.sourceContext?.forecast_contract === "pedido-unificado-v1") {
+    if (calculation && !snapshot.planningRun && snapshot.sourceContext?.forecast_contract === "pedido-unificado-v1") {
       const bridge = calculation.input_snapshot.bridge_horizons;
       const [year, month] = calculation.issue_period.slice(0, 7).split("-").map(Number);
       const [startYear, startMonth] = snapshot.sourceContext.planning_start!.split("-").map(Number);

@@ -8,9 +8,10 @@ import { modelKey } from "@/lib/commercial-filters";
 import { PeriodsComparisonChart } from "@/components/forecast/periods-comparison-chart";
 import { operationalPeriodsSheets } from "@/lib/operational-periods-xlsx";
 import { planningXlsx } from "@/lib/planning-xlsx";
-import { useForecastFilters, useOperationPin, useRead } from "./forecast-towell-app";
+import { useForecastFilters, useOperationPin, usePlanningReport, useRead } from "./forecast-towell-app";
 import { CalculationFilters, ReportPaging, ReportSelect, ReportState, ReportTable, reportNumber, reportPercent } from "./report-controls";
 import { forecastSourceAvailable, forecastUnavailableMessage, forecastHistoryAvailable } from "@/lib/official-sales-source";
+import { readPlanningReport as readStoredPlanningReport } from "@/lib/rolling-planning";
 
 const candidates = ["STATISTICAL", "ML", "ENSEMBLE"] as const;
 const modelName = (r: ForecastMatrixRow) => r.product.commercial?.model ? modelKey(r.product.commercial.model) : "Sin identificar";
@@ -30,6 +31,7 @@ export function ForecastPeriodsView() {
 function StoredPeriods() {
   const { repository, filters } = useForecastFilters();
   const pin = useOperationPin();
+  const readPlanningReport = usePlanningReport();
   const report = useRead(useCallback(async () => {
     if (!repository.getReportSnapshot) throw new Error("report_unavailable");
     const context = await pin();
@@ -41,12 +43,12 @@ function StoredPeriods() {
     const fulfillmentRead = context?.fulfillment_available === true ? repository.getReportFulfillment ? repository.getReportFulfillment(historyFilters, context)
       .then(rows => ({ rows, error: false }), () => ({ rows: [], error: true })) : Promise.resolve({ rows: [], error: true }) : Promise.resolve({ rows: [], error: false });
     const [snapshot, history, stock, fulfillment] = await Promise.all([
-      context ? repository.getReportSnapshot(filters, context) : repository.getReportSnapshot(filters),
+      readPlanningReport(filters, context),
       (context ? repository.getReportHistory?.(historyFilters, context) : repository.getReportHistory?.(historyFilters)) ?? Promise.resolve([]), inventoryRead, fulfillmentRead,
     ]);
     return { snapshot, history, inventory: stock.rows, inventoryError: stock.error, fulfillment: fulfillment.rows, fulfillmentError: fulfillment.error, historyComplete: Boolean(repository.getReportHistory) };
-  }, [repository, filters, pin]));
-  return <section className="min-w-0 space-y-5"><div><h1 className="text-2xl font-semibold text-slate-950">Periodos</h1><p className="mt-1 text-sm text-slate-500">Desempeño comercial y forecast almacenado</p></div><ReportState loading={report.loading} error={report.error} errorCode={report.errorCode}/>{report.data && <Matrix key={JSON.stringify(filters)} {...report.data} periods={filters.periodRange}/>}</section>;
+  }, [repository, filters, pin, readPlanningReport]));
+  return <section className="min-w-0 space-y-5"><div><h1 className="text-2xl font-semibold text-slate-950">Periodos</h1><p className="mt-1 text-sm text-slate-500">Desempeño comercial y forecast almacenado</p></div><ReportState loading={report.loading} error={report.error} errorCode={report.errorCode}/>{report.data && <Matrix key={JSON.stringify([filters, report.data.snapshot.planningRun?.run_id])} {...report.data} periods={filters.periodRange}/>}</section>;
 }
 function Matrix({ snapshot, history, inventory, inventoryError, fulfillment, fulfillmentError, periods, historyComplete = false }: { snapshot: ReportSnapshot; history: HistoricalRow[]; inventory: OperationalInventory[]; fulfillment: OperationalFulfillment[]; fulfillmentError: boolean; periods: Filters["periodRange"]; inventoryError: boolean; historyComplete?: boolean }) {
   const [choice, setChoice] = useState({ ...emptyReportChoice });
@@ -85,9 +87,13 @@ function Matrix({ snapshot, history, inventory, inventoryError, fulfillment, ful
   </>;
 }
 function OperationalDownload({ snapshot, dashboard, history, inventory, inventoryError, fulfillmentError, historyComplete }: { snapshot: ReportSnapshot; dashboard: ReturnType<typeof periodsDashboard>; history: HistoricalRow[]; inventory: OperationalInventory[]; inventoryError?: boolean; fulfillmentError?: boolean; historyComplete: boolean }) {
-  const { repository } = useForecastFilters();
+  const { repository, filters, planningRuns } = useForecastFilters();
   const [error, setError] = useState("");
+  const [comparisonRunId, setComparisonRunId] = useState("");
   const context = snapshot.sourceContext!;
+  const comparisons = (planningRuns ?? []).filter(run => run.status === "READY" && run.run_id !== snapshot.planningRun?.run_id
+    && run.source_hash === context.source_hash && run.generation === context.generation
+    && snapshot.planningRun && Date.parse(run.created_at) < Date.parse(snapshot.planningRun.created_at));
   const scope = new Set(dashboard.matrix.rows.map(row => row.product.id));
   const selectedInventory = inventory.filter(row => scope.has(row.product_id));
   async function download() {
@@ -101,8 +107,21 @@ function OperationalDownload({ snapshot, dashboard, history, inventory, inventor
         setError("La fuente oficial cambió. Actualiza la consulta antes de descargar.");
         return;
       }
+      let previousSnapshot: ReportSnapshot | undefined;
+      if (comparisonRunId) {
+        if (!snapshot.planningRun || !repository.getReportSnapshot || comparisonRunId !== "G6" && !comparisons.some(run => run.run_id === comparisonRunId)) throw new Error("report_comparison_scope");
+        const base = await repository.getReportSnapshot(filters, current);
+        if (!base.sourceContext || !matchesOfficialSource(base.sourceContext, context)) throw new Error("official_source_changed");
+        if (comparisonRunId === "G6") previousSnapshot = base;
+        else {
+          if (!repository.previews) throw new Error("planning_run_unavailable");
+          previousSnapshot = await readStoredPlanningReport(base, comparisonRunId, repository.previews);
+        }
+        const after = await repository.openOperationalRead?.();
+        if (!after || !matchesOfficialSource(after, current)) throw new Error("official_source_changed");
+      }
       stage = "SHEETS";
-      const sheets = operationalPeriodsSheets(snapshot, dashboard, history, selectedInventory, historyComplete);
+      const sheets = operationalPeriodsSheets(snapshot, dashboard, history, selectedInventory, historyComplete, { previousSnapshot });
       stage = "SERIALIZE";
       const bytes = planningXlsx(sheets);
       stage = "BLOB";
@@ -111,13 +130,13 @@ function OperationalDownload({ snapshot, dashboard, history, inventory, inventor
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = `FORECAST_Towell_Periodos_${context.forecast_contract ? "Pedido_" : ""}${context.source_hash.slice(0, 12)}_g${context.generation}.xlsx`;
+      link.download = `FORECAST_Towell_Periodos_${context.forecast_contract ? "Pedido_" : ""}${context.source_hash.slice(0, 12)}_g${context.generation}${snapshot.planningRun ? `_${snapshot.planningRun.run_id.slice(0, 8)}_${snapshot.planningRun.window_start}_${snapshot.planningRun.window_end}` : ""}${comparisonRunId ? `_vs_${comparisonRunId === "G6" ? "G6" : comparisonRunId.slice(0, 8)}` : ""}.xlsx`;
       stage = "NATIVE_CLICK";
       link.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (cause) { setError(operationalDownloadErrorMessage(stage, cause)); }
   }
-  return <div className="flex flex-wrap items-center gap-3 text-xs text-slate-600"><span title={context.source_hash}>Fuente oficial · {context.first_period} a {context.last_period} · Actualización {context.generation}{context.forecast_contract ? ` · Objetivo Pedido · Hoja ${context.target_sheet} · Inventario: Estadística` : context.sales_contract ? " · Ventas: Towell · Inventario: Estadística" : ""}</span><span>Inventario: {inventoryError ? "Error de consulta" : selectedInventory.length ? `${selectedInventory.length} producto-meses con dato` : "Sin dato"}</span><button type="button" className="underline" onClick={() => void download()}>Descargar XLSX de Períodos</button>{error && <p role="alert">{error}</p>}</div>;
+  return <div className="flex flex-wrap items-center gap-3 text-xs text-slate-600"><span title={context.source_hash}>Fuente oficial · {context.first_period} a {context.last_period} · Actualización {context.generation}{context.forecast_contract ? ` · Objetivo Pedido · Hoja ${context.target_sheet} · Inventario: Estadística` : context.sales_contract ? " · Ventas: Towell · Inventario: Estadística" : ""}</span><span>Inventario: {inventoryError ? "Error de consulta" : selectedInventory.length ? `${selectedInventory.length} producto-meses con dato` : "Sin dato"}</span>{snapshot.planningRun && <label>Comparar con <select aria-label="Comparar exportación con" value={comparisonRunId} onChange={event => setComparisonRunId(event.target.value)}><option value="">Sin comparación</option><option value="G6">G6 original</option>{comparisons.map(run => <option key={run.run_id} value={run.run_id}>{run.window_start} a {run.window_end} · {run.run_id.slice(0, 8)}</option>)}</select></label>}<button type="button" className="underline" onClick={() => void download()}>Descargar XLSX de Períodos</button>{error && <p role="alert">{error}</p>}</div>;
 }
 function CompactMatrix({ rows, scope, periods, horizonOrigin }: { rows: ForecastMatrixRow[]; scope: ForecastMatrixRow[]; periods: string[]; horizonOrigin: string | null }) {
   const [id, setId] = useState(rows.length === 1 ? rows[0].product.id : "all");

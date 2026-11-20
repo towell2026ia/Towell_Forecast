@@ -58,7 +58,7 @@ export function storedCommercialScope(snapshot: ReportSnapshot, filters: Filters
       || filters.productId && product.id !== filters.productId || !matchesCommercial(product, filters))) throw new Error("stored_scope_mismatch");
   const matrix = buildForecastMatrix(snapshot, emptyReportChoice, [null, null]);
   const selected = matrix.rows.find(row => row.calculation)?.calculation;
-  const source = original?.chain_id === filters.chainId && matchesOfficialSource(original.source_context, snapshot.sourceContext)
+  const source = !snapshot.planningRun && original?.chain_id === filters.chainId && matchesOfficialSource(original.source_context, snapshot.sourceContext)
     && (original.objective ?? "Venta") === forecastObjective(snapshot.sourceContext)
     && (!selected || original.engine_version === selected.engine_version && original.issue_period === selected.issue_period.slice(0, 7)
       && (!original.mode || original.mode === selected.evidence_mode)) ? original : null;
@@ -98,7 +98,7 @@ export function storedCommercialScope(snapshot: ReportSnapshot, filters: Filters
         || !Number.isSafeInteger(candidate.windows) || candidate.windows < 0
         || [candidate.wape, candidate.bias, candidate.mae, candidate.rmse, candidate.stability].some(value => value != null && !Number.isFinite(value))
         || candidate.horizons.length !== 12 || new Set(candidate.horizons.map(h => h.horizon)).size !== 12
-        || candidate.horizons.some(h => h.target_period.slice(0, 7) !== forecastTargetMonth(issue, h.horizon, snapshot.sourceContext)
+        || candidate.horizons.some(h => h.target_period.slice(0, 7) !== forecastTargetMonth(issue, h.horizon, snapshot.sourceContext, snapshot.planningRun)
           || !horizons.some(stored => stored.horizon === h.horizon && stored[field] !== null && stored[field] === h.value))) throw new Error("stored_candidate_lineage_invalid");
       candidates.push(candidate);
     }
@@ -139,14 +139,18 @@ export function storedCommercialScope(snapshot: ReportSnapshot, filters: Filters
   });
   const singleStat = products.length === 1 ? statCandidates[0] : undefined;
   const singleMl = products.length === 1 ? candidates.find(c => c.family === "ml") : undefined;
+  const evidence = snapshot.planningEvaluation;
+  const common = evidence?.observations && evidence.total_variants === products.length && evidence.covered_variants === evidence.product_ids.length
+    && evidence.product_ids.every(id => products.some(p => p.product_id === id)) && evidence.families.STATISTICAL?.wape != null ? evidence : undefined;
+  const leader = common?.scope_leader?.family;
   return { ...source, chain_id: presentationChain, chain_name: filters.chainId ? snapshot.chains.find(chain => chain.id === filters.chainId)?.name : `${chainIds.length} cadenas autorizadas`, objective: forecastObjective(snapshot.sourceContext) ?? undefined,
     status: "PREVIEW", issue_period: issue, latest_actual_period: snapshot.sourceContext.observed_cutoff ?? snapshot.sourceContext.last_period,
     engine_version: selected?.engine_version ?? source?.engine_version, mode: "RETROSPECTIVE_TRAINING", evaluation_mode: "RETROSPECTIVE_EVALUATION",
-    source_context: snapshot.sourceContext, provisional_cold_start: undefined, products, aggregates,
+    source_context: snapshot.sourceContext, planning_window: snapshot.planningRun, provisional_cold_start: undefined, products, aggregates,
     commercial_projection: { filter_key: commercialScopeKey(filters), chain_ids: chainIds, product_ids: products.map(p => p.product_id).sort(), products: products.length, statistical, ml, ensemble: statistical,
       ml_models: [...new Set(Object.values(mlWinners).filter((model): model is string => Boolean(model)))], source: "STORED_CALCULATIONS" },
     stored_results: { objective: selected?.objective ?? forecastObjective(snapshot.sourceContext) ?? "Sin objetivo acreditado", issue_period: issue || "Sin cierre acreditado",
-      consolidated_metrics_status: products.length === 1 ? "SINGLE_PRODUCT" : "NOT_ACCREDITED",
+      evaluation: common, consolidated_metrics_status: common ? "COMMON_PAIRS" : products.length === 1 ? "SINGLE_PRODUCT" : "NOT_ACCREDITED",
       consolidated_reason: products.length === 1 ? "Métricas retrospectivas guardadas del producto y cálculo seleccionado."
         : "WAPE consolidado no acreditado: no se guardaron los errores y denominadores comparables por observación. No se promedian porcentajes.",
       products: matrix.rows.map(row => {
@@ -169,6 +173,7 @@ export function storedCommercialScope(snapshot: ReportSnapshot, filters: Filters
           engine_version: row.calculation?.engine_version ?? null, evidence_mode: row.calculation?.evidence_mode ?? null,
           status: row.calculation?.status ?? "SIN_CALCULO_COMPATIBLE", statistical_model: products.find(p => p.product_id === row.product.id)?.statistical_model ?? null,
           ml_model: mlWinners[row.product.id] ?? null, candidates: own, suggested_reference: suggestions[row.product.id] ?? null, decision_history: history,
+          cold_start: row.provisional ? { method: row.provisional.model, horizons: row.provisional.horizons } : undefined,
           // A newer undecided calculation does not revoke the last explicit
           // FT-Decision. Keep that event's own calculation and cut visible.
           decision: history.at(-1) ?? null };
@@ -180,7 +185,7 @@ export function storedCommercialScope(snapshot: ReportSnapshot, filters: Filters
     ml: { status: ml ? "COMPLETED" : "NOT_ELIGIBLE", training_samples: null, leader: singleMl?.model ?? null,
       candidates: mlCandidates, available_candidates: mlCandidates.map(c => c.model),
       retrospective_wape: singleMl?.wape ?? null, retrospective_bias: singleMl?.bias ?? null },
-    selection: { published_champion: null, preview_leader: null, scope_leader: null, preview_challenger: null,
+    selection: { published_champion: null, preview_leader: null, scope_leader: leader ? { model: { STATISTICAL: "Estadístico", ML: "Machine Learning", ENSEMBLE: "Ensemble" }[leader] } : null, preview_challenger: null,
       suggested_reference: products.length === 1 ? suggestions[products[0].product_id] : undefined,
       suggested_references: suggestions, product_ml_winners: mlWinners, product_candidates: candidates, no_degradation: null, automatic_promotion: false },
   };
@@ -290,7 +295,7 @@ export function scopeHorizons(scope: PreviewScope | null, filters: Filters): Hor
   else if ((filters.search.trim() || hasCommercialFilters(filters)) && scope.commercial_projection?.filter_key !== commercialScopeKey(filters)) rows = [];
   else rows = scope.aggregates?.filter(r => r.level === (filters.categoryId && !projected ? "category" : "chain") && r.key === (filters.categoryId && !projected ? filters.categoryId : filters.chainId ?? scope.chain_id)) ?? [];
   // Dates and numbers remain backend values; malformed/partial results are not repaired.
-  if (rows.length !== 12 || new Set(rows.map(r => r.horizon)).size !== 12 || rows.some(r => r.horizon < 1 || r.horizon > 12 || r.target_period !== forecastTargetMonth(scope.issue_period!, r.horizon, scope.source_context) || !Number.isFinite(r.forecast_towell))) return [];
+  if (rows.length !== 12 || new Set(rows.map(r => r.horizon)).size !== 12 || rows.some(r => r.horizon < 1 || r.horizon > 12 || r.target_period !== forecastTargetMonth(scope.issue_period!, r.horizon, scope.source_context, scope.planning_window) || !Number.isFinite(r.forecast_towell))) return [];
   return [...rows].sort((a, b) => a.horizon - b.horizon);
 }
 export type ProvisionalHorizon = { horizon: number; target_period: string; value: number };
@@ -299,7 +304,7 @@ export function scopeProvisionalHorizons(scope: PreviewScope | null, filters: Fi
       !scope.products?.some(product => product.product_id === filters.productId && (!filters.categoryId || product.category_id === filters.categoryId))) return [];
   const rows = scope.provisional_cold_start?.horizons ?? [];
   if (rows.length !== 12 || new Set(rows.map(row => row.horizon)).size !== 12 || rows.some(row =>
-    row.horizon < 1 || row.horizon > 12 || row.target_period !== forecastTargetMonth(scope.issue_period!, row.horizon, scope.source_context) ||
+    row.horizon < 1 || row.horizon > 12 || row.target_period !== forecastTargetMonth(scope.issue_period!, row.horizon, scope.source_context, scope.planning_window) ||
     !Number.isFinite(row.value) || row.value < 0)) return [];
   return [...rows].sort((a, b) => a.horizon - b.horizon);
 }

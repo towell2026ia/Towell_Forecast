@@ -46,6 +46,7 @@ jobs:
       - run: python -m unittest services.planning_pilot.test_engine -q
       - run: python -m unittest services.operational_update.test_preparation -q
       - run: python -m unittest services.operational_update.test_unification -q
+      - run: python -m unittest services.operational_update.test_rolling_operation -v
       - run: python -m unittest services.operational_update.test_unified_source services.operational_update.test_unified_runtime services.operational_update.test_unified_scenario services.operational_update.test_planning_engine services.operational_update.test_commercial_close services.operational_update.test_baase_reported -q
       - run: python -m unittest services.operational_update.test_official_source services.operational_update.test_official_forecast -q
       - run: python -m unittest services.operational_update.test_towell_sales_source services.operational_update.test_towell_source_runtime services.operational_update.test_pedidos_source -q

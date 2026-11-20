@@ -65,6 +65,8 @@ class Settings:
     supabase_enabled: bool = False
     operational_preview_enabled: bool = False
     hosted_unified_planning_enabled: bool = False
+    rolling_planning_enabled: bool = False
+    rolling_planning_single_writer: bool = False
     vintage_persistence_enabled: bool = False
     official_publication_enabled: bool = False
     champion_publication_enabled: bool = False
@@ -117,6 +119,13 @@ class Settings:
         return f"forecast-towell-frontend:{self.app_env}"
 
     def validate(self) -> "Settings":
+        if self.rolling_planning_enabled:
+            local = (self.app_env in {"development", "test"} and self.api_host == "127.0.0.1"
+                     and not self.railway_runtime and self.local_postgres_config is not None)
+            hosted = (self.hosted_unified_planning_enabled and self.persistence_mode == "hosted-volume"
+                      and self.rolling_planning_single_writer and self.database_path.is_absolute())
+            if not self.operational_preview_enabled or not (local or hosted):
+                raise ValueError("rolling_planning_local_or_durable_hosted_required")
         if self.hosted_unified_planning_enabled and (self.local_postgres_config is not None
                 or self.supabase_url.rstrip("/") != "https://bskoyqhbgrycpwhydnnr.supabase.co"
                 or self.data_provider != "supabase" or not self.supabase_enabled or not self.operational_preview_enabled
@@ -274,6 +283,8 @@ class Settings:
             supabase_enabled=flag("SUPABASE_ENABLED", False),
             operational_preview_enabled=flag("OPERATIONAL_PREVIEW_ENABLED", False),
             hosted_unified_planning_enabled=flag("HOSTED_UNIFIED_PLANNING_ENABLED", False),
+            rolling_planning_enabled=flag("ROLLING_PLANNING_ENABLED", False),
+            rolling_planning_single_writer=flag("ROLLING_PLANNING_SINGLE_WRITER", False),
             vintage_persistence_enabled=flag("VINTAGE_PERSISTENCE_ENABLED", False),
             official_publication_enabled=flag("OFFICIAL_PUBLICATION_ENABLED", False),
             champion_publication_enabled=flag("CHAMPION_PUBLICATION_ENABLED", False),

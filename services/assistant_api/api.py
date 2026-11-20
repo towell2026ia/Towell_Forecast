@@ -94,6 +94,7 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
     local_database = None
     local_champion = None
     hosted_champion = None
+    rolling_planning = None
     if config.local_postgres_config is not None:
         from .local_postgres import LocalPostgresGateway
         local_database = LocalPostgresGateway(config)
@@ -160,6 +161,15 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
         hosted_planning=config.hosted_unified_planning_enabled,
         planning_reference=local_database.config.get("local_champion_planning_run") if local_database else None) if config.operational_preview_enabled else None
     app.state.preview_runner = preview_runner
+    if config.rolling_planning_enabled:
+        from .rolling_planning import LocalRollingInputLoader, RollingPlanningService
+        from .rolling_inputs import HostedRollingInputLoader
+        input_loader = HostedRollingInputLoader() if config.hosted_unified_planning_enabled else LocalRollingInputLoader(local_database.sales_policy)
+        rolling_planning = RollingPlanningService(storage, input_loader,
+                                                  concurrency=config.max_forecast_runs, hosted=config.hosted_unified_planning_enabled)
+    app.state.rolling_planning = rolling_planning
+    from .rolling_api import mount_rolling_routes
+    mount_rolling_routes(app, config, identity, data, rolling_planning, rate_limiter)
     if preview_runner:
         write_repository = SupabaseForecastWriteRepository(config.supabase_url, config.supabase_service_role_key,
             timeout=config.external_timeout_seconds) if not config.hosted_unified_planning_enabled and (config.vintage_persistence_enabled or any((
@@ -320,6 +330,7 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
                 "operational_preview": True,
                 "local_bounded_preview": local_database is not None,
                 "local_champion_publication": local_champion is not None,
+                "rolling_planning_execution": rolling_planning is not None,
                 "hosted_unified_planning": config.hosted_unified_planning_enabled,
                 "hosted_champion_publication": hosted_champion is not None,
                 "rs_assistant_enabled": config.ai_assistant_api_enabled,
@@ -648,6 +659,8 @@ def create_app(provider: DataProvider | None = None, historical_state_dir: Path 
 
     @app.on_event("shutdown")
     def shutdown() -> None:
+        if rolling_planning:
+            rolling_planning.close()
         if preview_runner:
             preview_runner.close()
         executor.shutdown(wait=True, cancel_futures=False)

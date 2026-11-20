@@ -106,15 +106,20 @@ function ChampionControls({ client, selection, canManage, onError }: { client: P
     }).catch(() => { if (alive) { setSaved(null); setLoading(false); onError("No fue posible consultar el Champion guardado."); } });
     return () => { alive = false; active.current = false; };
   }, [client, selection, onError]);
-  const ids = family ? selection.eligible[family] : [];
+  const ids = family ? selection.eligible[family] ?? [] : [];
   const unchanged = Boolean(saved && ids.length && ids.every(id => saved.products.some(row => row.product.product_id === id && row.run_id === selection.run_id && row.candidate_family === family)));
   async function save() {
     if (!canManage || loading || !saved || busy || running.current || !family || !ids.length || unchanged || !client.promoteChampion || !client.currentChampion) return;
-    if (!window.confirm(`¿Guardar Champion ${championFamilyNames[family]} para ${ids.length}/${selection.product_ids.length} productos del alcance seleccionado, enero–diciembre de ${selection.planning_year}?\nObjetivo: Pedido · Corrida: ${selection.run_id} · Fuente: ${selection.source_context.source_hash}.`)) return;
+    const windowLabel = selection.window_start && selection.window_end ? `${selection.window_start} a ${selection.window_end}` : `enero–diciembre de ${selection.planning_year}`;
+    const acceptance = family === "COLD_START"
+      ? `\nAcepto la estimación por análogos para ${ids.map(id => selection.productNames?.[id] ?? id).join(", ")}. El producto carece de WAPE propio y se desconoce qué parte de su demanda sería adicional.` : "";
+    if (!window.confirm(`¿Guardar Champion ${championFamilyNames[family]} para ${ids.length}/${selection.product_ids.length} productos del alcance seleccionado, ${windowLabel}?\nObjetivo: Pedido · Corrida: ${selection.run_id} · Fuente: ${selection.source_context.source_hash}.${acceptance}`)) return;
     running.current = true; setBusy(true); onError("");
     const request = { source_context: selection.source_context, planning_year: selection.planning_year, run_id: selection.run_id,
       candidate_family: family, chain_ids: [...new Set(ids.map(id => selection.productChains[id]))].sort(), product_ids: [...ids].sort(),
-      confirm: true as const, comment: `Elección explícita ${family}; corrida ${selection.run_id}; plan ${selection.planning_year}` };
+      ...(selection.window_start ? { window_start: selection.window_start, window_end: selection.window_end } : {}),
+      ...(family === "COLD_START" ? { accept_cold_start: true } : {}),
+      confirm: true as const, comment: `Elección explícita ${family}; corrida ${selection.run_id}; plan ${windowLabel}` };
     const signature = JSON.stringify(request);
     if (pending.current?.signature !== signature) pending.current = { signature, key: crypto.randomUUID() };
     try {
@@ -126,7 +131,7 @@ function ChampionControls({ client, selection, canManage, onError }: { client: P
     finally { running.current = false; if (active.current) setBusy(false); }
   }
   return <div className="flex flex-wrap gap-2"><select aria-label="Champion" className="rounded border p-2" value={family} disabled={!canManage || loading || !saved || busy} onChange={event => setFamily(event.target.value as ChampionFamily | "")}>
-    <option value="">Selecciona Champion</option>{championFamilies.map(value => <option key={value} value={value} disabled={!selection.eligible[value].length}>{championFamilyNames[value]} ({selection.eligible[value].length}/{selection.product_ids.length})</option>)}
+    <option value="">Selecciona Champion</option>{championFamilies.filter(value => value !== "COLD_START" || selection.window_start && selection.eligible[value]?.length).map(value => <option key={value} value={value} disabled={!selection.eligible[value]?.length}>{championFamilyNames[value]} ({selection.eligible[value]?.length ?? 0}/{selection.product_ids.length})</option>)}
   </select><Button disabled={!canManage || loading || !saved || busy || !family || !ids.length || unchanged} onClick={() => void save()}>Guardar Champion</Button></div>;
 }
 function ScopedE4Operations({ mode, client, chainId, productId, canWrite: writeAllowed, canDecide: decideAllowed, champion, canChampion, children }: E4OperationsProps) {

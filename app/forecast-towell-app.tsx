@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { BrainCircuit, CalendarRange, ClipboardCheck, Database, History, Home, LogOut, PanelLeft, ShieldCheck, Users, RotateCcw, SlidersHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -36,6 +36,7 @@ import { periodsDashboard } from "@/lib/periods-dashboard";
 import { emptyReportChoice, leafScopeIds, matchesOfficialSource } from "@/lib/forecast-reporting";
 import { officialSourceKey, forecastSourceAvailable, forecastSourceState, forecastUnavailableMessage, sourceReadMessage } from "@/lib/official-sales-source";
 import { PortalReadError } from "@/lib/portal-read-diagnostic";
+import { readPlanningReport, type PlanningRun } from "@/lib/rolling-planning";
 
 const modules = [
   ["inicio", "Inicio", Home], ["historico", "Histórico", History],
@@ -45,7 +46,7 @@ const modules = [
 ] as const;
 type ModuleId = typeof modules[number][0];
 export type PreviewView = { key: string; result: PreviewJob | null; job: PreviewJob | null; error: string; loading: boolean };
-type FilterState = { filters: Filters; setFilters: React.Dispatch<React.SetStateAction<Filters>>; repository: ForecastReadRepository; profile: Profile; pinOperational?: () => Promise<OperationalReadContext | undefined>; seriesVisibility?: SeriesVisibility; setSeriesVisibility?: React.Dispatch<React.SetStateAction<SeriesVisibility>>; preview?: PreviewView | null; setPreview?: React.Dispatch<React.SetStateAction<PreviewView | null>> };
+type FilterState = { filters: Filters; setFilters: React.Dispatch<React.SetStateAction<Filters>>; repository: ForecastReadRepository; profile: Profile; pinOperational?: () => Promise<OperationalReadContext | undefined>; seriesVisibility?: SeriesVisibility; setSeriesVisibility?: React.Dispatch<React.SetStateAction<SeriesVisibility>>; preview?: PreviewView | null; setPreview?: React.Dispatch<React.SetStateAction<PreviewView | null>>; planningRunId?: string | null; planningRuns?: PlanningRun[]; selectPlanningRun?: (id: string | null) => void };
 export const ForecastFiltersContext = createContext<FilterState | null>(null);
 export function useForecastFilters() {
   const state = useContext(ForecastFiltersContext);
@@ -55,6 +56,16 @@ export function useForecastFilters() {
 export function useOperationPin() {
   const { repository, pinOperational } = useForecastFilters();
   return useCallback(() => pinOperational?.() ?? repository.openOperationalRead?.() ?? Promise.resolve(undefined), [repository, pinOperational]);
+}
+export function usePlanningReport() {
+  const { repository, planningRunId } = useForecastFilters();
+  return useCallback(async (filters: Filters, context?: OperationalReadContext) => {
+    if (!repository.getReportSnapshot) throw new Error("report_unavailable");
+    const base = context ? await repository.getReportSnapshot(filters, context) : await repository.getReportSnapshot(filters);
+    if (!planningRunId) return base;
+    if (!repository.previews) throw new Error("planning_run_unavailable");
+    return readPlanningReport(base, planningRunId, repository.previews);
+  }, [repository, planningRunId]);
 }
 export function useRead<T>(load: () => Promise<T>) {
   const [result, setResult] = useState<{ load: typeof load; data: T | null; error: boolean; errorCode?: string } | null>(null);
@@ -108,9 +119,19 @@ async function scopeUnion<T extends { id: string }>(ids: string[] | null, read: 
   return [...new Map(pages.flat().map(row => [row.id, row])).values()];
 }
 
+function subscribePlanningSelection(refresh: () => void) {
+  window.addEventListener("towell-planning-selection", refresh);
+  return () => window.removeEventListener("towell-planning-selection", refresh);
+}
 export default function ForecastTowellApp({ profile, repository, onLogout }: { profile: Profile; repository: ForecastReadRepository; onLogout: () => Promise<void> }) {
   const [active, setActive] = useState<ModuleId>("inicio");
   const [motorVisited, setMotorVisited] = useState(false);
+  const storageKey = "towell.planning-run." + profile.id;
+  const planningRunId = useSyncExternalStore(subscribePlanningSelection, () => sessionStorage.getItem(storageKey), () => null);
+  const selectPlanningRun = useCallback((id: string | null) => {
+    if (id) sessionStorage.setItem(storageKey,id); else sessionStorage.removeItem(storageKey);
+    window.dispatchEvent(new Event("towell-planning-selection"));
+  }, [storageKey]);
   const [seriesVisibility, setSeriesVisibility] = useState<SeriesVisibility>({ ...defaultVisibility });
   const [filters, setFilters] = useState<Filters>(() => ({ ...emptyFilters, ...(repository.getCommercialCatalog && repository.openOperationalRead ? { purchaseType: "RS" as const } : {}) }));
   // One source fingerprint per interaction. A source update invalidates its
@@ -141,6 +162,13 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
         filters.scopeChainIds === undefined && chains.data?.some(c => c.parentId === filters.chainId))));
   const isCE = filters.purchaseType === "CE";
   const [previewView, setPreview] = useState<PreviewView | null>(null);
+  const runs = useRead(useCallback(async (): Promise<PlanningRun[]> => {
+    if ((active !== "motor" && active !== "periodos") || !repository.previews?.planningRuns) return [];
+    const source = await pinOperational();
+    if (source?.forecast_contract !== "pedido-unificado-v1" || !(await repository.previews.vintageCapabilities?.())?.rolling_planning_execution) return [];
+    const result = await repository.previews.planningRuns(source);
+    return result.sort((a,b) => Number(b.run_id === planningRunId) - Number(a.run_id === planningRunId));
+  }, [active, repository, pinOperational, planningRunId]));
   const previewRead = useRef<{ repository: ForecastReadRepository; key: string; source?: OperationalReadContext; task: Promise<PreviewJob | null> } | null>(null);
   const previewKey = previewScopeKey(filters);
   const previewChainId = selectedIds?.length === 1 ? selectedIds[0] : filters.chainId;
@@ -177,7 +205,7 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
     });
     return () => { alive = false; };
   }, [repository, previewChainId, filters.productId, previewKey, pinOperational, formatPending, isCE, multipleFormats]);
-  const state = useMemo(() => ({ filters, setFilters, repository, profile, pinOperational, seriesVisibility, setSeriesVisibility, preview: previewView?.key === previewKey ? previewView : null, setPreview }), [filters, repository, profile, pinOperational, seriesVisibility, previewView, previewKey]);
+  const state = useMemo(() => ({ filters, setFilters, repository, profile, pinOperational, planningRunId, planningRuns: runs.data ?? undefined, selectPlanningRun, seriesVisibility, setSeriesVisibility, preview: previewView?.key === previewKey ? previewView : null, setPreview }), [filters, repository, profile, pinOperational, planningRunId, runs.data, selectPlanningRun, seriesVisibility, previewView, previewKey]);
   const subtitle = chains.data?.find(c => c.id === filters.chainId)?.name ?? (profile.global_role === "ADMIN" ? "Todas las cadenas" : "Todas las cadenas autorizadas");
   const title = modules.find(([id]) => id === active)?.[1] ?? "Inicio";
   const assistantContext: AssistantContext = {
@@ -197,6 +225,12 @@ export default function ForecastTowellApp({ profile, repository, onLogout }: { p
     <SidebarInset className="min-w-0 bg-[#f7f9fc]">
       <header className="sticky top-0 z-30 flex min-h-16 flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-white/95 px-4 py-2 backdrop-blur md:px-7"><div className="flex min-w-0 items-center gap-3"><SidebarTrigger aria-label="Abrir navegación"><PanelLeft/></SidebarTrigger><div className="h-6 w-px bg-slate-200"/><div className="min-w-0"><p className="truncate text-sm font-semibold text-slate-950">{active === "inicio" ? "FORECAST Towell" : title}</p><p className="truncate text-xs text-slate-500">{subtitle}</p></div></div><div className="flex items-center gap-3"><div><p className="max-w-40 truncate text-sm font-medium">{profile.full_name || "Usuario"}</p><p className="text-xs text-slate-500">{profile.global_role}</p></div><Button variant="outline" size="sm" onClick={() => { setFilters({ ...emptyFilters }); void onLogout(); }}><LogOut className="size-4"/><span className="hidden sm:inline">Cerrar sesión</span><span className="sr-only sm:hidden">Cerrar sesión</span></Button></div></header>
       <main className="mx-auto w-full max-w-[1480px] p-4 md:p-7"><GlobalFilters compact={active === "periodos"}/>
+        {(active === "motor" || active === "periodos") && (planningRunId || runs.data?.some(r => r.status === "READY")) && <label className="mb-3 flex items-center gap-2 text-sm">Corrida de planeación
+          <select value={planningRunId ?? ""} onChange={e => selectPlanningRun(e.target.value || null)} className="rounded border bg-white p-2">
+            <option value="">Plan original G6</option>
+            {planningRunId && !runs.data?.some(r => r.run_id === planningRunId) && <option value={planningRunId}>{planningRunId.slice(0,8)}</option>}
+            {runs.data?.filter(r => r.status === "READY").map(r => <option key={r.run_id} value={r.run_id}>{r.window_start} – {r.window_end} · {r.run_id.slice(0,8)}</option>)}
+          </select></label>}
         {operationalSource.error && sourceReadMessage(operationalSource.errorCode) && <p role="alert" className="mb-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{sourceReadMessage(operationalSource.errorCode)}</p>}
         {operationalSource.data?.forecast_contract && <p role="status" className="mb-4 border-l-2 border-blue-200 pl-3 text-xs text-slate-600">Objetivo Pedido · Hoja {operationalSource.data.target_sheet} · Cierre {operationalSource.data.training_cutoff ?? "sin acreditar"} · Inventario en tienda de Estadística · Generación {operationalSource.data.generation}{!forecastSourceAvailable(operationalSource.data) && ` · ${forecastUnavailableMessage(operationalSource.data)}`}</p>}
         {operationalSource.data?.sales_contract && <p role="status" className="mb-4 border-l-2 border-blue-200 pl-3 text-xs text-slate-600">Ventas: Towell · Hoja {operationalSource.data.sales_sheet} · Inventario: Estadística · Actualización {operationalSource.data.generation}{forecastSourceState(operationalSource.data) === "UNAVAILABLE" ? ` · ${forecastUnavailableMessage(operationalSource.data)}` : ""}</p>}

@@ -89,10 +89,11 @@ function StoredEngineComparison({ scope, horizons, productId }: { scope: Preview
       const name = method ?? "Método no informado";
       methods.set(name, (methods.get(name) ?? 0) + 1);
     }
-    const metric = single ? products[0].candidates.find(row => row.family === family) : undefined;
+    const scoped = stored.evaluation?.families[family === "statistical" ? "STATISTICAL" : family === "ml" ? "ML" : "ENSEMBLE"];
+    const metric = scoped ?? (single ? products[0].candidates.find(row => row.family === family) : undefined);
     return [label, [...methods].map(([name, count]) => `${name} (${count})`).join(" · ") || "Sin método validado guardado",
-      quantity(first?.[field]), single ? percent(metric?.wape) : "—", single ? percent(metric?.bias) : "—",
-      single ? quantity(metric?.observations) : "Sin agregación acreditada", `${covered}/${products.length}`,
+      quantity(first?.[field]), metric ? percent(metric.wape) : "—", metric ? percent(metric.bias) : "—",
+      metric ? `${quantity(metric.observations)}${scoped ? ` · ${stored.evaluation!.covered_variants}/${products.length} variantes · Bias real menos pronóstico` : ""}` : "Sin agregación acreditada", `${covered}/${products.length}`,
       !covered ? "Sin curva validada" : covered < products.length ? "TOTAL PARCIAL" : "Disponible"];
   });
   return <section className="space-y-5" aria-label="Comparativa de resultados almacenados">
@@ -112,7 +113,8 @@ function StoredEngineComparison({ scope, horizons, productId }: { scope: Preview
       const reference = product.suggested_reference;
       const suggested = reference?.status.startsWith("SUGGESTED") ? reference.model ?? reference.strategy : null;
       return <article key={product.product_id} className="rounded-xl border bg-white p-4 text-sm">
-        <h3 className="font-semibold">{product.description} · {product.calculation_code ?? "Sin cálculo compatible"}</h3>
+        <h3 className="font-semibold">{product.description} · {product.calculation_code ?? (product.cold_start ? "Cold Start provisional" : "Sin cálculo compatible")}</h3>
+        {product.cold_start && <details className="mt-2"><summary className="cursor-pointer">{product.cold_start.method} · 12 meses</summary><ForecastGrid headers={["Horizonte", "Mes", "Pedido estimado (piezas)"]} rows={product.cold_start.horizons.map(h => [h.horizon, h.target_period.slice(0,7), quantity(Number(h.value))])}/></details>}
         <p className="mt-2">Referencia sugerida guardada: {suggested ? `${suggested} *` : "Sin sugerencia comparable"}. No es una decisión ni un Champion publicado.</p>
         {reference?.comparison_reason && <p className="mt-1 text-xs text-slate-500">Motivo guardado: {reference.comparison_reason}</p>}
         {reference?.reason_codes?.length ? <p className="mt-1 text-xs text-slate-500">{reference.reason_codes.map(code => ({ STABILITY_CONTROL_FAIL: "El control de estabilidad impide promover el candidato con menor error aislado.", INSUFFICIENT_PRODUCT_OBSERVATIONS: "Faltan observaciones comparables del producto.", PRACTICAL_TIE: "Diferencias de desempeño dentro del empate práctico de la política.", PRACTICAL_EQUIVALENCE: "La política considera equivalentes las diferencias observadas." })[code] ?? "Criterio de la política conservada.").filter((value, index, all) => all.indexOf(value) === index).join(" ")} Criterios conservados: {reference.reason_codes.join(" · ")}</p> : null}

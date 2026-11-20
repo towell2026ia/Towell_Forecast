@@ -30,11 +30,19 @@ export function forecastSourceState(context?: Partial<OperationalReadContext> | 
   const missing = context?.target_source_available === false && context.forecast_available === false && context.training_cutoff === null;
   const unified = context?.forecast_contract === unifiedOrderContract;
   if (unified) {
-    if (context.target_file_sha256 !== unifiedMasterSha || context.planning_start !== "2027-01" || context.planning_end !== "2027-12") return "INVALID";
+    if (context.target_file_sha256 !== unifiedMasterSha) return "INVALID";
+    const revision = (context.generation ?? 0) > 6;
+    if (revision) {
+      if (!month.test(context.training_cutoff ?? "") || !month.test(context.observed_cutoff ?? "")
+        || context.observed_cutoff! < context.first_period! || context.observed_cutoff! > context.training_cutoff!) return "INVALID";
+      const [year, m] = context.training_cutoff!.split("-").map(Number);
+      const expected = (lead: number) => new Date(Date.UTC(year, m-1+lead, 1)).toISOString().slice(0,7);
+      if (context.planning_start !== expected(1) || context.planning_end !== expected(12)) return "INVALID";
+    } else if (context.planning_start !== "2027-01" || context.planning_end !== "2027-12") return "INVALID";
     const scenario = scenarioIdentityFields.some(field => field in context) || (context.generation ?? 0) >= 6;
     if (scenario) {
       if (context.planning_basis !== "OBSERVED_AND_COMMERCIAL_CLOSE" || (context.generation ?? 0) < 6
-        || context.training_cutoff !== "2026-12" || context.observed_cutoff !== "2026-09"
+        || !revision && (context.training_cutoff !== "2026-12" || context.observed_cutoff !== "2026-09")
         || !/^[0-9a-f]{64}$/.test(context.scenario_hash ?? "")) return "INVALID";
     } else if (context.training_cutoff !== "2026-09") return "INVALID";
   } else if (context && scenarioIdentityFields.some(field => field in context)) return "INVALID";
