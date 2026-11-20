@@ -146,14 +146,17 @@ class RollingPlanningService:
         return current
 
     @staticmethod
-    def _catalogue(provider):
+    def _catalogue(provider, *, enrich_status=False, chains=None):
         catalogue = deepcopy(provider.client.catalog_rows())
         # Commercial state belongs to the real product record, never to a
         # statistical classification, recent zeros or inventory availability.
         read = getattr(provider.client, "rows", None)
-        if callable(read):
+        if enrich_status and callable(read):
             states = {}
-            for chain in sorted({r["chain_id"] for r in catalogue}):
+            relevant = {r["chain_id"] for r in catalogue}
+            if chains is not None:
+                relevant.intersection_update(chains)
+            for chain in sorted(relevant):
                 for row in read("products", {"select": "id,chain_id,status", "chain_id": f"eq.{chain}", "order": "id.asc"}):
                     if row.get("chain_id") != chain:
                         raise PreviewError("LINEAGE_MISMATCH", 409)
@@ -167,7 +170,7 @@ class RollingPlanningService:
         idempotency(idempotency_key)
         context = request.get("source_context")
         self._current(provider, context)
-        catalogue = self._catalogue(provider)
+        catalogue = self._catalogue(provider, enrich_status=True, chains=request.get("chain_ids"))
         selected = scope(principal, catalogue, request.get("chain_ids"), request.get("product_ids"), write=True)
         cutoff = context.get("model_cutoff") or context.get("training_cutoff")
         observed = context.get("observed_cutoff") or context.get("training_cutoff")
@@ -283,22 +286,25 @@ class RollingPlanningService:
 
     def list(self, principal, provider):
         permission(principal, READ)
+        catalogue = self._catalogue(provider)
+        allowed = {r["product_id"] for r in catalogue if r.get("chain_id") in principal.chain_ids}
         result = []
         for item in self.store.entries():
-            try:
-                result.append(self.summary(item["run_id"], principal, provider))
-            except PreviewError as error:
-                if error.status != 403:
-                    raise
+            visible = allowed.intersection(item["product_ids"])
+            if visible:
+                result.append(self._summary(item, visible))
         return {"runs": result}
 
-    def selected(self, run_id, principal, provider, request, *, write=False):
+    def selected(self, run_id, principal, provider, request, *, write=False, catalogue=None):
         run = self.store.run(uuid_value(run_id))
         if run is None:
             raise PreviewError("PLANNING_RUN_NOT_READY", 409)
         if request.get("source_context") != run["source_context"]:
             raise PreviewError("OFFICIAL_SOURCE_MISMATCH", 409)
-        selected = scope(principal, self._catalogue(provider), request.get("chain_ids"), request.get("product_ids"), write=write)
+        permission(principal, EXECUTE if write else READ)
+        if catalogue is None:
+            catalogue = self._catalogue(provider)
+        selected = scope(principal, catalogue, request.get("chain_ids"), request.get("product_ids"), write=write)
         members = {r["product_id"]: r for r in run["products"]}
         selected = {pid: row for pid, row in selected.items() if pid in members and members[pid]["chain_id"] == row["chain_id"]}
         if write and set(selected) != set(request["product_ids"]):
@@ -307,8 +313,10 @@ class RollingPlanningService:
 
     def report(self, run_id, principal, provider, request):
         from .rolling_report import report_rows
-        run, selected = self.selected(run_id, principal, provider, request)
-        allowed = [r for r in self._catalogue(provider) if r.get("chain_id") in principal.chain_ids]
+        permission(principal, READ)
+        catalogue = self._catalogue(provider)
+        run, selected = self.selected(run_id, principal, provider, request, catalogue=catalogue)
+        allowed = [r for r in catalogue if r.get("chain_id") in principal.chain_ids]
         return report_rows(run, set(selected), requested_ids=request["product_ids"],
                            allowed_ids={r["product_id"] for r in allowed}, allowed_chains=set(principal.chain_ids))
 

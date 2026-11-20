@@ -154,6 +154,45 @@ class RollingPlanningTests(unittest.TestCase):
         empty = self.service.report(summary["run_id"], base.actor("reader"), self.provider, self.query(summary, product_ids=[base.SECOND]))
         self.assertEqual(empty["calculations"], [])
 
+    def test_read_operations_use_one_current_catalogue_and_no_product_status_requests(self):
+        from unittest.mock import Mock
+        self.provider.client.catalog_rows = Mock(return_value=base.catalogue())
+        self.provider.client.rows = Mock(return_value=[{"id": pid, "chain_id": base.CHAIN, "status": "ACTIVE"} for pid in (base.PRODUCT, base.SECOND)])
+        first = self.ready("first")
+        self.ready("second", self.request(product_ids=[base.SECOND]))
+        operations = [lambda: self.service.summary(first["run_id"], base.actor("reader"), self.provider),
+            lambda: self.service.list(base.actor("reader"), self.provider),
+            lambda: self.service.report(first["run_id"], base.actor("reader"), self.provider, self.query(first)),
+            lambda: self.service.current_champion(first["run_id"], base.actor("reader"), self.provider, self.query(first))]
+        for operation in operations:
+            self.provider.client.catalog_rows.reset_mock()
+            self.provider.client.rows.reset_mock()
+            operation()
+            self.provider.client.catalog_rows.assert_called_once_with()
+            self.provider.client.rows.assert_not_called()
+        # No global cache can retain revoked membership on a later request.
+        self.provider.client.catalog_rows.return_value = [base.catalogue()[1]]
+        with self.assertRaises(PreviewError) as error:
+            self.service.report(first["run_id"], base.actor("reader"), self.provider, self.query(first))
+        self.assertEqual(error.exception.code, "SCOPE_FORBIDDEN")
+        visible = self.service.list(base.actor("reader"), self.provider)
+        self.assertEqual(len(visible["runs"]), 1)
+        self.assertEqual(visible["runs"][0]["product_ids"], [base.SECOND])
+
+    def test_execution_enriches_only_requested_authorized_chains_and_freezes_real_status(self):
+        from unittest.mock import Mock
+        foreign = {"product_id": base.RUN, "chain_id": base.SECOND, "purchase_type": "RS"}
+        self.provider.client.catalog_rows = Mock(return_value=[*base.catalogue(), foreign])
+        self.provider.client.rows = Mock(return_value=[{"id": base.PRODUCT, "chain_id": base.CHAIN, "status": "ACTIVE"},
+                                                       {"id": base.SECOND, "chain_id": base.CHAIN, "status": "INACTIVE"}])
+        result = self.service.create(self.request(), base.actor(), self.provider, idempotency_key="only-one-chain")
+        self.service.close()
+        self.provider.client.rows.assert_called_once_with("products", {"select": "id,chain_id,status", "chain_id": f"eq.{base.CHAIN}", "order": "id.asc"})
+        frozen = self.service.store.request(result["run_id"])
+        self.assertEqual(frozen["inputs"]["metadata"][base.PRODUCT]["status"], "ACTIVE")
+        self.assertEqual(frozen["inputs"]["metadata"][base.SECOND]["status"], "INACTIVE")
+        self.assertNotIn(base.RUN, frozen["inputs"]["metadata"])
+
     def test_explicit_champion_persists_recovers_and_does_not_change_ft_or_old_pointers(self):
         summary = self.ready()
         body = {**self.query(summary), "candidate_family": "STATISTICAL", "confirm": True, "comment": "Synthetic manual selection"}
