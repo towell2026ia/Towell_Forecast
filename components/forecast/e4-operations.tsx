@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { PreviewReadError } from "@/lib/forecast-preview";
+import { COLD_START_ACKNOWLEDGEMENTS, PreviewReadError } from "@/lib/forecast-preview";
 import type { CalculationDetail, CalculationHorizon, CalculationSummary, ChampionFamily, LocalChampions, PreviewClient, SelectionEvent } from "@/lib/forecast-preview";
 import { championFamilies, championFamilyNames, type ChampionSelection } from "@/lib/local-champion";
 import { forecastComposition } from "@/lib/forecast-composition";
@@ -118,7 +118,7 @@ function ChampionControls({ client, selection, canManage, onError }: { client: P
     const request = { source_context: selection.source_context, planning_year: selection.planning_year, run_id: selection.run_id,
       candidate_family: family, chain_ids: [...new Set(ids.map(id => selection.productChains[id]))].sort(), product_ids: [...ids].sort(),
       ...(selection.window_start ? { window_start: selection.window_start, window_end: selection.window_end } : {}),
-      ...(family === "COLD_START" ? { accept_cold_start: true } : {}),
+      ...(family === "COLD_START" ? { accept_cold_start: true, acknowledgements: [...COLD_START_ACKNOWLEDGEMENTS] } : {}),
       confirm: true as const, comment: `Elección explícita ${family}; corrida ${selection.run_id}; plan ${windowLabel}` };
     const signature = JSON.stringify(request);
     if (pending.current?.signature !== signature) pending.current = { signature, key: crypto.randomUUID() };

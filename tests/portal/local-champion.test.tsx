@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { E4Operations } from "../../components/forecast/e4-operations";
-import { RailwayPreviewClient, type LocalChampions, type PreviewClient } from "../../lib/forecast-preview";
+import { COLD_START_ACKNOWLEDGEMENTS, RailwayPreviewClient, type LocalChampionRequest, type LocalChampions, type PreviewClient } from "../../lib/forecast-preview";
 import { localChampionSelection } from "../../lib/local-champion";
 import type { ReportSnapshot } from "../../lib/forecast-reporting";
 import type { OperationalReadContext } from "../../lib/supabase/types";
@@ -135,5 +135,51 @@ describe("Explicit local Champion", () => {
     const client = new RailwayPreviewClient(auth(), "https://backend.example");
     await expect(client.promoteChampion({ ...selection(), candidate_family: "ML", confirm: true, comment: "Synthetic explicit choice" }, "one")).rejects.toThrow("LOCAL_CHAMPION_DISABLED");
     expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("sends all Cold Start acknowledgements only after the existing confirmation is accepted", async () => {
+    const selected = { ...selection(), product_ids: [product], window_start: "2027-01", window_end: "2027-12",
+      productNames: { [product]: "Synthetic new variant" }, eligible: { STATISTICAL: [], ML: [], ENSEMBLE: [], COMMERCIAL_PLAN: [], COLD_START: [product] } };
+    const current = { ...empty(), eligible: 1 };
+    const promoteChampion = vi.fn(async () => "cold-synthetic");
+    const readback = { ...saved(), eligible: 1, products: saved().products.map(row => ({ ...row, id: "cold-synthetic", candidate_family: "COLD_START" as const,
+      product: { ...row.product, candidate_family: "COLD_START" as const, model: "peer_recent_level", origin: "INTERNAL_PEER_ORDER" } })) };
+    const client = { readOnly: true, currentChampion: vi.fn().mockResolvedValueOnce(current).mockResolvedValue(readback), promoteChampion } as unknown as PreviewClient;
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(<E4Operations mode="decision" client={client} chainId={chain} productId={product} canWrite={false} canDecide={false} champion={selected} canChampion/>);
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Champion" }).hasAttribute("disabled")).toBe(false));
+    fireEvent.change(screen.getByRole("combobox", { name: "Champion" }), { target: { value: "COLD_START" } });
+    fireEvent.click(screen.getByRole("button", { name: "Guardar Champion" }));
+    expect(confirm.mock.calls[0][0]).toMatch(/carece de WAPE propio.*desconoce/);
+    expect(promoteChampion).not.toHaveBeenCalled();
+    confirm.mockReturnValue(true);
+    fireEvent.click(screen.getByRole("button", { name: "Guardar Champion" }));
+    await waitFor(() => expect(promoteChampion).toHaveBeenCalledTimes(1));
+    expect(promoteChampion.mock.calls[0]).toEqual([{
+      source_context: source, planning_year: 2027, run_id: run, candidate_family: "COLD_START", chain_ids: [chain], product_ids: [product],
+      window_start: "2027-01", window_end: "2027-12", accept_cold_start: true, acknowledgements: [...COLD_START_ACKNOWLEDGEMENTS],
+      confirm: true, comment: `Elección explícita COLD_START; corrida ${run}; plan 2027-01 a 2027-12`,
+    }, expect.any(String)]);
+  });
+
+  it("keeps the complete rolling Cold Start payload and rejects unconfirmed or incomplete acceptance before any network", async () => {
+    vi.stubEnv("NODE_ENV", "development"); vi.stubEnv("NEXT_PUBLIC_LOCAL_POSTGRES_ENABLED", "true");
+    const fetcher = vi.fn(async (url: string) => url.endsWith("/api/ready") ? Response.json({ local_champion_publication: true })
+      : Response.json({ champion_id: "cold-synthetic", status: "ACTIVE", run_id: run, window_start: "2027-01", window_end: "2027-12", source_context: source }));
+    vi.stubGlobal("fetch", fetcher);
+    const client = new RailwayPreviewClient(auth(), "http://127.0.0.1:8000");
+    const request: LocalChampionRequest = { ...selection(), product_ids: [product], window_start: "2027-01", window_end: "2027-12",
+      candidate_family: "COLD_START", confirm: true, comment: "Synthetic explicit cold acceptance", accept_cold_start: true, acknowledgements: [...COLD_START_ACKNOWLEDGEMENTS] };
+    for (const change of [{ confirm: false }, { accept_cold_start: false }, { acknowledgements: [] }, { acknowledgements: ["COLD_START_METHOD"] }]) {
+      await expect(client.promoteChampion({ ...request, ...change } as LocalChampionRequest, "cold-idempotency")).rejects.toThrow("COLD_START_ACCEPTANCE_REQUIRED");
+      expect(fetcher).not.toHaveBeenCalled();
+    }
+    await expect(client.promoteChampion(request, "cold-idempotency")).resolves.toBe("cold-synthetic");
+    const [url, options] = fetcher.mock.calls.find(([value]) => value.endsWith("/champion/promote")) as unknown as [string, RequestInit];
+    expect(url).toBe(`http://127.0.0.1:8000/api/forecast/planning-runs/${run}/champion/promote`);
+    expect(options.headers).toMatchObject({ Authorization: "Bearer synthetic-only-token", "Idempotency-Key": "cold-idempotency" });
+    expect(JSON.parse(options.body as string)).toEqual({ source_context: source, chain_ids: [chain], product_ids: [product],
+      window_start: "2027-01", window_end: "2027-12", candidate_family: "COLD_START", confirm: true,
+      comment: "Synthetic explicit cold acceptance", accept_cold_start: true, acknowledgements: [...COLD_START_ACKNOWLEDGEMENTS] });
   });
 });

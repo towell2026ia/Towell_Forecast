@@ -59,8 +59,9 @@ export type VintageDetail = { vintage: VintageSummary; run: { id: string; chain_
 export type VintageCapabilities = { vintage_persistence: boolean; official_publication: boolean; champion_publication: boolean;
   rolling_planning_execution?: boolean; forecast_calculation_history?: boolean; forecast_selection?: boolean; capture_center?: boolean; live_learning?: boolean; local_bounded_preview?: boolean; local_champion_publication?: boolean; hosted_champion_publication?: boolean };
 export type ChampionFamily = "STATISTICAL" | "ML" | "ENSEMBLE" | "COMMERCIAL_PLAN" | "COLD_START";
+export const COLD_START_ACKNOWLEDGEMENTS = ["COLD_START_METHOD", "NO_TARGET_WAPE", "UNDETERMINED_INCREMENTAL_EFFECT"] as const;
 export type LocalChampionQuery = { source_context: OperationalReadContext; planning_year: number; chain_ids: string[]; product_ids: string[]; run_id?: string; window_start?: string; window_end?: string };
-export type LocalChampionRequest = LocalChampionQuery & { run_id: string; candidate_family: ChampionFamily; confirm: true; comment: string; accept_cold_start?: boolean };
+export type LocalChampionRequest = LocalChampionQuery & { run_id: string; candidate_family: ChampionFamily; confirm: true; comment: string; accept_cold_start?: boolean; acknowledgements?: string[] };
 export type LocalChampionRecord = { id: string; run_id: string; candidate_family: ChampionFamily; source_context: OperationalReadContext;
   planning_year: number; window_start?: string; window_end?: string; selected_by: string; selected_at: string; objective: "Pedido"; environment: "localhost" | "hosted"; status: "ACTIVE";
   publication_scope: "LOCAL_OPERATIONAL" | "HOSTED_OPERATIONAL"; official_publication: false;
@@ -463,17 +464,23 @@ export class RailwayPreviewClient implements PreviewClient {
   }
   async promoteChampion(request: LocalChampionRequest, idempotencyKey: string) {
     this.localChampionScope(request);
+    if (request.candidate_family === "COLD_START" && (request.confirm !== true || request.accept_cold_start !== true
+      || !Array.isArray(request.acknowledgements) || request.acknowledgements.some(value => typeof value !== "string")
+      || !COLD_START_ACKNOWLEDGEMENTS.every(value => request.acknowledgements!.includes(value)))) throw new PreviewReadError("COLD_START_ACCEPTANCE_REQUIRED");
     if (request.confirm !== true || (!["STATISTICAL", "ML", "ENSEMBLE", "COMMERCIAL_PLAN"].includes(request.candidate_family)
       && !(request.candidate_family === "COLD_START" && request.window_start && request.accept_cold_start === true))
       || !request.run_id || !request.comment.trim() || !idempotencyKey) throw new PreviewReadError("REQUEST_001");
     const source = await this.officialSource(request.source_context);
     if (!championPublicationEnabled(await this.vintageCapabilities())) throw new PreviewReadError(hostedG6Enabled() ? "HOSTED_CHAMPION_DISABLED" : "LOCAL_CHAMPION_DISABLED");
     if (request.window_start) {
-      const result = await this.e4<{champion_id: string; status: string}>(this.planningPath(request.run_id) + "/champion/promote", {
+      const result = await this.e4<{champion_id: string; status: string; run_id: string; window_start: string; window_end: string; source_context: OperationalReadContext}>(this.planningPath(request.run_id) + "/champion/promote", {
         source_context: source, chain_ids: request.chain_ids, product_ids: request.product_ids, window_start: request.window_start, window_end: request.window_end,
         candidate_family: request.candidate_family, confirm: true, comment: request.comment, accept_cold_start: request.accept_cold_start === true,
+        ...(request.candidate_family === "COLD_START" ? { acknowledgements: [...request.acknowledgements!] } : {}),
       }, idempotencyKey);
-      if (!result.champion_id || result.status !== "ACTIVE") throw new PreviewReadError("DATA_READ_FAILED");
+      if (!result.champion_id || result.status !== "ACTIVE" || result.run_id !== request.run_id
+        || result.window_start !== request.window_start || result.window_end !== request.window_end
+        || !matchesOfficialSource(result.source_context, source)) throw new PreviewReadError("DATA_READ_FAILED");
       return result.champion_id;
     }
     const payload: LocalChampionRequest = { source_context: source, planning_year: request.planning_year, run_id: request.run_id,

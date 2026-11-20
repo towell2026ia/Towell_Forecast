@@ -234,7 +234,7 @@ describe("Directorial twelve-month and six-bimester export", () => {
         filters: emptyFilters, setFilters: vi.fn(), profile: { id: "viewer", full_name: "Synthetic", global_role: "VIEWER", status: "ACTIVE" },
         planningRunId: run, planningRuns: [runMeta, priorMeta] } }, createElement(ForecastPeriodsView)));
       const select = await screen.findByRole("combobox", { name: "Comparar exportación con" });
-      expect((select as HTMLSelectElement).value).toBe("");
+      expect(select).toHaveProperty("value", "");
       expect(planningRun).toHaveBeenCalledTimes(1); expect(planningReport).toHaveBeenCalledTimes(1);
       fireEvent.change(select, { target: { value: previousRun } });
       expect(planningRun).toHaveBeenCalledTimes(1); expect(planningReport).toHaveBeenCalledTimes(1);
@@ -243,7 +243,7 @@ describe("Directorial twelve-month and six-bimester export", () => {
       expect(planningRun.mock.calls.map(call => call[0])).toEqual([run, previousRun]);
       expect(planningReport.mock.calls.map(call => call[0])).toEqual([run, previousRun]);
       const comparison = downloaded.find(sheet => sheet.name === "Comparación versiones")!;
-      expect(comparison.rows.every(row => row[6] >= "2027-03" && row[6] <= "2027-12")).toBe(true);
+      expect(comparison.rows.every(row => String(row[6]) >= "2027-03" && String(row[6]) <= "2027-12")).toBe(true);
       expect(comparison.rows.some(row => row[7] === previousRun && row[8] === run)).toBe(true);
     } finally {
       if (create) Object.defineProperty(URL, "createObjectURL", create); else Reflect.deleteProperty(URL, "createObjectURL");
