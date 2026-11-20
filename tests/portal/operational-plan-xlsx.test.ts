@@ -250,4 +250,23 @@ describe("Directorial twelve-month and six-bimester export", () => {
       if (revoke) Object.defineProperty(URL, "revokeObjectURL", revoke); else Reflect.deleteProperty(URL, "revokeObjectURL");
     }
   });
+
+  it("exports a real-shaped Cold Start DTO with omitted optional emission and labels it without inventing a regular calculation", () => {
+    const f = fixture();
+    const provisional = { product_id: "missing", chain_id: "chain-a", issue_period: "2026-09", job_id: run, model: "ANONYMOUS_ANALOG", confidence: "LOW",
+      engine_version: "synthetic", source_context: source, horizons: f.months.map((target_period, index) => ({ horizon: index + 1, target_period, value: 2 })) };
+    f.snapshot.provisionals = [provisional as unknown as ReportSnapshot["provisionals"][number]];
+    const dashboard = periodsDashboard(f.snapshot, [], emptyReportChoice, [null, null]);
+    const sheets = operationalPeriodsSheets(f.snapshot, dashboard, [], [], true);
+    const calculations = sheets.find(sheet => sheet.name === "Cálculos almacenados")!;
+    const row = calculations.rows.find(row => row[2] === "missing" && row[5] === "2027-01")!;
+    expect(row[calculations.headers.indexOf("Estado composición")]).toBe("Cold Start provisional");
+    expect(row[calculations.headers.indexOf("Método Cold Start")]).toBe("ANONYMOUS_ANALOG");
+    expect(row[calculations.headers.indexOf("Corrida Cold Start")]).toBe(run);
+    expect(sheets.find(sheet => sheet.name === "Alcance")!.rows.find(row => row[5] === "missing")![7]).toBe("Cold Start provisional · ANONYMOUS_ANALOG");
+    const detail = sheets.find(sheet => sheet.name === "Detalle del plan")!;
+    expect(detail.rows.filter(row => row[6] === "missing" && String(row[7]).startsWith("Cold Start")).every(row => row[14] === null)).toBe(true);
+    expect(() => planningXlsx(sheets)).not.toThrow();
+    expect("created_at" in provisional).toBe(false);
+  });
 });

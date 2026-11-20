@@ -235,6 +235,7 @@ class RollingPlanningTests(unittest.TestCase):
         report = self.service.report(summary["run_id"], base.actor("reader"), self.provider, query)
         self.assertEqual(report["calculations"], [])
         self.assertEqual(len(report["provisionals"][0]["horizons"]), 12)
+        self.assertEqual(report["provisionals"][0]["created_at"], self.service.store.run(summary["run_id"])["emitted_at"])
         body = {**query, "candidate_family": "COLD_START", "confirm": True,
                 "comment": "Synthetic explicit cold start acceptance", "accept_cold_start": True}
         with self.assertRaises(PreviewError):

@@ -5,6 +5,18 @@ import type { PlanningSheet } from "./planning-results";
 const enc=new TextEncoder();
 const xml=(v:string)=>v.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g,"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;");
 const column=(index:number)=>{let s="";for(let n=index+1;n;n=Math.floor((n-1)/26))s=String.fromCharCode(65+(n-1)%26)+s;return s;};
+function cell(value:unknown,x:number,y:number) {
+  // Runtime DTOs may omit optional metadata. Keep its cell absent, preserving
+  // the column position and distinguishing that absence from an explicit zero.
+  if(value==null)return "";
+  const ref=`${column(x)}${y+1}`;
+  if(typeof value==="number") {
+    if(!Number.isFinite(value))throw new Error("Cantidad inválida");
+    return `<c r="${ref}" s="2"><v>${value}</v></c>`;
+  }
+  if(typeof value!=="string")throw new TypeError("Tipo de celda inválido");
+  return `<c r="${ref}" t="inlineStr" s="${y===3?1:0}"><is><t xml:space="preserve">${xml(value.slice(0,32767))}</t></is></c>`;
+}
 function crc32(bytes:Uint8Array){let c=0xffffffff;for(const b of bytes){c^=b;for(let j=0;j<8;j++)c=(c>>>1)^((c&1)?0xedb88320:0);}return (c^0xffffffff)>>>0;}
 function zip(files:[string,string][]) {
   const chunks:Uint8Array[]=[],central:Uint8Array[]=[];let offset=0;
@@ -29,7 +41,7 @@ export function planningXlsx(sheets:PlanningSheet[]):Uint8Array {
   ];
   sheets.forEach((s,i)=>{
     const rows=[[s.title],[s.note],[],s.headers,...s.rows];
-    const body=rows.map((r,y)=>`<row r="${y+1}">${r.map((v,x)=>v===null?"":typeof v==="number"?`<c r="${column(x)}${y+1}" s="2"><v>${Number.isFinite(v)?v: (()=>{throw new Error("Cantidad inválida");})()}</v></c>`:`<c r="${column(x)}${y+1}" t="inlineStr" s="${y===3?1:0}"><is><t xml:space="preserve">${xml(v.slice(0,32767))}</t></is></c>`).join("")}</row>`).join("");
+    const body=rows.map((r,y)=>`<row r="${y+1}">${r.map((v,x)=>cell(v,x,y)).join("")}</row>`).join("");
     files.push([`xl/worksheets/sheet${i+1}.xml`,`<worksheet xmlns="${ns}"><sheetViews><sheetView workbookViewId="0"><pane ySplit="4" topLeftCell="A5" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols><col min="1" max="${s.headers.length}" width="24" customWidth="1"/></cols><sheetData>${body}</sheetData><autoFilter ref="A4:${column(s.headers.length-1)}${rows.length}"/></worksheet>`]);
   });
   return zip(files);

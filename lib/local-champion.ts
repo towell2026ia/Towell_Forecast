@@ -88,6 +88,7 @@ export function localChampionSelection(snapshot: ReportSnapshot): ChampionSelect
   const calculations = chooseCalculations(snapshot, emptyReportChoice);
   const eligible: ChampionSelection["eligible"] = { STATISTICAL: [], ML: [], ENSEMBLE: [], COMMERCIAL_PLAN: [], ...(snapshot.planningRun ? { COLD_START: [] } : {}) };
   const runs = new Set<string>();
+  const individualColdStart = new Set<string>();
   const rows = new Map<string, typeof snapshot.horizons>();
   for (const h of snapshot.horizons) rows.set(h.calculation_id, [...(rows.get(h.calculation_id) ?? []), h]);
   for (const product of products) {
@@ -97,6 +98,8 @@ export function localChampionSelection(snapshot: ReportSnapshot): ChampionSelect
       && new Set(cold.horizons.map(h => h.horizon)).size === 12 && cold.horizons.every(h => Number.isInteger(h.horizon) && h.horizon >= 1 && h.horizon <= 12
         && h.target_period.slice(0,7) === addReportMonth(window.start, h.horizon-1) && Number.isFinite(Number(h.value)) && h.value !== null && Number(h.value) >= 0)) {
       eligible.COLD_START!.push(product.id); runs.add(snapshot.planningRun!.run_id);
+      const effect = (cold as unknown as { incremental_effect?: { status?: string } }).incremental_effect?.status;
+      if (!["INCREMENTAL", "SUBSTITUTION_ACCOUNTED", "VERIFIED_INCREMENTAL"].includes(effect ?? "")) individualColdStart.add(product.id);
     }
     const calculation = calculations.get(`${product.chain_id}/${product.id}`);
     const run = calculation?.input_snapshot.planning_run_id;
@@ -121,6 +124,7 @@ export function localChampionSelection(snapshot: ReportSnapshot): ChampionSelect
   }
   if (runs.size !== 1) return null;
   if (snapshot.planningRun && [...runs][0] !== snapshot.planningRun.run_id) return null;
+  if ((eligible.COLD_START?.length ?? 0) > 1 && eligible.COLD_START!.some(id => individualColdStart.has(id))) eligible.COLD_START = [];
   return { source_context: source, planning_year: year, run_id: [...runs][0],
     ...(snapshot.planningRun ? { window_start: window.start, window_end: window.end } : {}),
     chain_ids: [...new Set(products.map(p => p.chain_id))].sort(), product_ids: products.map(p => p.id).sort(),

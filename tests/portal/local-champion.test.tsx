@@ -162,6 +162,27 @@ describe("Explicit local Champion", () => {
     }, expect.any(String)]);
   });
 
+  it("keeps indeterminate Cold Start selectable individually but not as a batch, without hiding forecasts or regular alternatives", () => {
+    const snapshot = fixture();
+    snapshot.planningRun = { run_id: run, status: "READY", created_at: "2026-11-20T00:00:00Z", issue_period: "2026-12",
+      window_start: "2027-01", window_end: "2027-12", source_hash: source.source_hash, generation: source.generation };
+    for (const row of snapshot.calculations) { row.issue_period = "2026-12"; row.cutoff_at = "2026-12-31"; }
+    snapshot.provisionals = [product, second].map(id => ({ product_id: id, chain_id: chain, source_context: source, job_id: run,
+      issue_period: "2026-12", model: "peer_recent_level", created_at: "2026-11-20T00:00:00Z", engine_version: "SYNTHETIC",
+      admission: { manual_selection_allowed: true, status: "REQUIRES_EXPLICIT_ACCEPTANCE" }, incremental_effect: { status: "UNDETERMINED" },
+      horizons: Array.from({ length: 12 }, (_, index) => ({ horizon: index + 1, target_period: `2027-${String(index + 1).padStart(2, "0")}`, value: 12 })) })) as unknown as ReportSnapshot["provisionals"];
+    const group = localChampionSelection(snapshot)!;
+    expect(group.eligible.COLD_START).toEqual([]);
+    expect(group.eligible.STATISTICAL).toEqual([product, second]);
+    expect(group.eligible.ML).toEqual([product]);
+    expect(snapshot.provisionals).toHaveLength(2);
+    expect(snapshot.provisionals.every(row => row.horizons.length === 12)).toBe(true);
+    const individual = localChampionSelection({ ...snapshot, products: snapshot.products.slice(0, 1) })!;
+    expect(individual.eligible.COLD_START).toEqual([product]);
+    for (const row of snapshot.provisionals) Object.assign(row, { incremental_effect: { status: "VERIFIED_INCREMENTAL" } });
+    expect(localChampionSelection(snapshot)?.eligible.COLD_START).toEqual([product, second]);
+  });
+
   it("keeps the complete rolling Cold Start payload and rejects unconfirmed or incomplete acceptance before any network", async () => {
     vi.stubEnv("NODE_ENV", "development"); vi.stubEnv("NEXT_PUBLIC_LOCAL_POSTGRES_ENABLED", "true");
     const fetcher = vi.fn(async (url: string) => url.endsWith("/api/ready") ? Response.json({ local_champion_publication: true })

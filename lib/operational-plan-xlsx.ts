@@ -79,7 +79,7 @@ function curve(snapshot: ReportSnapshot, row: ForecastMatrixRow, months: string[
   }
   if (family === "COLD_START") {
     if (row.provisional) return { ...result, values: months.map(month => literal(row.provisional!.horizons.find(h => h.target_period.slice(0, 7) === month)?.value)),
-      method: row.provisional.model, run: row.provisional.job_id, emission: row.provisional.created_at, status: "Cold Start provisional; sin adopción automática",
+      method: row.provisional.model, run: row.provisional.job_id, emission: row.provisional.created_at ?? null, status: "Cold Start provisional; sin adopción automática",
       consolidatable: coldConsolidatable(row.provisional) };
   }
   const candidate = calculation?.candidate_metrics[family];

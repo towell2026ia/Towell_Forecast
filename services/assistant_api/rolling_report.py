@@ -102,6 +102,7 @@ def report_rows(run, selected_ids, *, requested_ids, allowed_ids=None, allowed_c
                     "job_id": run["run_id"], "run_id": run["run_id"], "issue_period": run["cutoff"],
                     "model": candidate["model"], "method": candidate["model"], "origin": candidate.get("origin"),
                     "engine_version": run.get("engine_version"), "confidence": candidate.get("confidence", "LOW"),
+                    "created_at": run["emitted_at"],
                     "horizons": values, "admission": candidate.get("admission"),
                     "incremental_effect": candidate.get("incremental_effect"), "metrics": candidate.get("metrics"),
                     "source_context": context, "composition": candidate.get("composition"),
