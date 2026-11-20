@@ -7,6 +7,14 @@ import { forecastComposition } from "./forecast-composition";
 import { championFamilyNames, verifiedLocalChampions } from "./local-champion";
 import { operationalPlanSheets, planWindow } from "./operational-plan-xlsx";
 
+/** Operational DTO boundary only; the protected shared workbook writer stays unchanged. */
+export function operationalXlsxCell(value: unknown): PlanningSheet["rows"][number][number] {
+  if (value == null) return null;
+  if (typeof value === "string") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  throw new TypeError("Tipo de celda operativa inválido");
+}
+
 export function operationalPeriodsSheets(snapshot: ReportSnapshot, dashboard: ReturnType<typeof periodsDashboard>, history: HistoricalRow[], inventory: OperationalInventory[], historyComplete = false, options: { previousSnapshot?: ReportSnapshot } = {}): PlanningSheet[] {
   const context = snapshot.sourceContext;
   if (!context) throw new Error("official_source_unavailable");
@@ -37,13 +45,20 @@ export function operationalPeriodsSheets(snapshot: ReportSnapshot, dashboard: Re
   const coldStart = (row: typeof dashboard.matrix.rows[number], period?: string) => row.provisional
     && matchesOfficialSource(row.provisional.source_context, context) && row.provisional.horizons.some(h => (!period || h.target_period.slice(0, 7) === period)
       && h.value != null && Number.isFinite(Number(h.value)) && Number(h.value) >= 0) ? row.provisional : null;
+  const runId = snapshot.planningRun?.run_id;
+  const emitted = new Set(runId ? [
+    ...snapshot.calculations.filter(c => c.input_snapshot.planning_run_id === runId).map(c => c.created_at),
+    ...snapshot.provisionals.filter(p => p.job_id === runId).map(p => p.created_at),
+  ].filter((value): value is string => typeof value === "string" && Number.isFinite(Date.parse(value))) : []);
+  if (emitted.size > 1) throw new Error("report_horizon_lineage");
   const sheets: PlanningSheet[] = [
     { name: "Trazabilidad", title: "Consulta operativa de Períodos", note: "Todas las cantidades comerciales están en piezas.", headers: ["Campo", "Valor"], rows: [
       ["Fuente oficial SHA-256", context.source_hash], ["Actualización", context.generation], ["Primer periodo", context.first_period], ["Último periodo", context.last_period], ["Corte del cálculo", dashboard.cutoff],
       ...(context.sales_training_cutoff && context.sales_training_cutoff !== dashboard.cutoff ? [["Cierre de ventas acreditado", context.sales_training_cutoff]] : []),
       ...(context.forecast_contract ? [["Objetivo", context.objective!], ["Métrica", context.target_metric!], ["Unidad", context.unit!], ["Contrato", context.forecast_contract], ["Hoja objetivo", context.target_sheet!], ["SHA-256 del maestro", context.target_file_sha256!], ["Cierre de Pedido", context.observed_cutoff ?? context.training_cutoff ?? "Sin acreditar"], ["Estado del cálculo", forecastSourceAvailable(context) ? "Disponible" : forecastUnavailableMessage(context)], ["Fuente de inventario", context.inventory_source!]] : []),
       ...(context.forecast_contract === "pedido-unificado-v1" ? [["Inicio del plan anual", window[0]], ["Fin del plan anual", window.at(-1)!],
-        ...(snapshot.planningRun ? [["Corrida seleccionada", snapshot.planningRun.run_id], ["Emisión de corrida", snapshot.planningRun.created_at], ["Estado de corrida", snapshot.planningRun.status]] : []),
+        ...(snapshot.planningRun ? [["Corrida seleccionada", snapshot.planningRun.run_id], ["Emisión de corrida", [...emitted][0] ?? null],
+          ["Creación de solicitud de corrida", snapshot.planningRun.created_at], ["Estado de corrida", snapshot.planningRun.status]] : []),
         ...window.flatMap(period => {
           const horizon = (Number(period.slice(0, 4)) - Number(window[0].slice(0, 4))) * 12 + Number(period.slice(5, 7)) - Number(window[0].slice(5, 7)) + 1;
           const cutoff = snapshot.planningRun?.issue_period ?? context.training_cutoff!;
@@ -100,5 +115,6 @@ export function operationalPeriodsSheets(snapshot: ReportSnapshot, dashboard: Re
         row.order_text, row.delivery_text, row.partial_period ? "Sí" : "No", row.source_reference, row.order_source_reference, row.delivery_source_reference, row.source_sha256,
         row.reported_fill_rate_pct_text ?? row.reported_fill_rate_pct ?? null, context.fulfillment_mode ?? "PAIRED_QUANTITIES"]) }] : []),
   ];
-  return [...sheets, ...operationalPlanSheets(snapshot, dashboard.matrix.rows, options.previousSnapshot)];
+  return [...sheets, ...operationalPlanSheets(snapshot, dashboard.matrix.rows, options.previousSnapshot)]
+    .map(sheet => ({ ...sheet, rows: sheet.rows.map(row => row.map(operationalXlsxCell)) }));
 }

@@ -269,4 +269,17 @@ describe("Directorial twelve-month and six-bimester export", () => {
     expect(() => planningXlsx(sheets)).not.toThrow();
     expect("created_at" in provisional).toBe(false);
   });
+
+  it("traces the original emitted timestamp separately from the request reservation timestamp", () => {
+    const f = fixture();
+    f.snapshot.planningRun = { run_id: run, issue_period: "2026-12", window_start: "2027-01", window_end: "2027-12", status: "READY", source_hash: source.source_hash, generation: source.generation,
+      created_at: "2027-01-01T00:00:00Z" };
+    f.snapshot.calculations.forEach(c => { c.issue_period = "2026-12"; c.cutoff_at = "2026-12-31T23:59:59Z"; c.created_at = "2027-01-01T00:00:01Z"; });
+    const dashboard = periodsDashboard(f.snapshot, [], emptyReportChoice, [null, null]);
+    const trace = operationalPeriodsSheets(f.snapshot, dashboard, [], [])[0];
+    expect(trace.rows).toContainEqual(["Emisión de corrida", "2027-01-01T00:00:01Z"]);
+    expect(trace.rows).toContainEqual(["Creación de solicitud de corrida", "2027-01-01T00:00:00Z"]);
+    f.snapshot.calculations[0].created_at = "2027-01-01T00:00:02Z";
+    expect(() => operationalPeriodsSheets(f.snapshot, dashboard, [], [])).toThrow("report_horizon_lineage");
+  });
 });
